@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # LLM
     anthropic_api_key: str = ""
-    llm_model: str = "claude-sonnet-4-6"
+    llm_model: str = "gpt-5.4-mini"
 
     # MCP / 외부 소스
     notion_api_key: str = ""
