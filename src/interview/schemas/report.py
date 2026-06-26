@@ -1,49 +1,45 @@
-"""평가 결과 계약.
-
-답변별 평가(AnswerEvaluation)를 누적해 역량 모델(CompetencyModel)을 갱신하고,
-면접 종료 후 최종 평가서(FinalReport)를 만든다.
 """
+AnswerEvaluation / CompetencyModel / FinalReport
+
+Assessment 가 매 답변마다 AnswerEvaluation 을 만들고, 이를 CompetencyModel 에
+누적해 강점/약점을 갱신한다. 면접 종료 시 finalize() 가 FinalReport 를 만든다.
+"""
+from __future__ import annotations
+
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from interview.schemas.signals import AnswerQualitySignal
+# signals.py 의 quality 값을 재사용한다 (같은 4종을 일관되게 쓰기 위함)
+from .signals import AnswerQuality
 
 
 class AnswerEvaluation(BaseModel):
-    """답변 1건에 대한 평가 기록. 매 답변마다 만들어 누적한다."""
-
+    """한 답변에 대한 평가 1건."""
     question_id: str
     topic: str
-    answer_text: str
-    signal: AnswerQualitySignal
-    score: float = Field(ge=0.0, le=1.0)  # 정확성/충분성 종합 점수
-    notes: str = ""
+    quality: AnswerQuality
+    accuracy: float = Field(ge=0.0, le=1.0)     # 정확성
+    sufficiency: float = Field(ge=0.0, le=1.0)  # 설명 충분성
+    key_concepts: list[str] = Field(default_factory=list)  # 답변이 짚은 핵심 개념
+    comment: Optional[str] = None
+
+    # (음성 전용) 전달력 보조 평가. 채팅이면 None.
+    delivery_note: Optional[str] = None
 
 
 class CompetencyModel(BaseModel):
-    """면접 동안 누적되는 사용자 역량 모델 (강점/약점)."""
-
-    # topic -> 누적 점수 리스트 (평균으로 강/약 판단)
-    topic_scores: dict[str, list[float]] = Field(default_factory=dict)
-
-    def record(self, topic: str, score: float) -> None:
-        self.topic_scores.setdefault(topic, []).append(score)
-
-    def strengths(self, threshold: float = 0.7) -> list[str]:
-        return [t for t, s in self.topic_scores.items()
-                if s and (sum(s) / len(s)) >= threshold]
-
-    def weaknesses(self, threshold: float = 0.5) -> list[str]:
-        return [t for t, s in self.topic_scores.items()
-                if s and (sum(s) / len(s)) < threshold]
+    """면접 내내 누적되는 역량 상태 (강점/약점)."""
+    # 주제별 점수 누적 (예: {"JPA": 0.8, "JWT": 0.4})
+    topic_scores: dict[str, float] = Field(default_factory=dict)
+    strengths: list[str] = Field(default_factory=list)
+    weaknesses: list[str] = Field(default_factory=list)
 
 
 class FinalReport(BaseModel):
-    """최종 평가서. 화면에 뜨고 결과 저장에도 쓰인다."""
-
-    strengths: list[str] = Field(default_factory=list)
-    weaknesses: list[str] = Field(default_factory=list)
-    topics_to_review: list[str] = Field(default_factory=list)   # 보완 필요 주제
-    next_learning: list[str] = Field(default_factory=list)      # 다음 학습 추천
-    per_answer: list[AnswerEvaluation] = Field(default_factory=list)
-    summary: str = ""
+    """종료 후 사용자에게 보여줄 최종 평가서."""
+    strengths: list[str]
+    weaknesses: list[str]
+    topics_to_improve: list[str]          # 보완이 필요한 기술 주제
+    learning_recommendations: list[str]   # 다음 학습 추천
+    evaluations: list[AnswerEvaluation] = Field(default_factory=list)  # 문항별 평가 모음

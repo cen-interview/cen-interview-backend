@@ -1,28 +1,37 @@
-"""답변 평가 신호.
-
-Assessment 가 답변을 평가한 결과를 Interviewer 에게 넘기는 계약.
-Interviewer 는 이 신호의 quality 값만 보고 다음 행동(다음 질문/꼬리/힌트/확인)을
-라우팅한다. 설계 문서의 answer_quality_signal / missing_keywords 에 해당.
 """
+AnswerQualitySignal — Assessment 가 만들어 Interviewer 에게 넘긴다.
 
-from enum import Enum
+이 신호의 quality 값이 면접 흐름의 '심장'이다.
+Interviewer 는 이 값만 보고 다음 행동을 라우팅한다:
+
+  sufficient → Strategy.next_question   (다음 질문)
+  shallow    → Strategy.next_follow_up  (꼬리 질문)
+  stuck      → Strategy.next_hint       (힌트 질문)
+  conflict   → 확인 질문
+
+⚠️ 합의 포인트: quality 4종으로 충분한가? 가장 먼저 합의할 값.
+"""
+from __future__ import annotations
+
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-
-class QualityLevel(str, Enum):
-    SUFFICIENT = "sufficient"  # 충분 → 다음 질문
-    SHALLOW = "shallow"        # 얕음/애매 → 꼬리 질문
-    STUCK = "stuck"            # 막힘 → 힌트성 질문
-    CONFLICT = "conflict"      # 이전 답변과 충돌 → 확인 질문
+AnswerQuality = Literal["sufficient", "shallow", "stuck", "conflict"]
 
 
 class AnswerQualitySignal(BaseModel):
-    """한 답변에 대한 평가 신호 (Interviewer 라우팅용)."""
+    question_id: str
+    quality: AnswerQuality
 
-    quality: QualityLevel
+    # 답변에서 빠진/짚은 핵심 키워드.
+    # → Strategy 가 꼬리질문/힌트를 만들 때 "뭘 더 물을지" 재료로 쓴다.
+    #   (설계 예시: missing_keywords = ["fetch join", "지연 로딩"])
     missing_keywords: list[str] = Field(default_factory=list)
-    # CONFLICT 인 경우, 어떤 이전 답변/질문과 충돌하는지
-    conflict_with_question_id: str | None = None
-    # 사람이 읽을 수 있는 한 줄 근거 (디버깅/로그용)
-    rationale: str = ""
+    covered_keywords: list[str] = Field(default_factory=list)
+
+    # quality == "conflict" 일 때: 어떤 이전 답변과 충돌하는지
+    conflict_with_question_id: Optional[str] = None
+
+    # 왜 이렇게 판단했는지 (로그/디버깅용, 사용자에겐 안 보여줘도 됨)
+    rationale: Optional[str] = None

@@ -1,40 +1,47 @@
-"""공용 계약(schemas).
-
-⭐ 이 패키지는 4명 모두가 의존하는 "계약"이다. 여기 모델을 바꾸면 다른
-에이전트가 깨질 수 있으니, 변경 시 반드시 팀과 합의하고 같이 수정한다.
-
-다른 모듈은 보통 여기서 바로 import 한다:
-    from interview.schemas import AnswerQualitySignal, Question, ...
 """
+공용 계약 (schemas) 패키지.
 
-from interview.schemas.events import (
+모든 에이전트가 여기서 타입을 import 한다.
+  예: from interview.schemas import Question, AnswerQualitySignal
+
+⚠️ 이 패키지 안의 모델을 수정할 때는 반드시 팀 합의 후 함께 바꾼다.
+"""
+from .events import (
     AnswerSubmitted,
+    BaseEvent,
     EndRequested,
-    InterviewEvent,
-    Mode,
+    InterviewerEvent,
     NoResponseTimeout,
     ReplayRequested,
     SilenceDetected,
 )
-from interview.schemas.evidence import CoverageMap, EvidenceChunk, SourceType
-from interview.schemas.question import Difficulty, Question, QuestionKind
-from interview.schemas.report import (
-    AnswerEvaluation,
-    CompetencyModel,
-    FinalReport,
-)
-from interview.schemas.signals import AnswerQualitySignal, QualityLevel
+from .evidence import EvidenceChunk, RetrievalResult, SourceType
+from .question import Difficulty, Question, QuestionKind
+from .signals import AnswerQuality, AnswerQualitySignal
+from .report import AnswerEvaluation, CompetencyModel, FinalReport
 
 __all__ = [
     # events
-    "Mode", "InterviewEvent", "AnswerSubmitted", "EndRequested",
-    "ReplayRequested", "SilenceDetected", "NoResponseTimeout",
+    "BaseEvent",
+    "AnswerSubmitted",
+    "EndRequested",
+    "SilenceDetected",
+    "ReplayRequested",
+    "NoResponseTimeout",
+    "InterviewerEvent",
     # evidence
-    "EvidenceChunk", "SourceType", "CoverageMap",
+    "EvidenceChunk",
+    "RetrievalResult",
+    "SourceType",
     # question
-    "Question", "Difficulty", "QuestionKind",
+    "Question",
+    "Difficulty",
+    "QuestionKind",
     # signals
-    "AnswerQualitySignal", "QualityLevel",
+    "AnswerQualitySignal",
+    "AnswerQuality",
     # report
-    "AnswerEvaluation", "CompetencyModel", "FinalReport",
+    "AnswerEvaluation",
+    "CompetencyModel",
+    "FinalReport",
 ]

@@ -1,34 +1,34 @@
-"""질문(Question) 관련 계약.
-
-Strategy 가 생성해서 Interviewer 에게 넘기는 질문의 모양.
 """
+Question — Strategy 가 만들어 Interviewer 가 사용자에게 제시한다.
+(음성: TTS / 채팅: 텍스트)
+"""
+from __future__ import annotations
 
-from enum import Enum
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# ⚠️ 합의 포인트: 난이도 단계. easy/medium/hard 3단계로 충분한가?
+Difficulty = Literal["easy", "medium", "hard"]
 
-class Difficulty(str, Enum):
-    EASY = "easy"
-    MEDIUM = "medium"
-    HARD = "hard"
-
-
-class QuestionKind(str, Enum):
-    MAIN = "main"            # 일반 질문
-    FOLLOW_UP = "follow_up"  # 꼬리 질문 (답변이 얕을 때)
-    HINT = "hint"            # 힌트성 질문 (막혔을 때)
-    CONFIRM = "confirm"      # 확인 질문 (이전 답변과 충돌할 때)
+# ⚠️ 합의 포인트: 질문 종류.
+#   main      = 새 주제 첫 질문
+#   follow_up = 꼬리 질문 (답이 얕을 때)
+#   hint      = 힌트성 질문 (막혔을 때)
+#   confirm   = 확인 질문 (이전 답변과 충돌할 때)
+QuestionKind = Literal["main", "follow_up", "hint", "confirm"]
 
 
 class Question(BaseModel):
-    """면접 질문 1건."""
-
     question_id: str
     text: str
     topic: str
     difficulty: Difficulty
-    kind: QuestionKind = QuestionKind.MAIN
+    kind: QuestionKind = "main"
 
-    # 이 질문을 만들 때 참고한 근거 chunk_id 들 (추적/평가에 사용)
-    linked_evidence: list[str] = Field(default_factory=list)
+    # 이 질문이 어떤 근거에서 나왔는지 (EvidenceChunk.chunk_id 목록)
+    # → 나중에 "이 질문 왜 나왔지?" 추적 가능
+    evidence_ids: list[str] = Field(default_factory=list)
+
+    # 꼬리/힌트/확인 질문이면, 어떤 질문에서 파생됐는지
+    parent_question_id: Optional[str] = None
