@@ -1,72 +1,41 @@
 """FastAPI 진입점.
 
-화면/클라이언트와 통신하는 얇은 계층. 비즈니스 로직은 전부 에이전트에 있고,
-여기서는 (1) 인덱싱 트리거, (2) 면접 세션 시작, (3) 이벤트 수신 → 그래프 실행
-정도만 한다. raw 입력은 interviewer.adapters 로 공통 이벤트로 변환한다.
-
 실행:
     uv run uvicorn interview.api.main:app --reload
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from pydantic import BaseModel
 
-from interview.evidence import build_index
-from interview.interviewer.adapters import from_chat, from_voice
+from interview.api.database import Base, engine
 
-app = FastAPI(title="Interview Agent")
+# 모델 import: create_all이 테이블 정보를 알 수 있게 하기 위함
+from interview.api.users.model import User
+from interview.api.auth.model import RefreshToken
 
-
-# ── 1. 근거 자료 준비 (면접 시작 전, 1회) ─────────────────
-class IndexRequest(BaseModel):
-    notion_link: str
-    github_links: list[str] = []
+from interview.api.users.router import router as users_router
+from interview.api.auth.router import router as auth_router
 
 
-@app.post("/index")
-def index(req: IndexRequest):
-    """Notion/GitHub 를 인덱싱해 evidence_store 를 구축한다."""
-    coverage = build_index(req.notion_link, req.github_links)
-    return {"coverage": coverage.model_dump()}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 서버 시작 시 SQLAlchemy 모델 기준으로 없는 테이블 자동 생성
+    Base.metadata.create_all(bind=engine)
+    yield
 
 
-# ── 2. 면접 시작 + 모드 선택 ──────────────────────────────
-class StartRequest(BaseModel):
-    mode: str  # "voice" | "chat"
+app = FastAPI(
+    title="Interview Agent",
+    lifespan=lifespan,
+)
 
 
-@app.post("/sessions")
-def start_session(req: StartRequest):
-    """세션 생성 + 첫 질문 선택.
+# 회원 관련 API
+app.include_router(users_router)
 
-    TODO(담당 C):
-      - SessionState 생성, Strategy/Assessment/Interviewer 조립
-      - graph.build_graph() 실행으로 첫 질문 획득
-      - session_id + 첫 질문 반환
-    """
-    raise NotImplementedError
-
-
-# ── 3. 면접 진행 (이벤트 수신) ────────────────────────────
-class EventRequest(BaseModel):
-    session_id: str
-    mode: str            # "voice" | "chat"
-    payload: dict        # raw 입력 (어댑터가 해석)
-
-
-@app.post("/events")
-def post_event(req: EventRequest):
-    """raw 입력을 공통 이벤트로 변환 후 그래프에 투입, 다음 질문/종료를 반환.
-
-    TODO(담당 C): 세션 로드 → 어댑터 변환 → InterviewerAgent.handle → 응답
-    """
-    event = (
-        from_voice(req.session_id, req.payload)
-        if req.mode == "voice"
-        else from_chat(req.session_id, req.payload)
-    )
-    _ = event
-    raise NotImplementedError
+# 인증 관련 API
+app.include_router(auth_router)
 
 
 @app.get("/health")
