@@ -8,11 +8,13 @@
     uv run uvicorn interview.api.main:app --reload
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from interview.evidence import build_index
 from interview.interviewer.adapters import from_chat, from_voice
+from interview.interviewer.graph import create_session, get_session
+from interview.schemas.events import Mode
 
 app = FastAPI(title="Interview Agent")
 
@@ -37,14 +39,17 @@ class StartRequest(BaseModel):
 
 @app.post("/sessions")
 def start_session(req: StartRequest):
-    """세션 생성 + 첫 질문 선택.
+    """세션 생성 + 첫 질문 선택."""
+    try:
+        mode = Mode(req.mode)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"unknown mode: {req.mode}")
 
-    TODO(담당 C):
-      - SessionState 생성, Strategy/Assessment/Interviewer 조립
-      - graph.build_graph() 실행으로 첫 질문 획득
-      - session_id + 첫 질문 반환
-    """
-    raise NotImplementedError
+    session, first_question = create_session(mode=mode)
+    return {
+        "session_id": session.state.session_id,
+        "question": first_question.model_dump(),
+    }
 
 
 # ── 3. 면접 진행 (이벤트 수신) ────────────────────────────
