@@ -1,9 +1,5 @@
 """FastAPI 진입점.
 
-화면/클라이언트와 통신하는 얇은 계층. 비즈니스 로직은 전부 에이전트에 있고,
-여기서는 (1) 인덱싱 트리거, (2) 면접 세션 시작, (3) 이벤트 수신 → 그래프 실행
-정도만 한다. raw 입력은 interviewer.adapters 로 공통 이벤트로 변환한다.
-
 실행:
     uv run uvicorn interview.api.main:app --reload
 """
@@ -11,34 +7,53 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
 from interview.evidence import build_index
 from interview.interviewer.adapters import from_chat, from_voice
 from interview.interviewer.graph import create_session, get_session
 from interview.schemas.events import Mode
+from interview.api.database import Base, engine
 
-app = FastAPI(title="Interview Agent")
+# 모델 import: create_all이 테이블 정보를 알 수 있게 하기 위함
+from interview.api.users.model import User
+from interview.api.auth.model import RefreshToken
 
-app.add_middleware( # 프론트엔드 연동용
+from interview.api.users.router import router as users_router
+from interview.api.auth.router import router as auth_router
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 서버 시작 시 SQLAlchemy 모델 기준으로 없는 테이블 자동 생성
+    Base.metadata.create_all(bind=engine)
+    yield
+
+app = FastAPI(
+    title="Interview Agent",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── 1. 근거 자료 준비 (면접 시작 전, 1회) ─────────────────
-class IndexRequest(BaseModel):
-    notion_link: str
-    github_links: list[str] = []
 
+# 회원 관련 API
+app.include_router(users_router, prefix="/api")
 
-@app.post("/index")
-def index(req: IndexRequest):
-    """Notion/GitHub 를 인덱싱해 evidence_store 를 구축한다."""
-    coverage = build_index(req.notion_link, req.github_links)
-    return {"coverage": coverage.model_dump()}
+# 인증 관련 API
+app.include_router(auth_router, prefix="/api")
 
+# 임시 ======================
+load_dotenv()
+client = OpenAI()
 
 # ── 2. 면접 시작 + 모드 선택 ──────────────────────────────
 class StartRequest(BaseModel):
@@ -96,7 +111,33 @@ def post_event(req: EventRequest):
         "question": next_question.model_dump() if next_question else None,
     }
 
+@app.post("/api/interview/realtime-transcription/token")
+def create_realtime_transcription_token():
+    token = client.realtime.client_secrets.create(
+        expires_after={
+            "anchor": "created_at",
+            "seconds": 60,
+        },
+        session={
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "transcription": {
+                        "model": "gpt-realtime-whisper",
+                        "language": "ko",
+                        "delay": "high",
+                    },
+                    "turn_detection": None,
+                },
+            },
+        },
+    )
 
-@app.get("/health")
+    return {
+        "value": token.value,
+        "expires_at": token.expires_at,
+    }
+
+@app.get("/api/health")
 def health():
     return {"status": "ok"}
