@@ -10,12 +10,12 @@
 from interview.schemas.events import (
     AnswerSubmitted,
     EndRequested,
-    InterviewEvent,
+    InterviewerEvent,
     Mode,
 )
 
 
-def from_chat(session_id: str, payload: dict) -> InterviewEvent:
+def from_chat(session_id: str, payload: dict) -> InterviewerEvent:
     """채팅 모드 raw payload → 이벤트.
 
     TODO(담당 C):
@@ -33,7 +33,7 @@ def from_chat(session_id: str, payload: dict) -> InterviewEvent:
     raise ValueError(f"unknown chat action: {action}")
 
 
-def from_voice(session_id: str, payload: dict) -> InterviewEvent:
+def from_voice(session_id: str, payload: dict) -> InterviewerEvent:
     """음성 모드 raw payload → 이벤트.
 
     TODO(담당 C):

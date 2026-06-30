@@ -17,6 +17,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from enum import Enum
+
 
 class BaseEvent(BaseModel):
     """모든 이벤트 공통 필드."""
@@ -70,3 +72,17 @@ InterviewerEvent = (
     | ReplayRequested
     | NoResponseTimeout
 )
+
+# 현재 events 스키마의 의도와 다르게 events.py 에서 Mode 를 요청하는게 있음
+
+class Mode(str, Enum):
+    """
+    [Stub] 면접 진행 모드 (채팅 / 음성)
+    interviewer/session.py 에서 임포트하여 사용합니다.
+    """
+    CHAT = "chat"
+    VOICE = "voice"
+    
+    # 팀원 C가 소문자로 썼을 경우를 대비해 소문자 속성도 방어적으로 추가해 둡니다.
+    chat = "chat"
+    voice = "voice"
