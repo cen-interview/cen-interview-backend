@@ -25,7 +25,24 @@ def judge_answer(
     """
     _ = search_evidence(query=question.text, topic=question.topic)
     _ = get_llm(temperature=0.0)
-    raise NotImplementedError
+
+    # [현재 Stub 작동] LLM 채점 대신 답변 길이로 임시 판정
+    length = len((answer_text or "").strip())
+    if length == 0:
+        quality, score = "stuck", 0.0
+    elif length < 20:
+        quality, score = "shallow", 0.4
+    else:
+        quality, score = "sufficient", 0.8
+
+    signal = AnswerQualitySignal(
+        question_id=question.question_id,
+        quality=quality,
+        missing_keywords=[] if quality == "sufficient" else ["핵심 개념"],
+        covered_keywords=[] if quality != "sufficient" else ["핵심 개념"],
+        rationale="[Stub] 답변 길이 기반 임시 판정 (실전엔 LLM judge로 교체)",
+    )
+    return signal, score
 
 
 def check_conflict(
@@ -35,4 +52,5 @@ def check_conflict(
 
     TODO(담당 D): prompts.CONFLICT_CHECK_SYSTEM 으로 이전 답변들과 대조
     """
-    raise NotImplementedError
+    # [현재 Stub 작동] 항상 충돌 없음으로 처리
+    return None

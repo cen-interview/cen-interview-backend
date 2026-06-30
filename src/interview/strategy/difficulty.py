@@ -5,7 +5,7 @@
 """
 
 from interview.schemas.question import Difficulty
-from interview.schemas.signals import AnswerQualitySignal, AnswerQuality
+from interview.schemas.signals import AnswerQualitySignal
 from interview.strategy.state import StrategyState
 
 
@@ -20,7 +20,7 @@ def next_difficulty(
       - 쉬운 질문만 계속 나오지 않게 균형도 고려
     """
     if last_signal is None:
-        return Difficulty.EASY
-    if last_signal.quality == AnswerQuality.SUFFICIENT:
-        return Difficulty.MEDIUM  # TODO: 단계적 상승 로직
-    return Difficulty.EASY
+        return "easy"
+    if last_signal.quality == "sufficient":
+        return "medium"  # TODO: 단계적 상승 로직
+    return "easy"

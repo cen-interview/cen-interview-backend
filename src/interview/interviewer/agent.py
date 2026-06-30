@@ -62,10 +62,18 @@ class InterviewerAgent:
 
     def _on_answer(self, event: AnswerSubmitted) -> Question | None:
         """답변 처리: Assessment 에 평가 위임 후 신호로 라우팅."""
+        # AnswerSubmitted 는 delivery_metrics 를 dict 로 묶어 갖고 있지 않고
+        # speech_rate_wpm / filler_count 로 따로 갖고 있다 (채팅 모드면 둘 다 None).
+        delivery_metrics = None
+        if event.speech_rate_wpm is not None or event.filler_count is not None:
+            delivery_metrics = {
+                "speech_rate_wpm": event.speech_rate_wpm,
+                "filler_count": event.filler_count,
+            }
         signal = self.assessment.evaluate(
             question=self.session.current_question,
-            answer_text=event.answer_text,
-            delivery_metrics=event.delivery_metrics,
+            answer_text=event.text,
+            delivery_metrics=delivery_metrics,
         )
         if self.session.is_done():
             self.session.finished = True
@@ -95,5 +103,17 @@ class InterviewerAgent:
         self.session.asked_count += 1
 
     def _confirm_question(self, signal: AnswerQualitySignal) -> Question:
-        """이전 답변과 충돌 시 확인 질문. TODO(담당 C)."""
-        raise NotImplementedError
+        """이전 답변과 충돌 시 확인 질문."""
+        # [현재 Stub 작동] 실제 LLM 문구 생성 대신 고정 템플릿 사용
+        current = self.session.current_question
+        return Question(
+            question_id=f"q_confirm_{self.session.asked_count}",
+            text=(
+                f"[확인] 방금 답변이 이전 답변(질문 {signal.conflict_with_question_id})과 "
+                "다소 다른 것 같습니다. 어느 쪽이 맞는지 다시 한번 설명해주실 수 있나요?"
+            ),
+            topic=current.topic,
+            difficulty=current.difficulty,
+            kind="confirm",
+            parent_question_id=signal.conflict_with_question_id,
+        )
