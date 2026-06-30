@@ -9,6 +9,7 @@
 """
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from interview.evidence import build_index
@@ -18,6 +19,13 @@ from interview.schemas.events import Mode
 
 app = FastAPI(title="Interview Agent")
 
+app.add_middleware( # 프론트엔드 연동용
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ── 1. 근거 자료 준비 (면접 시작 전, 1회) ─────────────────
 class IndexRequest(BaseModel):
@@ -87,3 +95,8 @@ def post_event(req: EventRequest):
         "finished": False,
         "question": next_question.model_dump() if next_question else None,
     }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

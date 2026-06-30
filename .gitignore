@@ -9,9 +9,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Vector store (로컬 인덱싱 결과)
-.evidence_store/
-
 # uv
 # uv.lock 은 커밋합니다 (환경 재현). 아래만 무시.
 .uv/

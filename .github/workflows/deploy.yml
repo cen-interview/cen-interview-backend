@@ -1,0 +1,92 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, dev]  # dev 브랜치 push 시에도 작동하도록 개선 & 차후 수정예전
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Import smoke test
+        run: |
+          uv run python -c "import interview.schemas.events"
+          uv run python -c "import interview.strategy"
+          uv run python -c "import interview.api.main"
+
+      - name: Run tests (No-test pass 방어)
+        # pytest 는 수집된 테스트가 0개면 exit code 5 를 반환한다(이건 정상 통과
+        # 시킨다). 그 외 실패(테스트 실패=1, 에러=2 등)는 그대로 CI 를 실패시킨다.
+        # (--pass-them-empty 는 존재하지 않는 옵션이라 항상 즉시 실패했었음)
+        run: |
+          uv run pytest; code=$?
+          if [ $code -eq 5 ]; then
+            echo "No tests found yet, skipping."
+            exit 0
+          fi
+          exit $code
+
+  deploy:
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. Docker Hub 로그인 (혹은 AWS ECR)
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 2. 도커 이미지 빌드 및 푸시
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/interview-agent:latest
+
+      # 3. EC2 원격 접속 후 컨테이너 교체 (ssh-action 사용)
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # 기존 컨테이너 중지 및 삭제
+            docker stop interview-backend || true
+            docker rm interview-backend || true
+            docker image rm ${{ secrets.DOCKERHUB_USERNAME }}/interview-agent:latest || true
+            
+            # 새 이미지 최신화 및 컨테이너 가동 (시크릿 환경변수 주입)
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/interview-agent:latest
+            docker run -d \
+              --name interview-backend \
+              -p 8000:8000 \
+              -e LLM_MODEL="gpt-5.4-mini" \
+              -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+              -e NOTION_API_KEY="${{ secrets.NOTION_API_KEY }}" \
+              -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+              ${{ secrets.DOCKERHUB_USERNAME }}/interview-agent:latest

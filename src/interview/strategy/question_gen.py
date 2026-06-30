@@ -6,8 +6,8 @@
 
 from interview.evidence.retrieval import search_evidence
 from interview.llm import get_llm
-from interview.schemas.question import Difficulty, Question, QuestionKind
-from interview.strategy import prompts
+from interview.schemas.question import Difficulty, Question, QuestionKind  # noqa: F401 (TODO 담당 B: 실제 구현 시 사용)
+from interview.strategy import prompts  # noqa: F401 (TODO 담당 B: 실제 LLM 호출 시 사용)
 
 
 def generate_question(topic: str, difficulty: Difficulty) -> Question:

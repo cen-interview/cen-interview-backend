@@ -7,7 +7,7 @@ from interview.evidence.retrieval import search_evidence
 from interview.llm import get_llm
 from interview.schemas.question import Question
 from interview.schemas.signals import AnswerQualitySignal
-from interview.assessment import prompts
+from interview.assessment import prompts  # noqa: F401 (TODO 담당 D: 실제 LLM 호출 시 사용)
 
 
 def judge_answer(

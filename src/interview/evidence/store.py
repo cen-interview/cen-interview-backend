@@ -1,7 +1,7 @@
 """evidence_store: 벡터 DB 래퍼.
 
-청크를 임베딩해 적재하고, 쿼리로 유사 청크를 검색한다. chromadb 로 시작하되
-이 파일 안에만 DB 의존성을 가둬서 나중에 교체하기 쉽게 한다.
+청크를 임베딩해 적재하고, 쿼리로 유사 청크를 검색한다. Postgres + pgvector 를
+쓰되 이 파일 안에만 DB 의존성을 가둬서 나중에 교체하기 쉽게 한다.
 
   - 적재(add_chunks): 인덱싱 파이프라인이 면접 전 1회 호출
   - 검색(query): Retrieval Tool(retrieval.py)이 런타임에 호출
@@ -12,10 +12,11 @@ from interview.schemas.evidence import CoverageMap, EvidenceChunk
 
 
 class EvidenceStore:
-    def __init__(self, path: str | None = None) -> None:
-        self.path = path or settings.evidence_store_path
-        # TODO(담당 A): chromadb PersistentClient + 컬렉션 초기화
-        self._client = None
+    def __init__(self, database_url: str | None = None) -> None:
+        self.database_url = database_url or settings.database_url
+        # TODO(담당 A): psycopg.connect(self.database_url) + CREATE EXTENSION
+        # vector, 임베딩 컬럼(vector(N)) 테이블/인덱스(ivfflat 등) 초기화
+        self._conn = None
 
         # [Stub 전용] 벡터 DB 대신 인메모리 리스트로 흉내낸다.
         self._chunks: list[EvidenceChunk] = []
@@ -23,7 +24,7 @@ class EvidenceStore:
     def add_chunks(self, chunks: list[EvidenceChunk]) -> None:
         """청크를 임베딩해 저장. 메타데이터도 함께 저장해 검색 후 복원한다.
 
-        TODO(담당 A): 임베딩 → upsert (chunk_id 를 DB id 로)
+        TODO(담당 A): 임베딩 → INSERT ... ON CONFLICT (chunk_id) DO UPDATE
         """
         # [현재 Stub 작동] 임베딩 없이 그대로 적재
         self._chunks.extend(chunks)
@@ -33,7 +34,8 @@ class EvidenceStore:
     ) -> list[EvidenceChunk]:
         """유사 청크 top-k 반환. topic 이 있으면 메타데이터 필터로 좁힌다.
 
-        TODO(담당 A): 벡터 검색 + 메타데이터 필터 → EvidenceChunk 복원
+        TODO(담당 A): query 임베딩 후 pgvector `<->` 거리 연산자로 ORDER BY +
+        LIMIT k (topic 있으면 WHERE 절로 필터) → EvidenceChunk 복원
         """
         # [현재 Stub 작동] 유사도 검색 대신 topic 일치 필터 + 앞에서부터 k개
         candidates = [c for c in self._chunks if topic is None or c.topic == topic]
