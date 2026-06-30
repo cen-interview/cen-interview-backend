@@ -61,19 +61,29 @@ class EventRequest(BaseModel):
 
 @app.post("/events")
 def post_event(req: EventRequest):
-    """raw 입력을 공통 이벤트로 변환 후 그래프에 투입, 다음 질문/종료를 반환.
+    """raw 입력을 공통 이벤트로 변환 후 세션에 투입, 다음 질문/종료를 반환."""
+    try:
+        session = get_session(req.session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"session not found: {req.session_id}")
 
-    TODO(담당 C): 세션 로드 → 어댑터 변환 → InterviewerAgent.handle → 응답
-    """
-    event = (
-        from_voice(req.session_id, req.payload)
-        if req.mode == "voice"
-        else from_chat(req.session_id, req.payload)
-    )
-    _ = event
-    raise NotImplementedError
+    try:
+        event = (
+            from_voice(req.session_id, req.payload)
+            if req.mode == "voice"
+            else from_chat(req.session_id, req.payload)
+        )
+        next_question = session.handle_event(event)
+    except NotImplementedError:
+        # 음성 모드 어댑터(from_voice)는 아직 미구현 (TODO 담당 C)
+        raise HTTPException(status_code=501, detail="voice mode not implemented yet")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
+    if session.is_finished():
+        return {"finished": True, "report": session.finalize().model_dump()}
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+    return {
+        "finished": False,
+        "question": next_question.model_dump() if next_question else None,
+    }
