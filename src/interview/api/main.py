@@ -18,6 +18,8 @@ from interview.api.auth.model import RefreshToken
 from interview.api.users.router import router as users_router
 from interview.api.auth.router import router as auth_router
 
+from dotenv import load_dotenv
+from openai import OpenAI
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -46,6 +48,37 @@ app.include_router(users_router, prefix="/api")
 # 인증 관련 API
 app.include_router(auth_router, prefix="/api")
 
+# 임시 ======================
+load_dotenv()
+client = OpenAI()
+
+
+@app.post("/api/interview/realtime-transcription/token")
+def create_realtime_transcription_token():
+    token = client.realtime.client_secrets.create(
+        expires_after={
+            "anchor": "created_at",
+            "seconds": 60,
+        },
+        session={
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "transcription": {
+                        "model": "gpt-realtime-whisper",
+                        "language": "ko",
+                        "delay": "high",
+                    },
+                    "turn_detection": None,
+                },
+            },
+        },
+    )
+
+    return {
+        "value": token.value,
+        "expires_at": token.expires_at,
+    }
 
 @app.get("/api/health")
 def health():
