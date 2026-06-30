@@ -6,7 +6,7 @@
 
 from interview.schemas.question import Question
 from interview.schemas.report import AnswerEvaluation, CompetencyModel, FinalReport
-from interview.schemas.signals import AnswerQualitySignal, QualityLevel
+from interview.schemas.signals import AnswerQualitySignal
 from interview.assessment import evaluator, report_builder
 
 
