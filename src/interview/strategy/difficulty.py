@@ -27,8 +27,11 @@ def next_difficulty(
         return Difficulty.MEDIUM
 
     if last_signal.quality in (
-        AnswerQuality.SHALLOW,
+        AnswerQuality.BONUS_AVAILABLE,
         AnswerQuality.MISCONCEPTION,
+        AnswerQuality.CONFIRM_POSITIVE,
+        AnswerQuality.CONFIRM_NEGATIVE,
+        AnswerQuality.TRAP_AVAILABLE,
     ):
         return Difficulty.EASY
 

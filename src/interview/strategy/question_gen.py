@@ -3,12 +3,11 @@
 근거를 조회해 실제 질문 문장을 만든다. agent.py 는 이 함수들을 배선만 하고,
 실제 "어떻게 생성하느냐"는 여기에 둔다.
 """
+
 from uuid import uuid4
 
 from interview.evidence.retrieval import search_evidence
-from interview.llm import get_llm
 from interview.schemas.question import Difficulty, Question,QuestionKind
-from interview.strategy import prompts
 
 
 def generate_question(topic: str, difficulty: Difficulty) -> Question:
@@ -33,22 +32,15 @@ def generate_question(topic: str, difficulty: Difficulty) -> Question:
 
 
 
-def generate_follow_up(topic: str, missing_keywords: list[str]) -> Question:
-    """답변이 얕을 때 부족한 키워드를 끌어내는 꼬리 질문 생성.
+def generate_follow_up(topic: str, target: str | None = None) -> Question:
+    """추가 확인 가능한 요소에 대한 꼬리 질문 생성."""
 
-    설계 문서 예시:
-      missing=["fetch join","지연 로딩"] → "N+1 이 지연 로딩 상황에서 어떻게
-      발생하는지 설명하고, fetch join 으로 어떻게 줄이는지 말해보세요."
-
-    TODO(담당 B): prompts.FOLLOW_UP_SYSTEM + 근거 + missing_keywords 로 생성
-    """
-    keyword_text = ", ".join(missing_keywords) if missing_keywords else "핵심 개념"
-
-    evidence_chunks = search_evidence(query=keyword_text, topic=topic)
+    probe = target or "추가로 설명할 수 있는 부분"
+    evidence_chunks = search_evidence(query=probe, topic=topic)
 
     return Question(
         question_id=str(uuid4()),
-        text=f"{topic} 답변에서 {keyword_text} 부분을 조금 더 설명해 주세요.",
+        text=f"{topic} 답변에서 '{probe}' 부분을 조금 더 구체적으로 설명해 주세요.",
         topic=topic,
         difficulty=Difficulty.EASY,
         kind=QuestionKind.FOLLOW_UP,
@@ -57,27 +49,69 @@ def generate_follow_up(topic: str, missing_keywords: list[str]) -> Question:
     )
 
 
+def generate_challenge(topic: str, target: str | None = None) -> Question:
+    """오개념이나 논리적 허점을 검증하는 압박 질문 생성."""
 
-def generate_confirm(
-    topic: str,
-    misconception_note: str | None = None,
-) -> Question:
-    """오개념이 의심될 때 확인 질문 생성."""
-    query = misconception_note or topic
-    evidence_chunks = search_evidence(query=query, topic=topic)
-
-    detail = (
-        f" 특히 '{misconception_note}' 부분을 기준으로 다시 생각해 주세요."
-        if misconception_note
-        else ""
-    )
+    probe = target or "답변의 논리적 근거"
+    evidence_chunks = search_evidence(query=probe, topic=topic)
 
     return Question(
         question_id=str(uuid4()),
-        text=f"{topic} 답변에 오개념이 있을 수 있습니다.{detail} 다시 설명해 주시겠어요?",
+        text=f"{topic} 답변에서 '{probe}' 부분이 조금 더 검증이 필요합니다. 그 근거를 다시 설명해 주시겠어요?",
         topic=topic,
         difficulty=Difficulty.EASY,
-        kind=QuestionKind.CONFIRM,
+        kind=QuestionKind.CHALLENGE,
+        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
+        parent_question_id=None,
+    )
+
+
+def generate_confirm_positive(topic: str, target: str | None = None) -> Question:
+    """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
+
+    probe = target or "답변의 적용 범위"
+    evidence_chunks = search_evidence(query=probe, topic=topic)
+
+    return Question(
+        question_id=str(uuid4()),
+        text=f"좋습니다. {topic}에서 말씀하신 '{probe}' 부분은 실제 프로젝트에서도 그렇게 적용하신 건가요?",
+        topic=topic,
+        difficulty=Difficulty.EASY,
+        kind=QuestionKind.CONFIRM_POSITIVE,
+        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
+        parent_question_id=None,
+    )
+
+
+def generate_confirm_negative(topic: str, target: str | None = None) -> Question:
+    """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
+
+    probe = target or "답변과 근거가 다른 부분"
+    evidence_chunks = search_evidence(query=probe, topic=topic)
+
+    return Question(
+        question_id=str(uuid4()),
+        text=f"{topic}에 대해 말씀하신 내용 중 '{probe}' 부분이 기존 근거와 다르게 보입니다. 다른 프로젝트나 계획 단계였던 부분일까요?",
+        topic=topic,
+        difficulty=Difficulty.EASY,
+        kind=QuestionKind.CONFIRM_NEGATIVE,
+        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
+        parent_question_id=None,
+    )
+
+
+def generate_trap(topic: str, target: str | None = None) -> Question:
+    """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
+
+    probe = target or "헷갈리기 쉬운 개념"
+    evidence_chunks = search_evidence(query=probe, topic=topic)
+
+    return Question(
+        question_id=str(uuid4()),
+        text=f"{topic}에서 '{probe}'와 비슷해 보이지만 다른 개념이 있다면 어떻게 구분하시겠어요?",
+        topic=topic,
+        difficulty=Difficulty.EASY,
+        kind=QuestionKind.TRAP,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
         parent_question_id=None,
     )

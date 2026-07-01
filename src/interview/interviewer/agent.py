@@ -5,11 +5,15 @@
 
 흐름:
   answer_submitted → Assessment 평가 → signal.quality 로 라우팅
-    SUFFICIENT     → 다음 질문   (Strategy.next_question)
-    SHALLOW        → 꼬리 질문   (Strategy.next_follow_up)
-    MISCONCEPTION  → 확인 질문   (Strategy.next_confirm)
+    SUFFICIENT        → 다음 메인 질문
+    BONUS_AVAILABLE   → 꼬리 질문
+    MISCONCEPTION     → 압박 질문
+    CONFIRM_POSITIVE  → 긍정 확인 질문
+    CONFIRM_NEGATIVE  → 부정 확인 질문
+    TRAP_AVAILABLE    → 함정 질문
 
   replay_requested     → 현재 질문 다시 제시
+  silence_detected     → 현재 질문 다시 제시
   end_requested        → 종료
   no_response_timeout  → 종료
 """
@@ -23,6 +27,7 @@ from interview.schemas.events import (
     ReplayRequested,
     SilenceDetected,
 )
+
 from interview.schemas.question import Question, QuestionKind
 from interview.schemas.signals import AnswerQuality
 from interview.interviewer.session import SessionState
@@ -85,17 +90,36 @@ class InterviewerAgent:
         )
 
         topic = current_question.topic
+        target = signal.next_probe_target
 
-        if signal.quality == AnswerQuality.SHALLOW:
+        if signal.quality == AnswerQuality.BONUS_AVAILABLE:
             q = self.strategy.next_follow_up(
                 topic=topic,
-                missing_keywords=signal.missing_keywords,
+                target=target,
             )
 
         elif signal.quality == AnswerQuality.MISCONCEPTION:
-            q = self.strategy.next_confirm(
+            q = self.strategy.next_challenge(
                 topic=topic,
-                misconception_note=signal.misconception_note,
+                target=target,
+            )
+
+        elif signal.quality == AnswerQuality.CONFIRM_POSITIVE:
+            q = self.strategy.next_confirm_positive(
+                topic=topic,
+                target=target,
+            )
+
+        elif signal.quality == AnswerQuality.CONFIRM_NEGATIVE:
+            q = self.strategy.next_confirm_negative(
+                topic=topic,
+                target=target,
+            )
+
+        elif signal.quality == AnswerQuality.TRAP_AVAILABLE:
+            q = self.strategy.next_trap(
+                topic=topic,
+                target=target,
             )
 
         else:  # AnswerQuality.SUFFICIENT

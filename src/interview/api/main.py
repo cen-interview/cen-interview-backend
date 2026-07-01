@@ -24,10 +24,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(
-    title="Interview Agent",
-    lifespan=lifespan,
-)
+app = FastAPI(title="Interview Agent", lifespan=lifespan)
 
 app.include_router(users_router)
 app.include_router(auth_router)
@@ -70,6 +67,7 @@ def create_session():
     return {
         "session_id": session_id,
         "question": question,
+        "finished": session.finished,
     }
 
 
@@ -80,6 +78,13 @@ def submit_answer(session_id: str, request: AnswerRequest):
 
     if session is None or assessment is None:
         raise HTTPException(status_code=404, detail="session not found")
+
+    if session.finished:
+        return {
+            "session_id": session_id,
+            "next_question": None,
+            "finished": True,
+        }
 
     if session.current_question is None:
         raise HTTPException(status_code=400, detail="current question not found")
@@ -108,8 +113,9 @@ def submit_answer(session_id: str, request: AnswerRequest):
 @app.post("/sessions/{session_id}/end")
 def end_session(session_id: str):
     session = sessions.get(session_id)
+    assessment = assessments.get(session_id)
 
-    if session is None:
+    if session is None or assessment is None:
         raise HTTPException(status_code=404, detail="session not found")
 
     event = EndRequested(session_id=session_id)
@@ -117,14 +123,17 @@ def end_session(session_id: str):
     interviewer = InterviewerAgent(
         session=session,
         strategy=StrategyAgent(),
-        assessment=assessments[session_id],
+        assessment=assessment,
     )
 
     interviewer.handle(event)
 
+    report = assessment.finalize()
+
     return {
         "session_id": session_id,
         "finished": session.finished,
+        "report": report,
     }
 
 
