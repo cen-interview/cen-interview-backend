@@ -1,14 +1,10 @@
 """Strategy Agent.
 
-면접 질문의 방향·순서·난이도를 계속 조정하는 전략 담당. LangGraph 노드에서
-호출되는 진입점들을 모아둔다. 실제 생성/난이도 로직은 question_gen / difficulty 에.
-
-Interviewer 와의 협업 (설계 문서 시퀀스):
-  Interviewer ──"꼬리질문 하나 생성해줘, 부족 키워드는 X"──▶ Strategy.next_follow_up
-  Strategy ────"꼬리질문 + 연결 근거"──────────────────────▶ Interviewer
+면접 질문의 방향·순서·난이도를 조정하는 전략 담당.
+Interviewer가 전달한 AnswerQualitySignal을 바탕으로 다음 질문 생성을 question_gen에 위임한다.
 """
 
-from interview.schemas.evidence import CoverageMap
+#from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
 from interview.schemas.signals import AnswerQualitySignal
 from interview.strategy import difficulty, question_gen
@@ -16,34 +12,43 @@ from interview.strategy.state import StrategyState
 
 
 class StrategyAgent:
-    def __init__(self, coverage: CoverageMap) -> None:
+    def __init__(self) -> None:
         self.state = StrategyState()
-        self.coverage = coverage  # 약한 주제 회피/대체에 사용
 
     def next_question(self, last_signal: AnswerQualitySignal | None) -> Question:
-        """다음 일반 질문 선택.
-
+        """
         TODO(담당 B):
           - 아직 적게 다룬 주제 우선 (state.topic_counts)
           - coverage.weak_topics() 는 피하거나 일반 질문으로 대체
           - difficulty.next_difficulty 로 난이도 결정 후 question_gen 호출
           - state 갱신 (asked_topics/difficulties/count)
         """
+
+        """다음 메인 질문 선택."""
         diff = difficulty.next_difficulty(self.state, last_signal)
         topic = self._pick_topic()
         return question_gen.generate_question(topic, diff)
 
-    def next_follow_up(self, topic: str, missing_keywords: list[str]) -> Question:
-        """Interviewer 요청에 따라 꼬리 질문 생성."""
-        return question_gen.generate_follow_up(topic, missing_keywords)
+    def next_follow_up(self, topic: str, target: str | None = None) -> Question:
+        """추가 확인 가능한 요소에 대한 꼬리 질문 생성."""
+        return question_gen.generate_follow_up(topic, target)
 
-    def next_hint(self, topic: str) -> Question:
-        """막힘 상황 힌트성 질문 생성."""
-        return question_gen.generate_hint(topic)
+    def next_challenge(self, topic: str, target: str | None = None) -> Question:
+        """오개념이나 논리적 허점을 검증하는 압박 질문 생성."""
+        return question_gen.generate_challenge(topic, target)
+
+    def next_confirm_positive(self, topic: str, target: str | None = None) -> Question:
+        """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
+        return question_gen.generate_confirm_positive(topic, target)
+
+    def next_confirm_negative(self, topic: str, target: str | None = None) -> Question:
+        """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
+        return question_gen.generate_confirm_negative(topic, target)
+
+    def next_trap(self, topic: str, target: str | None = None) -> Question:
+        """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
+        return question_gen.generate_trap(topic, target)
 
     def _pick_topic(self) -> str:
-        """다음 주제 선택 (주제 쏠림 방지).
-
-        TODO(담당 B): coverage + 이미 물어본 주제 분포로 다음 주제 결정
-        """
-        raise NotImplementedError
+        """다음 주제 선택 임시 스텁."""
+        return "FastAPI"

@@ -19,7 +19,22 @@ def search_evidence(
 
     Strategy / Assessment 가 직접 import 해서 호출하는 일반 함수 버전.
     """
-    return get_store().query(query=query, topic=topic, k=k)
+    try:
+        return get_store().query(query=query, topic=topic, k=k)
+    except NotImplementedError:
+        return [
+            EvidenceChunk(
+                chunk_id="stub-evidence-1",
+                text=f"{query}와 관련된 임시 근거입니다.",
+                source_type="notion",
+                source_url="https://example.com/stub",
+                topic=topic or "unknown",
+                doc_type="stub",
+                week=None,
+                date=None,
+                confidence=0.5,
+            )
+        ]
 
 
 @tool
