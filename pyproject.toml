@@ -22,6 +22,7 @@ dependencies = [
     "bcrypt==4.0.1",
     "python-jose[cryptography]>=3.5.0",
     "column>=0.4.3",
+    "openai>=2.44.0",
 ]
 
 [project.optional-dependencies]

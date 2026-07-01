@@ -2,7 +2,14 @@ from uuid import uuid4
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from interview.api.database import Base, engine
+from interview.api.users.model import User
+from interview.api.auth.model import RefreshToken
+from interview.api.users.router import router as users_router
+from interview.api.auth.router import router as auth_router
 
 from interview.assessment import AssessmentAgent
 from interview.interviewer.agent import InterviewerAgent
@@ -11,11 +18,8 @@ from interview.schemas.events import AnswerSubmitted, EndRequested
 from interview.schemas.question import Difficulty, Question, QuestionKind
 from interview.strategy.agent import StrategyAgent
 
-from interview.api.database import Base, engine
-from interview.api.users.model import User
-from interview.api.auth.model import RefreshToken
-from interview.api.users.router import router as users_router
-from interview.api.auth.router import router as auth_router
+from dotenv import load_dotenv
+from openai import OpenAI
 
 
 @asynccontextmanager
@@ -24,10 +28,22 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Interview Agent", lifespan=lifespan)
+app = FastAPI(
+    title="Interview Agent",
+    lifespan=lifespan,
+)
 
-app.include_router(users_router)
-app.include_router(auth_router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+app.include_router(users_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
 
 
 sessions: dict[str, SessionState] = {}
@@ -38,7 +54,7 @@ class AnswerRequest(BaseModel):
     text: str
 
 
-@app.post("/sessions")
+@app.post("/api/sessions")
 def create_session():
     session_id = str(uuid4())
 
@@ -71,7 +87,7 @@ def create_session():
     }
 
 
-@app.post("/sessions/{session_id}/answer")
+@app.post("/api/sessions/{session_id}/answer")
 def submit_answer(session_id: str, request: AnswerRequest):
     session = sessions.get(session_id)
     assessment = assessments.get(session_id)
@@ -110,7 +126,7 @@ def submit_answer(session_id: str, request: AnswerRequest):
     }
 
 
-@app.post("/sessions/{session_id}/end")
+@app.post("/api/sessions/{session_id}/end")
 def end_session(session_id: str):
     session = sessions.get(session_id)
     assessment = assessments.get(session_id)
@@ -137,6 +153,38 @@ def end_session(session_id: str):
     }
 
 
-@app.get("/health")
+load_dotenv()
+client = OpenAI()
+
+
+@app.post("/api/interview/realtime-transcription/token")
+def create_realtime_transcription_token():
+    token = client.realtime.client_secrets.create(
+        expires_after={
+            "anchor": "created_at",
+            "seconds": 60,
+        },
+        session={
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "transcription": {
+                        "model": "gpt-realtime-whisper",
+                        "language": "ko",
+                        "delay": "high",
+                    },
+                    "turn_detection": None,
+                },
+            },
+        },
+    )
+
+    return {
+        "value": token.value,
+        "expires_at": token.expires_at,
+    }
+
+
+@app.get("/api/health")
 def health():
     return {"status": "ok"}

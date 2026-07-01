@@ -37,14 +37,14 @@ def test_search_evidence_stub_returns_chunk():
     assert chunks[0].topic == "FastAPI"
 
 
-def test_judge_answer_main_returns_shallow_stub():
+def test_judge_answer_main_returns_bonus_available_stub():
     signal = judge_answer(
         question=make_main_question(),
         answer_text="Depends는 의존성 주입입니다.",
     )
 
     assert isinstance(signal, AnswerQualitySignal)
-    assert signal.quality == AnswerQuality.SHALLOW
+    assert signal.quality == AnswerQuality.BONUS_AVAILABLE
 
 
 def test_judge_answer_follow_up_returns_sufficient_stub():
@@ -75,21 +75,54 @@ def test_strategy_next_follow_up_returns_follow_up_question():
 
     question = strategy.next_follow_up(
         topic="FastAPI",
-        missing_keywords=["Depends"],
+        target="Depends의 동작 방식",
     )
 
     assert question.kind == QuestionKind.FOLLOW_UP
 
 
-def test_strategy_next_confirm_returns_confirm_question():
+def test_strategy_next_challenge_returns_challenge_question():
     strategy = StrategyAgent()
 
-    question = strategy.next_confirm(
+    question = strategy.next_challenge(
         topic="FastAPI",
-        misconception_note="Depends는 라우터를 생성하는 기능이라고 설명함",
+        target="Depends를 라우터 생성 기능으로 오해한 부분",
     )
 
-    assert question.kind == QuestionKind.CONFIRM
+    assert question.kind == QuestionKind.CHALLENGE
+
+
+def test_strategy_next_confirm_positive_returns_confirm_positive_question():
+    strategy = StrategyAgent()
+
+    question = strategy.next_confirm_positive(
+        topic="FastAPI",
+        target="Depends를 실제 프로젝트에서 사용한 범위",
+    )
+
+    assert question.kind == QuestionKind.CONFIRM_POSITIVE
+
+
+def test_strategy_next_confirm_negative_returns_confirm_negative_question():
+    strategy = StrategyAgent()
+
+    question = strategy.next_confirm_negative(
+        topic="FastAPI",
+        target="이전 답변 또는 Evidence와 충돌하는 부분",
+    )
+
+    assert question.kind == QuestionKind.CONFIRM_NEGATIVE
+
+
+def test_strategy_next_trap_returns_trap_question():
+    strategy = StrategyAgent()
+
+    question = strategy.next_trap(
+        topic="FastAPI",
+        target="Depends와 라우터의 역할 차이",
+    )
+
+    assert question.kind == QuestionKind.TRAP
 
 
 def test_assessment_agent_evaluate_returns_signal():

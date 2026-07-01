@@ -8,7 +8,7 @@ client = TestClient(app)
 
 def test_session_flow_until_10_main_questions():
     print("\n[1] 세션 생성")
-    response = client.post("/sessions")
+    response = client.post("/api/sessions")
     assert response.status_code == 200
 
     data = response.json()
@@ -25,7 +25,7 @@ def test_session_flow_until_10_main_questions():
         turn += 1
 
         response = client.post(
-            f"/sessions/{session_id}/answer",
+            f"/api/sessions/{session_id}/answer",
             json={"text": f"{turn}번째 임시 답변입니다."},
         )
         assert response.status_code == 200
