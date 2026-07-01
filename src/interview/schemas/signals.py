@@ -13,25 +13,34 @@ Interviewer 는 이 값만 보고 다음 행동을 라우팅한다:
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
+from enum import Enum
 
-AnswerQuality = Literal["sufficient", "shallow", "stuck", "conflict"]
+# ⚠️ 합의 포인트: 답변 품질 종류.
+#   sufficient     = 답변이 충분함 → 다음 일반 질문
+#   shallow        = 답변이 얕거나 핵심 개념이 누락됨 → 꼬리 질문
+#   misconception  = 오개념이 있음 → 확인 질문
 
+class AnswerQuality(str, Enum):
+    SUFFICIENT = "sufficient"
+    SHALLOW = "shallow"
+    MISCONCEPTION = "misconception"
 
 class AnswerQualitySignal(BaseModel):
     question_id: str
     quality: AnswerQuality
 
     # 답변에서 빠진/짚은 핵심 키워드.
-    # → Strategy 가 꼬리질문/힌트를 만들 때 "뭘 더 물을지" 재료로 쓴다.
-    #   (설계 예시: missing_keywords = ["fetch join", "지연 로딩"])
+    # → Strategy 가 꼬리질문/확인 질문을 만들 때 "뭘 더 물을지" 재료로 쓴다.
+    #   예: missing_keywords = ["fetch join", "지연 로딩"]
     missing_keywords: list[str] = Field(default_factory=list)
     covered_keywords: list[str] = Field(default_factory=list)
 
-    # quality == "conflict" 일 때: 어떤 이전 답변과 충돌하는지
-    conflict_with_question_id: Optional[str] = None
+    # quality == AnswerQuality.MISCONCEPTION 일 때:
+    # 어떤 오개념이 있는지 설명한다.
+    misconception_note: Optional[str] = None
 
     # 왜 이렇게 판단했는지 (로그/디버깅용, 사용자에겐 안 보여줘도 됨)
     rationale: Optional[str] = None

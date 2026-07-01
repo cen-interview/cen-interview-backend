@@ -12,10 +12,10 @@ from interview.evidence.chunking import chunk
 from interview.evidence.extract import extract_evidence
 from interview.evidence.sources import GitHubSource, NotionSource
 from interview.evidence.store import get_store
-from interview.schemas.evidence import CoverageMap
+#from interview.schemas.evidence import CoverageMap
 
 
-def build_index(notion_link: str, github_links: list[str]) -> CoverageMap:
+def build_index(notion_link: str, github_links: list[str]) -> dict:
     """면접용 지식 베이스를 구축하고 커버리지 맵을 반환한다.
 
     Args:

@@ -5,18 +5,21 @@
 
 from pydantic import BaseModel, Field
 
-from interview.schemas.events import Mode
 from interview.schemas.question import Question
 from interview.schemas.report import AnswerEvaluation, CompetencyModel
 
 
 class SessionState(BaseModel):
     session_id: str
-    mode: Mode
     max_questions: int = 10
-
     current_question: Question | None = None
     asked_count: int = 0
+
+
+    # 현재 질문 세트의 기준 메인 질문
+    main_question_id: str | None = None
+    main_topic: str | None = None
+
 
     # 누적 평가
     evaluations: list[AnswerEvaluation] = Field(default_factory=list)

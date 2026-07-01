@@ -8,7 +8,7 @@ import pytest
 
 from interview.schemas.evidence import EvidenceChunk, SourceType
 from interview.schemas.question import Difficulty, Question, QuestionKind
-from interview.schemas.signals import AnswerQualitySignal, QualityLevel
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def sample_question() -> Question:
 @pytest.fixture
 def shallow_signal() -> AnswerQualitySignal:
     return AnswerQualitySignal(
-        quality=QualityLevel.SHALLOW,
+        quality=AnswerQuality.SHALLOW,
         missing_keywords=["fetch join", "지연 로딩"],
     )
 
