@@ -18,4 +18,23 @@ def build_report(
       - 약점 기반 next_learning 추천 (LLM 으로 문장화 가능)
       - summary 한 단락 생성
     """
-    raise NotImplementedError
+    strengths = competency.strengths()
+    weaknesses = competency.weaknesses()
+
+    if not strengths:
+        strengths = ["기본 답변 흐름"]
+    if not weaknesses:
+        weaknesses = ["구체적인 근거 설명"]
+
+    recommendations = [
+        f"{topic} 관련 핵심 개념을 정리하고 프로젝트 경험과 연결해 설명해보세요."
+        for topic in weaknesses
+    ]
+
+    return FinalReport(
+        strengths=strengths,
+        weaknesses=weaknesses,
+        topics_to_improve=weaknesses,
+        learning_recommendations=recommendations,
+        evaluations=evaluations,
+    )

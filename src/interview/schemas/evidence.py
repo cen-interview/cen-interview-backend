@@ -9,12 +9,33 @@ evidence 인덱싱 파이프라인(면접 전 1회)이 만들어 evidence_store(
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 # 근거 출처 종류. 새 소스(예: 블로그)를 붙일 일이 없으면 이 둘로 충분.
 SourceType = Literal["notion", "github"]
+
+
+# strategy에서 사용
+class CoverageMap(BaseModel):
+    """주제별 근거 커버리지."""
+
+    topic_confidence: dict[str, float] = Field(default_factory=dict)
+
+    def weak_topics(self, threshold: float = 0.4) -> list[str]:
+        return [
+            topic
+            for topic, confidence in self.topic_confidence.items()
+            if confidence < threshold
+        ]
+
+    def strong_topics(self, threshold: float = 0.7) -> list[str]:
+        return [
+            topic
+            for topic, confidence in self.topic_confidence.items()
+            if confidence >= threshold
+        ]
 
 
 class EvidenceChunk(BaseModel):
@@ -26,9 +47,9 @@ class EvidenceChunk(BaseModel):
     source_type: SourceType
     source_url: str            # 원본 Notion 페이지 / GitHub 파일 URL
     topic: str                 # 기술 주제 (예: "JPA N+1", "JWT 인증")
-    doc_type: Optional[str] = None  # "주차정리"/"회고"/"코드"/"README" 등
-    week: Optional[int] = None      # 주차 (Notion 주차 기록일 때)
-    date: Optional[str] = None      # 날짜 (ISO 문자열, 예 "2026-03-01")
+    doc_type: str | None = None  # "주차정리"/"회고"/"코드"/"README" 등
+    week: int | None = None      # 주차 (Notion 주차 기록일 때)
+    date: str | None = None      # 날짜 (ISO 문자열, 예 "2026-03-01")
 
     # 신뢰도: 내용이 부족한 주제는 낮게 표시한다. (0.0 ~ 1.0)
     confidence: float = Field(ge=0.0, le=1.0)

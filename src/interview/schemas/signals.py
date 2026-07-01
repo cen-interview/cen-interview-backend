@@ -13,7 +13,7 @@ Interviewer 는 이 값만 보고 다음 행동을 라우팅한다:
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -31,7 +31,7 @@ class AnswerQualitySignal(BaseModel):
     covered_keywords: list[str] = Field(default_factory=list)
 
     # quality == "conflict" 일 때: 어떤 이전 답변과 충돌하는지
-    conflict_with_question_id: Optional[str] = None
+    conflict_with_question_id: str | None = None
 
     # 왜 이렇게 판단했는지 (로그/디버깅용, 사용자에겐 안 보여줘도 됨)
-    rationale: Optional[str] = None
+    rationale: str | None = None

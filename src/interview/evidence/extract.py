@@ -4,8 +4,10 @@
 주제/주차/날짜/문서유형/신뢰도 메타데이터를 붙인다.
 """
 
+from hashlib import sha1
+
 from interview.evidence.sources import RawDoc
-from interview.schemas.evidence import EvidenceChunk, SourceType
+from interview.schemas.evidence import EvidenceChunk
 
 
 def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:
@@ -19,4 +21,29 @@ def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:
       - topic 분류 (LLM 또는 규칙 기반)
       - confidence 산정: 내용이 부족하면 낮게
     """
-    raise NotImplementedError
+    text = doc.raw_text.strip()
+    if not text:
+        return []
+
+    topic = doc.meta.get("topic") or doc.title or "general"
+    confidence = float(doc.meta.get("confidence", 0.7))
+    confidence = min(max(confidence, 0.0), 1.0)
+
+    return [
+        EvidenceChunk(
+            chunk_id=_chunk_id(doc),
+            text=text,
+            source_type=doc.source_type,
+            source_url=doc.source_url,
+            topic=topic,
+            doc_type=doc.meta.get("doc_type"),
+            week=doc.meta.get("week"),
+            date=doc.meta.get("date"),
+            confidence=confidence,
+        )
+    ]
+
+
+def _chunk_id(doc: RawDoc) -> str:
+    digest = sha1(f"{doc.source_type}:{doc.source_url}:{doc.title}".encode()).hexdigest()
+    return digest[:12]

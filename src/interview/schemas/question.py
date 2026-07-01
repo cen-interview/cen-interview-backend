@@ -4,7 +4,7 @@ Question — Strategy 가 만들어 Interviewer 가 사용자에게 제시한다
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -31,4 +31,4 @@ class Question(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
     # 꼬리/힌트/확인 질문이면, 어떤 질문에서 파생됐는지
-    parent_question_id: Optional[str] = None
+    parent_question_id: str | None = None

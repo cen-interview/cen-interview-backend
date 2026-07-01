@@ -18,13 +18,12 @@ from interview.assessment import AssessmentAgent
 from interview.schemas.events import (
     AnswerSubmitted,
     EndRequested,
-    InterviewEvent,
+    InterviewerEvent,
     NoResponseTimeout,
     ReplayRequested,
     SilenceDetected,
 )
 from interview.schemas.question import Question
-from interview.schemas.signals import QualityLevel
 from interview.interviewer.session import SessionState
 from interview.strategy import StrategyAgent
 
@@ -40,7 +39,7 @@ class InterviewerAgent:
         self.strategy = strategy
         self.assessment = assessment
 
-    def handle(self, event: InterviewEvent) -> Question | None:
+    def handle(self, event: InterviewerEvent) -> Question | None:
         """이벤트 1건을 처리하고 사용자에게 제시할 다음 질문을 반환한다.
         종료면 None 을 반환하고 session.finished 를 세운다.
 
@@ -62,21 +61,25 @@ class InterviewerAgent:
 
     def _on_answer(self, event: AnswerSubmitted) -> Question | None:
         """답변 처리: Assessment 에 평가 위임 후 신호로 라우팅."""
+        delivery_metrics = {
+            "speech_rate_wpm": event.speech_rate_wpm,
+            "filler_count": event.filler_count,
+        }
         signal = self.assessment.evaluate(
             question=self.session.current_question,
-            answer_text=event.answer_text,
-            delivery_metrics=event.delivery_metrics,
+            answer_text=event.text,
+            delivery_metrics=delivery_metrics,
         )
         if self.session.is_done():
             self.session.finished = True
             return None
 
         topic = self.session.current_question.topic
-        if signal.quality == QualityLevel.SHALLOW:
+        if signal.quality == "shallow":
             q = self.strategy.next_follow_up(topic, signal.missing_keywords)
-        elif signal.quality == QualityLevel.STUCK:
+        elif signal.quality == "stuck":
             q = self.strategy.next_hint(topic)
-        elif signal.quality == QualityLevel.CONFLICT:
+        elif signal.quality == "conflict":
             q = self._confirm_question(signal)  # TODO(담당 C)
         else:  # SUFFICIENT
             q = self.strategy.next_question(last_signal=signal)
@@ -96,4 +99,14 @@ class InterviewerAgent:
 
     def _confirm_question(self, signal) -> Question:
         """이전 답변과 충돌 시 확인 질문. TODO(담당 C)."""
-        raise NotImplementedError
+        current = self.session.current_question
+        return Question(
+            question_id=f"confirm-{current.question_id}",
+            text="방금 답변이 이전 답변과 다르게 들렸습니다. 어떤 설명이 맞는지 다시 정리해 주세요.",
+            topic=current.topic,
+            difficulty=current.difficulty,
+            kind="confirm",
+            evidence_ids=current.evidence_ids,
+            parent_question_id=signal.conflict_with_question_id
+            or current.question_id,
+        )

@@ -3,11 +3,14 @@
 한 번의 면접 동안 유지되는 모든 상태. LangGraph 의 그래프 상태로도 쓰인다.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
-from interview.schemas.events import Mode
 from interview.schemas.question import Question
 from interview.schemas.report import AnswerEvaluation, CompetencyModel
+
+Mode = Literal["voice", "chat"]
 
 
 class SessionState(BaseModel):

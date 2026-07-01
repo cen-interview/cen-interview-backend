@@ -4,6 +4,8 @@
 실제 "어떻게 생성하느냐"는 여기에 둔다.
 """
 
+from uuid import uuid4
+
 from interview.evidence.retrieval import search_evidence
 from interview.llm import get_llm
 from interview.schemas.question import Difficulty, Question, QuestionKind
@@ -18,9 +20,21 @@ def generate_question(topic: str, difficulty: Difficulty) -> Question:
       - prompts.QUESTION_GEN_SYSTEM + 근거로 LLM 호출
       - linked_evidence 에 사용한 chunk_id 기록
     """
-    _ = search_evidence(query=topic, topic=topic)
-    _ = get_llm(temperature=0.4)
-    raise NotImplementedError
+    chunks = search_evidence(query=topic, topic=topic)
+
+    # TODO(담당 B): 실제 구현에서는 get_llm(temperature=0.4)로
+    # prompts.QUESTION_GEN_SYSTEM + chunks를 전달해 질문을 생성한다.
+    _ = get_llm
+    _ = prompts
+
+    return Question(
+        question_id=_question_id("main"),
+        text=f"{topic}에 대해 핵심 개념과 경험을 함께 설명해주세요.",
+        topic=topic,
+        difficulty=difficulty,
+        kind="main",
+        evidence_ids=[chunk.chunk_id for chunk in chunks],
+    )
 
 
 def generate_follow_up(topic: str, missing_keywords: list[str]) -> Question:
@@ -32,7 +46,14 @@ def generate_follow_up(topic: str, missing_keywords: list[str]) -> Question:
 
     TODO(담당 B): prompts.FOLLOW_UP_SYSTEM + 근거 + missing_keywords 로 생성
     """
-    raise NotImplementedError
+    keyword_text = ", ".join(missing_keywords) if missing_keywords else "빠진 핵심 개념"
+    return Question(
+        question_id=_question_id("follow-up"),
+        text=f"{topic} 답변에서 {keyword_text} 부분을 조금 더 구체적으로 설명해주세요.",
+        topic=topic,
+        difficulty="medium",
+        kind="follow_up",
+    )
 
 
 def generate_hint(topic: str) -> Question:
@@ -40,4 +61,14 @@ def generate_hint(topic: str) -> Question:
 
     TODO(담당 B): prompts.HINT_SYSTEM 사용
     """
-    raise NotImplementedError
+    return Question(
+        question_id=_question_id("hint"),
+        text=f"{topic}의 정의, 사용 이유, 주의할 점 순서로 떠올려볼까요?",
+        topic=topic,
+        difficulty="easy",
+        kind="hint",
+    )
+
+
+def _question_id(prefix: QuestionKind | str) -> str:
+    return f"{prefix}-{uuid4().hex[:8]}"

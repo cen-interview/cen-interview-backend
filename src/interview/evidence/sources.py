@@ -7,9 +7,10 @@ extract / chunking / store 가 맡는다 (한 파일에 다 넣지 않는다).
 """
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 
-@dataclass
+@dataclass(frozen=True)
 class RawDoc:
     """긁어온 원본 문서 1건 (추출 전)."""
 
@@ -32,7 +33,25 @@ class NotionSource:
           - 하위 페이지 재귀 순회
           - 주차/날짜/문서유형을 meta 에 채우기
         """
-        raise NotImplementedError
+        if not root_link:
+            return []
+
+        return [
+            RawDoc(
+                source_url=root_link,
+                source_type="notion",
+                title="Notion 학습 기록",
+                raw_text=(
+                    "Java, Spring, Database 학습 내용을 정리한 문서입니다.\n\n"
+                    "트랜잭션, 인덱스, REST API 같은 기술 면접 주제를 포함합니다."
+                ),
+                meta={
+                    "topic": "학습 기록",
+                    "doc_type": "notion_page",
+                    "confidence": 0.7,
+                },
+            )
+        ]
 
 
 class GitHubSource:
@@ -51,4 +70,32 @@ class GitHubSource:
         """
         if len(repo_links) > self.MAX_REPOS:
             repo_links = repo_links[: self.MAX_REPOS]
-        raise NotImplementedError
+
+        docs: list[RawDoc] = []
+        for repo_link in repo_links:
+            if not repo_link:
+                continue
+
+            repo_name = _repo_name(repo_link)
+            docs.append(
+                RawDoc(
+                    source_url=repo_link,
+                    source_type="github",
+                    title=repo_name,
+                    raw_text=(
+                        f"{repo_name} 프로젝트 코드와 README를 요약한 문서입니다.\n\n"
+                        "인증, API 설계, 데이터 저장, 예외 처리 같은 구현 경험을 포함합니다."
+                    ),
+                    meta={
+                        "topic": "프로젝트 경험",
+                        "doc_type": "github_repo",
+                        "confidence": 0.65,
+                    },
+                )
+            )
+        return docs
+
+
+def _repo_name(repo_link: str) -> str:
+    path = urlparse(repo_link).path or repo_link
+    return path.rstrip("/").split("/")[-1].removesuffix(".git") or "github-project"

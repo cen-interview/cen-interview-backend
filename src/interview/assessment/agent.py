@@ -6,7 +6,7 @@
 
 from interview.schemas.question import Question
 from interview.schemas.report import AnswerEvaluation, CompetencyModel, FinalReport
-from interview.schemas.signals import AnswerQualitySignal, QualityLevel
+from interview.schemas.signals import AnswerQualitySignal
 from interview.assessment import evaluator, report_builder
 
 
@@ -36,9 +36,11 @@ class AssessmentAgent:
             AnswerEvaluation(
                 question_id=question.question_id,
                 topic=question.topic,
-                answer_text=answer_text,
-                signal=signal,
-                score=score,
+                quality=signal.quality,
+                accuracy=score,
+                sufficiency=score,
+                key_concepts=signal.covered_keywords,
+                comment=signal.rationale,
             )
         )
         return signal

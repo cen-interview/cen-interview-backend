@@ -31,19 +31,40 @@ class StrategyAgent:
         """
         diff = difficulty.next_difficulty(self.state, last_signal)
         topic = self._pick_topic()
-        return question_gen.generate_question(topic, diff)
+        question = question_gen.generate_question(topic, diff)
+        self._record_question(question)
+        return question
 
     def next_follow_up(self, topic: str, missing_keywords: list[str]) -> Question:
         """Interviewer 요청에 따라 꼬리 질문 생성."""
-        return question_gen.generate_follow_up(topic, missing_keywords)
+        question = question_gen.generate_follow_up(topic, missing_keywords)
+        self._record_question(question)
+        return question
 
     def next_hint(self, topic: str) -> Question:
         """막힘 상황 힌트성 질문 생성."""
-        return question_gen.generate_hint(topic)
+        question = question_gen.generate_hint(topic)
+        self._record_question(question)
+        return question
 
     def _pick_topic(self) -> str:
         """다음 주제 선택 (주제 쏠림 방지).
 
         TODO(담당 B): coverage + 이미 물어본 주제 분포로 다음 주제 결정
         """
-        raise NotImplementedError
+        if not self.coverage.topic_confidence:
+            return "기술 면접"
+
+        topic_counts = self.state.topic_counts()
+        return min(
+            self.coverage.topic_confidence,
+            key=lambda topic: (
+                topic_counts.get(topic, 0),
+                -self.coverage.topic_confidence[topic],
+            ),
+        )
+
+    def _record_question(self, question: Question) -> None:
+        self.state.asked_topics.append(question.topic)
+        self.state.asked_difficulties.append(question.difficulty)
+        self.state.question_count += 1
