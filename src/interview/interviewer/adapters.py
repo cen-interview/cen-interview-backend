@@ -69,14 +69,12 @@ def from_voice(
             session_id=session_id,
             question_id=question_id,
             text=payload.get("text", ""),
-            speech_rate_wpm=payload.get("speech_rate_wpm"),
-            filler_count=payload.get("filler_count"),
         )
 
     if action == "silence":
         return SilenceDetected(
             session_id=session_id,
-            silence_sec=float(payload.get("silence_sec", 0.0)),
+            silence_duration_seconds=float(payload.get("silence_sec", 0.0)),
         )
 
     if action == "replay":
@@ -88,7 +86,7 @@ def from_voice(
     if action == "timeout":
         return NoResponseTimeout(
             session_id=session_id,
-            elapsed_sec=float(payload.get("elapsed_sec", 0.0)),
+            elapsed_seconds=float(payload.get("elapsed_sec", 0.0)),
         )
 
     raise ValueError(f"unknown voice action: {action}")
