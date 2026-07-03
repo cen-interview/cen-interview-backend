@@ -2,7 +2,7 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, dev, feat/strategy]  # ⚠️ feat/strategy 는 임시 테스트용 — 테스트 끝나면 제거할 것
+    branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
@@ -30,6 +30,8 @@ jobs:
       #   run: uv run ruff check .
 
       - name: Import smoke test
+        env:
+          OPENAI_API_KEY: dummy-key-for-ci
         run: |
           uv run python -c "import interview.schemas.events"
           uv run python -c "import interview.strategy"
@@ -48,7 +50,7 @@ jobs:
 
   deploy:
     needs: lint-and-test
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/feat/strategy'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
