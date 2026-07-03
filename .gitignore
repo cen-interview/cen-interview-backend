@@ -24,3 +24,6 @@ __pycache__/
 
 # Claude Code 로컬 설정
 .claude/
+
+# push 전 actions 오류 로컬 체크 용
+check.bat
