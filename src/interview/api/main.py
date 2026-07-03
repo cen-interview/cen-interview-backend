@@ -25,6 +25,8 @@ from interview.api.auth.router import router as auth_router
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from functools import lru_cache
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 서버 시작 시 SQLAlchemy 모델 기준으로 없는 테이블 자동 생성
@@ -53,7 +55,10 @@ app.include_router(auth_router, prefix="/api")
 
 # 임시 ======================
 load_dotenv()
-client = OpenAI()
+
+@lru_cache
+def get_openai_client() -> OpenAI:
+    return OpenAI()
 
 # ── 2. 면접 시작 + 모드 선택 ──────────────────────────────
 class StartRequest(BaseModel):
@@ -113,6 +118,7 @@ def post_event(req: EventRequest):
 
 @app.post("/api/interview/realtime-transcription/token")
 def create_realtime_transcription_token():
+    client = get_openai_client()
     token = client.realtime.client_secrets.create(
         expires_after={
             "anchor": "created_at",
