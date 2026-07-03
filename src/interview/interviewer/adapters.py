@@ -1,10 +1,17 @@
-"""모드 어댑터: 음성/채팅의 raw 입력을 공통 InterviewEvent 로 변환한다.
+"""모드 어댑터: 음성/채팅의 raw 입력을 공통 InterviewEvent로 변환한다.
 
-설계의 핵심 분리점. 여기서 모드 차이를 흡수하면, Interviewer 흐름 로직은
-모드를 몰라도 된다. 새 입력 채널이 생겨도 어댑터만 추가하면 된다.
+설계의 핵심 분리점이다.
+여기서 모드 차이를 흡수하면 Interviewer 흐름 로직은 입력 모드를 몰라도 된다.
+새 입력 채널이 생겨도 어댑터 함수만 추가하면 된다.
 
-  채팅 raw : 제출 버튼 payload / 종료 버튼      → AnswerSubmitted / EndRequested
-  음성 raw : endpointing 결과 / 침묵 / STT 인텐트 / 타임아웃 → 각 이벤트
+변환 예시:
+    채팅 raw:
+        제출 버튼 payload / 종료 버튼
+        -> AnswerSubmitted / EndRequested
+
+    음성 raw:
+        endpointing 결과 / 침묵 / STT 인텐트 / 타임아웃
+        -> AnswerSubmitted / SilenceDetected / ReplayRequested / EndRequested / NoResponseTimeout
 """
 
 from interview.schemas.events import (
@@ -22,12 +29,31 @@ def from_chat(
     question_id: str,
     payload: dict,
 ) -> InterviewerEvent:
-    """채팅 모드 raw payload → 이벤트.
+    """채팅 모드의 raw payload를 공통 InterviewEvent로 변환한다.
 
-    TODO(담당 C):
-      - payload["action"] 가 "submit" 이면 AnswerSubmitted(answer_text=...)
-      - "end" 이면 EndRequested
+    Args:
+        session_id:
+            현재 면접 세션 ID.
+
+        question_id:
+            현재 답변 대상 질문 ID.
+
+        payload:
+            채팅 UI에서 전달된 원본 입력 데이터.
+            action 값에 따라 이벤트 타입이 결정된다.
+
+            지원하는 action:
+                - "submit": 답변 제출
+                - "end": 면접 종료 요청
+
+    Returns:
+        변환된 공통 InterviewEvent 객체.
+
+    Raises:
+        ValueError:
+            지원하지 않는 채팅 action이 전달된 경우.
     """
+
     action = payload.get("action")
 
     if action == "submit":
@@ -36,7 +62,7 @@ def from_chat(
             question_id=question_id,
             text=payload.get("text", ""),
         )
-    
+
     if action == "end":
         return EndRequested(session_id=session_id)
 
@@ -48,18 +74,36 @@ def from_voice(
     question_id: str,
     payload: dict,
 ) -> InterviewerEvent:
-    """음성 모드 raw payload → 이벤트.
+    """음성 모드의 raw payload를 공통 InterviewEvent로 변환한다.
 
-    TODO(담당 C):
-      - endpointing 으로 발화 종료 판정되면 AnswerSubmitted
-        (음향 신호 + 의미적 완결성 함께 보고, 생각하느라 멈춤 vs 진짜 끝 구분)
-      - 침묵 임계 초과 → SilenceDetected
-      - STT 인텐트("다시 들려줘"/"다시 말할게요"/"종료") → Replay/Re-ask/End
-      - 무응답 타임아웃 → NoResponseTimeout
-      - delivery_metrics(말 속도/군더더기 등) 채워서 전달
+    Args:
+        session_id:
+            현재 면접 세션 ID.
+
+        question_id:
+            현재 답변 대상 질문 ID.
+
+        payload:
+            음성 처리 파이프라인에서 전달된 원본 입력 데이터.
+            STT 결과, 침묵 감지, 다시 듣기 요청, 종료 요청, 타임아웃 등을 포함한다.
+
+            지원하는 action:
+                - "submit": STT 답변 제출
+                - "silence": 침묵 감지
+                - "replay": 질문 다시 듣기 요청
+                - "end": 면접 종료 요청
+                - "timeout": 무응답 타임아웃
+
+    Returns:
+        변환된 공통 InterviewEvent 객체.
+
+    Raises:
+        ValueError:
+            지원하지 않는 음성 action이 전달된 경우.
     """
 
     action = payload.get("action")
+
     if action == "submit":
         return AnswerSubmitted(
             session_id=session_id,
