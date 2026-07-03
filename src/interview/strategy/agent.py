@@ -14,6 +14,10 @@ from interview.strategy.state import StrategyState
 class StrategyAgent:
     def __init__(self) -> None:
         self.state = StrategyState()
+        self._topic_idx = 0
+        self._dummy_questions: dict[str, str] = {
+            "FastAPI": "FastAPI에서 Depends를 사용하는 이유는 무엇인가요?",
+        }
 
     def next_question(self, last_signal: AnswerQualitySignal | None) -> Question:
         """
