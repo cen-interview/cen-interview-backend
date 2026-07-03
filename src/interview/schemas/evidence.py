@@ -12,10 +12,13 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+from enum import Enum
+
 
 # 근거 출처 종류. 새 소스(예: 블로그)를 붙일 일이 없으면 이 둘로 충분.
-SourceType = Literal["notion", "github"]
-
+class SourceType(str, Enum):
+    NOTION = "notion"
+    GITHUB = "github"
 
 class EvidenceChunk(BaseModel):
     """면접 근거 한 조각 (개념 설명 / 코드 조각 / 회고 등)."""

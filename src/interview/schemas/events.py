@@ -1,15 +1,23 @@
 """
 Interviewer 입력 이벤트 (음성/채팅 통합)
 
-adapters.py 가 모드별 raw 입력(제출버튼/발화종료감지/침묵 등)을
-아래 이벤트 중 하나로 변환한다.
-Interviewer 는 "모드"를 모른다. 오직 이 이벤트만 받아서 처리한다.
-→ 그래서 음성/채팅 흐름 로직을 한 벌로 공유할 수 있다.
+adapters.py가 모드별 raw 입력을 아래 이벤트 중 하나로 변환한다.
+
+예:
+  - 채팅 제출 버튼
+  - 음성 발화 종료 감지
+  - 침묵 감지
+  - 질문 다시 듣기 요청
+  - 종료 요청
+
+Interviewer는 입력 모드를 직접 알지 않고, 오직 InterviewerEvent만 받아 처리한다.
+따라서 채팅/음성 면접 흐름을 하나의 로직으로 공유할 수 있다.
 
 ⚠️ 합의 포인트
-  - 이벤트 종류를 추가/삭제할 때는 반드시 팀 합의.
-  - 음성 전용 이벤트(침묵/타임아웃 등)는 채팅에선 절대 안 만들어진다.
+  - 이벤트 종류를 추가/삭제할 때는 반드시 팀 합의가 필요하다.
+  - 음성 전용 이벤트는 채팅 모드에서는 생성하지 않는다.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -28,8 +36,13 @@ class BaseEvent(BaseModel):
 
 class AnswerSubmitted(BaseEvent):
     """
-    답변이 제출됨.
-    채팅 = 제출 버튼 / 음성 = 발화 종료 감지(endpointing) → 둘 다 이걸로 변환된다.
+    답변 제출 이벤트.
+
+    채팅:
+      - 사용자가 제출 버튼을 누른 경우
+
+    음성:
+      - 발화 종료 감지 후 STT 결과가 생성된 경우
     """
     type: Literal["answer_submitted"] = "answer_submitted"
     question_id: str
@@ -41,23 +54,48 @@ class AnswerSubmitted(BaseEvent):
 
 
 class EndRequested(BaseEvent):
-    """종료 요청. 채팅 = 종료 버튼 / 음성 = '종료할게요'."""
+    """
+    종료 요청 이벤트.
+
+    채팅:
+      - 종료 버튼 클릭
+
+    음성:
+      - 사용자가 "종료할게요"처럼 종료 의사를 말한 경우
+    """
     type: Literal["end_requested"] = "end_requested"
 
 
 class SilenceDetected(BaseEvent):
-    """(음성 전용) 일정 시간 침묵 = '막힘' 신호 → 힌트 질문으로 연결된다."""
+    """
+    음성 전용 침묵 감지 이벤트.
+
+    일정 시간 답변이 없을 때 생성된다.
+    hint 질문을 별도로 두지 않는 현재 구조에서는
+    Interviewer가 현재 질문을 다시 제시하거나,
+    상황에 따라 꼬리/확인 질문으로 전환할 수 있다.
+    """
     type: Literal["silence_detected"] = "silence_detected"
     silence_sec: float
 
 
 class ReplayRequested(BaseEvent):
-    """(음성 전용) '질문 다시 들려줘' → 직전 질문 TTS 재생."""
+    """
+    음성 전용 질문 재청취 이벤트.
+
+    사용자가 "질문 다시 들려줘"라고 요청하면
+    Interviewer가 현재 질문을 다시 반환하고,
+    음성 어댑터가 이를 TTS로 재생한다.
+    """
     type: Literal["replay_requested"] = "replay_requested"
 
-
 class NoResponseTimeout(BaseEvent):
-    """(음성 전용) 무응답 타임아웃 = 잠들기 대비. 우아하게 일시정지/종료."""
+    """
+    음성 전용 무응답 타임아웃 이벤트.
+
+    장시간 응답이 없을 때 생성된다.
+    세션을 우아하게 일시정지하거나 종료하는 데 사용한다.
+    """
     type: Literal["no_response_timeout"] = "no_response_timeout"
     elapsed_sec: float
 

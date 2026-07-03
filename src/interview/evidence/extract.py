@@ -19,4 +19,13 @@ def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:
       - topic 분류 (LLM 또는 규칙 기반)
       - confidence 산정: 내용이 부족하면 낮게
     """
-    raise NotImplementedError
+    return [
+        EvidenceChunk(
+            chunk_id=f"stub-{doc.doc_id}",
+            text=doc.text[:500],
+            source_type=doc.source_type,
+            source_url=doc.source_url,
+            topic="unknown",
+            confidence=0.5,
+        )
+    ]

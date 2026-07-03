@@ -6,13 +6,9 @@
 
 import pytest
 
-from interview.schemas.evidence import EvidenceChunk
-from interview.schemas.question import Question
-from interview.schemas.signals import AnswerQualitySignal
-
-# 주의: Difficulty/QuestionKind/AnswerQuality/SourceType 은 schemas/ 에서
-# Literal["a","b",...] 타입 별칭이지 Enum 이 아니다. Difficulty.MEDIUM 처럼
-# 점 접근하면 AttributeError 가 난다 — 그냥 문자열 리터럴로 쓴다.
+from interview.schemas.evidence import EvidenceChunk, SourceType
+from interview.schemas.question import Difficulty, Question, QuestionKind
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 
 @pytest.fixture
@@ -30,8 +26,7 @@ def sample_question() -> Question:
 @pytest.fixture
 def shallow_signal() -> AnswerQualitySignal:
     return AnswerQualitySignal(
-        question_id="q1",
-        quality="shallow",
+        quality=AnswerQuality.SHALLOW,
         missing_keywords=["fetch join", "지연 로딩"],
     )
 

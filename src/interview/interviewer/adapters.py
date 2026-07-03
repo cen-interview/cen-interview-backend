@@ -11,10 +11,17 @@ from interview.schemas.events import (
     AnswerSubmitted,
     EndRequested,
     InterviewerEvent,
+    NoResponseTimeout,
+    ReplayRequested,
+    SilenceDetected,
 )
 
 
-def from_chat(session_id: str, payload: dict) -> InterviewerEvent:
+def from_chat(
+    session_id: str,
+    question_id: str,
+    payload: dict,
+) -> InterviewerEvent:
     """채팅 모드 raw payload → 이벤트.
 
     payload 예시:
@@ -25,18 +32,26 @@ def from_chat(session_id: str, payload: dict) -> InterviewerEvent:
     답변 필드명은 answer_text 가 아니라 text 다.
     """
     action = payload.get("action")
+
     if action == "submit":
         return AnswerSubmitted(
             session_id=session_id,
-            question_id=payload.get("question_id", ""),
+
+            question_id=question_id,
             text=payload.get("text", ""),
         )
+    
     if action == "end":
         return EndRequested(session_id=session_id)
+
     raise ValueError(f"unknown chat action: {action}")
 
 
-def from_voice(session_id: str, payload: dict) -> InterviewerEvent:
+def from_voice(
+    session_id: str,
+    question_id: str,
+    payload: dict,
+) -> InterviewerEvent:
     """음성 모드 raw payload → 이벤트.
 
     TODO(담당 C):
@@ -47,4 +62,33 @@ def from_voice(session_id: str, payload: dict) -> InterviewerEvent:
       - 무응답 타임아웃 → NoResponseTimeout
       - delivery_metrics(말 속도/군더더기 등) 채워서 전달
     """
-    raise NotImplementedError
+
+    action = payload.get("action")
+    if action == "submit":
+        return AnswerSubmitted(
+            session_id=session_id,
+            question_id=question_id,
+            text=payload.get("text", ""),
+            speech_rate_wpm=payload.get("speech_rate_wpm"),
+            filler_count=payload.get("filler_count"),
+        )
+
+    if action == "silence":
+        return SilenceDetected(
+            session_id=session_id,
+            silence_sec=float(payload.get("silence_sec", 0.0)),
+        )
+
+    if action == "replay":
+        return ReplayRequested(session_id=session_id)
+
+    if action == "end":
+        return EndRequested(session_id=session_id)
+
+    if action == "timeout":
+        return NoResponseTimeout(
+            session_id=session_id,
+            elapsed_sec=float(payload.get("elapsed_sec", 0.0)),
+        )
+
+    raise ValueError(f"unknown voice action: {action}")
