@@ -190,7 +190,7 @@ class SessionState(BaseModel):
     # 누적 평가 및 마지막 평가 신호
     evaluations: list[AnswerEvaluation] = Field(default_factory=list)
     competency: CompetencyModel = Field(default_factory=CompetencyModel)
-    last_signal: ... | None = None
+    last_signal: dict | None = None
 
     # 마지막 출력 및 턴 상태
     last_utterance: str = ""
