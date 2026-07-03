@@ -8,7 +8,7 @@
 """
 
 from interview.config import settings
-from interview.schemas.evidence import EvidenceChunk
+from interview.schemas.evidence import CoverageMap, EvidenceChunk
 
 
 class EvidenceStore:

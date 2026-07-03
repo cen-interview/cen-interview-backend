@@ -1,5 +1,6 @@
 # 환경변수 / 시크릿
 .env
+.env.compose
 
 # Python
 __pycache__/
@@ -8,6 +9,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+
+# Vector store (로컬 인덱싱 결과)
+.evidence_store/
 
 # uv
 # uv.lock 은 커밋합니다 (환경 재현). 아래만 무시.
