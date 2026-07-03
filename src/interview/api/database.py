@@ -1,3 +1,5 @@
+import os
+
 # SQLAlchemy에서 DB 연결 엔진을 만들 때 사용하는 함수
 from sqlalchemy import create_engine
 
@@ -5,11 +7,16 @@ from sqlalchemy import create_engine
 # ORM 모델들의 부모 클래스 역할을 하는 declarative_base를 가져옴
 from sqlalchemy.orm import sessionmaker, declarative_base
 
+from dotenv import load_dotenv # DB_URL 호출 필요
+
+load_dotenv()
 
 # PostgreSQL DB 접속 주소
 # 형식: postgresql+psycopg://사용자명:비밀번호@호스트:포트/DB이름
-DATABASE_URL = "postgresql+psycopg://interview:1234@localhost:5432/interviewdb"
-
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg://interview:1234@localhost:5432/interviewdb",  # 로컬 개발 fallback
+)
 
 # 실제 DB와 연결하는 엔진 생성
 # SQLAlchemy가 이 엔진을 통해 PostgreSQL과 통신함
