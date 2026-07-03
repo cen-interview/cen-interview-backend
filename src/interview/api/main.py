@@ -152,13 +152,11 @@ def end_session(session_id: str):
         "report": report,
     }
 
-
-load_dotenv()
-client = OpenAI()
-
-
 @app.post("/api/interview/realtime-transcription/token")
 def create_realtime_transcription_token():
+    load_dotenv()
+    client = OpenAI()
+
     token = client.realtime.client_secrets.create(
         expires_after={
             "anchor": "created_at",
