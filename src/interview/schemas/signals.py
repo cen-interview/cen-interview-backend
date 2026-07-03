@@ -58,14 +58,17 @@ class AnswerQuality(str, Enum):
 
 
 class AnswerQualitySignal(BaseModel):
+    answer_id: str
     question_id: str
     quality: AnswerQuality
 
     # 다음 질문에서 무엇을 파고들지
     next_probe_target: str | None = None
 
-    # 왜 이 분기로 갔는지
-    rationale: str | None = None
+    # 해당 quality로 판단한 핵심 평가 요소
+    rationale: list[str] = Field(default_factory=list)
+
+
 
     """
     quality

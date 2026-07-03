@@ -60,18 +60,22 @@ class Difficulty(str, Enum):
     MEDIUM = "medium"
     HARD = "hard"
 
+class QuestionCategory(str, Enum):
+    TECHNICAL_CONCEPT = "technical_concept"
+    PROJECT_IMPLEMENTATION = "project_implementation"
+    TROUBLESHOOTING = "troubleshooting"
 
 class Question(BaseModel):
     question_id: str
     text: str
     topic: str
     difficulty: Difficulty
+
+    # 면접 흐름에서의 질문 역할
     kind: QuestionKind = QuestionKind.MAIN
 
-    # 질문 생성에 사용된 근거 chunk ID 목록.
-    # 나중에 "이 질문이 어떤 Notion/GitHub 근거에서 나왔는지" 추적할 때 사용한다.
-    evidence_ids: list[str] = Field(default_factory=list)
+    # 질문 내용의 평가 유형
+    category: QuestionCategory
 
-    # 일반 질문이 아닌 경우, 어떤 질문에서 파생되었는지 기록한다.
-    # follow_up / challenge / confirm / trap 질문에서 사용한다.
-    parent_question_id: Optional[str] = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    parent_question_id: str | None = None

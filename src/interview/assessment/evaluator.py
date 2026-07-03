@@ -4,8 +4,18 @@
 점수는 여기서 계산하지 않고 scoring.py에서 질문 세트 단위로 계산한다.
 """
 
+import random
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
 from interview.evidence.retrieval import search_evidence
-from interview.schemas.question import Question, QuestionKind
+from interview.schemas.evidence import EvidenceChunk
+from interview.schemas.question import (
+    Question,
+    QuestionCategory,
+    QuestionKind,
+)
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 """
@@ -36,6 +46,14 @@ trap_available
 → Strategy.next_trap()
 """
 
+class JudgeResult(BaseModel):
+    """LLM이 생성해야 하는 답변 평가 결과."""
+
+    quality: AnswerQuality
+
+    next_probe_target: str | None = None
+    # quality 판정에 영향을 준 핵심 키워드
+    rationale: list[str] = Field(default_factory=list)
 
 
 def judge_answer(
@@ -43,35 +61,114 @@ def judge_answer(
     answer_text: str,
     delivery_metrics: dict | None = None,
 ) -> AnswerQualitySignal:
-    """답변 1건을 평가해 Interviewer 라우팅용 신호를 반환한다."""
 
-    _ = search_evidence(
-        query=question.text,
-        topic=question.topic,
+    if question.category == QuestionCategory.PROJECT_IMPLEMENTATION:
+        evidence_chunks = search_evidence(
+            query=question.text,
+            topic=question.topic,
+        )
+    else:
+        evidence_chunks = []
+
+    judge_result = _judge_with_llm(
+        question=question,
+        answer_text=answer_text,
+        evidence_chunks=evidence_chunks,
+        delivery_metrics=delivery_metrics,
     )
 
-    # 후속 질문/압박/확인/함정 질문에 대한 답변은
-    # 현재 스텁 단계에서는 질문 세트가 마무리된 것으로 처리한다.
-    if question.kind in (
-        QuestionKind.FOLLOW_UP,
-        QuestionKind.CHALLENGE,
-        QuestionKind.CONFIRM_POSITIVE,
-        QuestionKind.CONFIRM_NEGATIVE,
-        QuestionKind.TRAP,
-    ):
-        return AnswerQualitySignal(
-            question_id=question.question_id,
+    return AnswerQualitySignal(
+        answer_id=f"answer-{uuid4()}",
+        question_id=question.question_id,
+        quality=judge_result.quality,
+        next_probe_target=judge_result.next_probe_target,
+        rationale=judge_result.rationale,
+    )
+
+
+def _judge_with_llm(
+    question: Question,
+    answer_text: str,
+    evidence_chunks: list[EvidenceChunk],
+    delivery_metrics: dict | None = None,
+) -> JudgeResult:
+    """질문, 답변, Evidence를 비교하여 답변을 평가한다."""
+
+    # TODO: 실제 LLM 연결 시 아래 값들을 프롬프트로 전달
+    _ = answer_text
+    _ = evidence_chunks
+    _ = delivery_metrics
+
+    return _temporary_judge_result(question)
+
+def _temporary_judge_result(
+    question: Question,
+) -> JudgeResult:
+    """LLM 연결 전 랜덤한 임시 평가 결과를 반환한다."""
+
+    _ = question
+
+    temporary_results = [
+        # index 0
+        JudgeResult(
             quality=AnswerQuality.SUFFICIENT,
             next_probe_target=None,
-            rationale="임시 평가: 후속 질문 답변을 통해 현재 질문 세트를 마무리할 수 있다고 판단했습니다.",
-        )
+            rationale=[
+                "핵심 내용 설명 완료",
+                "추가 확인 불필요",
+            ],
+        ),
 
-    # 메인 질문은 현재 스텁 단계에서 항상 꼬리 질문이 가능한 상태로 처리한다.
-    return AnswerQualitySignal(
-        question_id=question.question_id,
-        quality=AnswerQuality.BONUS_AVAILABLE,
-        next_probe_target="핵심 개념의 원인과 실제 적용 방식",
-        rationale="임시 평가: 기본 답변은 가능하지만 원인, 사례, 한계점 등 추가 확인할 요소가 남아 있습니다.",
-    )
+        # index 1
+        JudgeResult(
+            quality=AnswerQuality.BONUS_AVAILABLE,
+            next_probe_target="실제 프로젝트 적용 사례",
+            rationale=[
+                "기본 개념 설명 확인",
+                "실제 적용 사례 부족",
+            ],
+        ),
 
+        # index 2
+        JudgeResult(
+            quality=AnswerQuality.MISCONCEPTION,
+            next_probe_target="핵심 개념의 정확한 역할",
+            rationale=[
+                "핵심 개념 오해",
+                "역할 설명 오류",
+            ],
+        ),
+
+        # index 3
+        JudgeResult(
+            quality=AnswerQuality.CONFIRM_POSITIVE,
+            next_probe_target="기술의 적용 범위",
+            rationale=[
+                "설명은 대체로 정확함",
+                "적용 범위 확인 필요",
+            ],
+        ),
+
+        # index 4
+        JudgeResult(
+            quality=AnswerQuality.CONFIRM_NEGATIVE,
+            next_probe_target="기존 설명과 충돌하는 부분",
+            rationale=[
+                "근거와 일부 불일치",
+                "사실관계 재확인 필요",
+            ],
+        ),
+
+        # index 5
+        JudgeResult(
+            quality=AnswerQuality.TRAP_AVAILABLE,
+            next_probe_target="유사 개념의 차이",
+            rationale=[
+                "유사 개념 혼동 가능성",
+                "개념 구분 확인 필요",
+            ],
+        ),
+    ]
+
+    return random.choice(temporary_results)
 

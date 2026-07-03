@@ -22,27 +22,26 @@ class AnswerEvaluation(BaseModel):
     topic: str
     question: str
 
-    # 사용자 답변
+    # 메인 질문의 첫 답변
     answer: str
+
+    # 질문 세트에 포함된 답변 ID
+    answer_ids: list[str] = Field(default_factory=list)
+
+    # 메인 질문에서 파생된 질문 ID
+    derived_question_ids: list[str] = Field(default_factory=list)
 
     # 질문 세트 최종 품질
     quality: AnswerQuality
 
-    # 점수
     score: float = Field(ge=0.0, le=100.0)
-
-    # 세부 점수
     accuracy: float = Field(ge=0.0, le=1.0)
     sufficiency: float = Field(ge=0.0, le=1.0)
 
-    # 질문 세트 평가
     strengths: list[str] = Field(default_factory=list)
     improvements: list[str] = Field(default_factory=list)
 
-    # 최종 코멘트
     comment: str | None = None
-
-    # 음성 전용
     delivery_note: str | None = None
 
 
