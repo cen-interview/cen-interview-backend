@@ -73,8 +73,8 @@ class InterviewerAgent:
         """답변 처리: Assessment 에 평가 위임 후 신호로 라우팅."""
 
         delivery_metrics = {
-            "speech_rate_wpm": event.speech_rate_wpm,
-            "filler_count": event.filler_count,
+            # 일단 비워둠
+            # 분당 발화 속도 , 음성 공백 시간 등
         }
         
         current_question = self.session.current_question
@@ -86,7 +86,7 @@ class InterviewerAgent:
         signal = self.assessment.evaluate(
             question=current_question,
             answer_text=event.text,
-            delivery_metrics=delivery_metrics,
+            delivery_metrics=None,
         )
 
         topic = current_question.topic
