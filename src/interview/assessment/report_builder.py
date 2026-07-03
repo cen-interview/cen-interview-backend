@@ -13,6 +13,7 @@ def build_report(
 ) -> FinalReport:
     """최종 리포트 작성 스텁."""
 
+
     if evaluations:
         overall_score = sum(e.score for e in evaluations) / len(evaluations)
     else:

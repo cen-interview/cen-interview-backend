@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: ankane/pgvector
+    container_name: cen-interview-pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: interview
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: interviewdb
+    volumes:
+      - cen_interview_pgdata:/var/lib/postgresql/data
+      - ./init-vector.sql:/docker-entrypoint-initdb.d/init-vector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U interview -d interviewdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: ${DOCKERHUB_USERNAME}/interview-agent:latest
+    container_name: interview-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+
+volumes:
+  cen_interview_pgdata:
+    name: cen_interview_pgdata

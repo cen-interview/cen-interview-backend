@@ -28,6 +28,7 @@ from interview.schemas.events import (
     SilenceDetected,
 )
 
+
 from interview.schemas.question import Question, QuestionKind
 from interview.schemas.signals import AnswerQuality
 from interview.interviewer.session import SessionState
@@ -71,6 +72,7 @@ class InterviewerAgent:
 
     def _on_answer(self, event: AnswerSubmitted) -> Question | None:
         """답변 처리: Assessment 에 평가 위임 후 신호로 라우팅."""
+
 
         delivery_metrics = {
             "speech_rate_wpm": event.speech_rate_wpm,
@@ -132,6 +134,7 @@ class InterviewerAgent:
                 self.session.finished = True
                 return None
 
+
             q = self.strategy.next_question(last_signal=signal)
 
             # 새 메인 질문 세트 시작
@@ -150,6 +153,7 @@ class InterviewerAgent:
 
     def _advance_to(self, question: Question) -> None:
         self.session.current_question = question
+
 
         # 메인 질문만 목표 질문 수에 포함한다.
         if question.kind == QuestionKind.MAIN:

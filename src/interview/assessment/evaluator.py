@@ -5,6 +5,7 @@
 """
 
 from interview.evidence.retrieval import search_evidence
+
 from interview.schemas.question import Question, QuestionKind
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
@@ -37,13 +38,13 @@ trap_available
 """
 
 
-
 def judge_answer(
     question: Question,
     answer_text: str,
     delivery_metrics: dict | None = None,
 ) -> AnswerQualitySignal:
     """답변 1건을 평가해 Interviewer 라우팅용 신호를 반환한다."""
+
 
     _ = search_evidence(
         query=question.text,
@@ -73,5 +74,3 @@ def judge_answer(
         next_probe_target="핵심 개념의 원인과 실제 적용 방식",
         rationale="임시 평가: 기본 답변은 가능하지만 원인, 사례, 한계점 등 추가 확인할 요소가 남아 있습니다.",
     )
-
-

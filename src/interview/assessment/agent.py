@@ -35,9 +35,8 @@ class AssessmentAgent:
         """답변 1건 평가 → Interviewer 가 라우팅에 쓸 신호 반환.
 
         TODO(담당 D):
-          - evaluator.judge_answer 로 (signal, score) 획득
           - evaluator.check_conflict 로 충돌 시 signal.quality=CONFLICT 보정
-          - competency.record(topic, score), evaluations 누적
+          - 강점/약점 산정 로직 고도화 (지금은 점수 임계값으로 단순 분류)
         """
         signal = evaluator.judge_answer(
             question=question,

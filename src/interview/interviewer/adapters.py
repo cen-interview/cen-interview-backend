@@ -24,15 +24,19 @@ def from_chat(
 ) -> InterviewerEvent:
     """채팅 모드 raw payload → 이벤트.
 
-    TODO(담당 C):
-      - payload["action"] 가 "submit" 이면 AnswerSubmitted(answer_text=...)
-      - "end" 이면 EndRequested
+    payload 예시:
+      - 제출: {"action": "submit", "question_id": "...", "text": "..."}
+      - 종료: {"action": "end"}
+
+    주의: AnswerSubmitted/EndRequested(schemas/events.py)엔 mode 필드가 없고,
+    답변 필드명은 answer_text 가 아니라 text 다.
     """
     action = payload.get("action")
 
     if action == "submit":
         return AnswerSubmitted(
             session_id=session_id,
+
             question_id=question_id,
             text=payload.get("text", ""),
         )
