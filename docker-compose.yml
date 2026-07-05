@@ -17,16 +17,28 @@ services:
       retries: 10
 
   backend:
-    image: ${DOCKERHUB_USERNAME}/interview-agent:latest
+    image: ${DOCKERHUB_USERNAME}/interview-agent:feat-strategy
     container_name: interview-backend
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "8000:8000"
     env_file:
       - .env
+
+  nginx:
+    image: nginx:alpine
+    container_name: interview-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - backend
 
 volumes:
   cen_interview_pgdata:

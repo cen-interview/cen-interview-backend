@@ -48,7 +48,6 @@ class QuestionKind(str, Enum):
     HINT = "hint"
 
 
-# ⚠️ 합의 포인트
 # 질문 난이도.
 #
 # easy
@@ -64,6 +63,19 @@ class Difficulty(str, Enum):
     MEDIUM = "medium"
     HARD = "hard"
 
+# 질문 카테고리.
+# technical_concept
+# - 기술개념
+#
+# project_implementation
+# - 프로젝트구현
+#
+# troubleshooting
+# - 트러블슈팅
+class QuestionCategory(str, Enum):
+    TECHNICAL_CONCEPT = "technical_concept"
+    PROJECT_IMPLEMENTATION = "project_implementation"
+    TROUBLESHOOTING = "troubleshooting"
 
 class Question(BaseModel):
     question_id: str
@@ -80,3 +92,8 @@ class Question(BaseModel):
     # follow_up / challenge / confirm / trap 질문에서 사용한다.
     # hint 질문은 parent_question_id를 가지지 않는다. (힌트는 원래 질문을 그대로 보여주기 때문)
     parent_question_id: Optional[str] = None
+
+    # 질문 카테고리. (선택)
+    # 기술개념 / 프로젝트구현 / 트러블슈팅으로 분류 (Enum)
+    category: Optional[QuestionCategory] = None
+
