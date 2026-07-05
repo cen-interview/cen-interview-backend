@@ -35,7 +35,8 @@ def generate_question(topic: str, difficulty: Difficulty) -> Question:
 def generate_follow_up(
         topic: str,
         parent_question_id: str,
-        target: str | None = None
+        target: str | None = None,
+        answer_excerpt: str | None = None
     ) -> Question:
     """추가 확인 가능한 요소에 대한 꼬리 질문 생성."""
 
@@ -56,7 +57,8 @@ def generate_follow_up(
 def generate_challenge(
         topic: str,
         parent_question_id: str,
-        target: str | None = None
+        target: str | None = None,
+        answer_excerpt: str | None = None
     )-> Question:
     """오개념이나 논리적 허점을 검증하는 압박 질문 생성."""
 
@@ -77,7 +79,8 @@ def generate_challenge(
 def generate_confirm_positive(
         topic: str,
         parent_question_id: str,
-        target: str | None = None
+        target: str | None = None,
+        answer_excerpt: str | None = None
     ) -> Question:
     """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
 
@@ -98,7 +101,8 @@ def generate_confirm_positive(
 def generate_confirm_negative(
     topic: str,
     parent_question_id: str,
-    target: str | None = None
+    target: str | None = None,
+    answer_excerpt: str | None = None
     ) -> Question:
     """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
 
@@ -119,7 +123,8 @@ def generate_confirm_negative(
 def generate_trap(
     topic: str,
     parent_question_id: str,
-    target: str | None = None
+    target: str | None = None,
+    answer_excerpt: str | None = None
     ) -> Question:
     """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
 
@@ -138,7 +143,8 @@ def generate_trap(
 
 def generate_hint(
     question: Question,
-    target: str | None = None
+    target: str | None = None,
+    answer_excerpt: str | None = None
     ) -> Question:
     """침묵 등으로 사용자가 답변을 못 할 때 호출하는 힌트 생성.
 
@@ -147,7 +153,8 @@ def generate_hint(
     Args:
         question: 힌트를 줄 대상이 되는 원래 질문.
         target: 힌트를 어느 부분에 집중할지 (선택).
-
+        answer_excerpt: 사용자의 직전 답변 중 인용할 부분 (선택).
+            완전 침묵이면 None. 답변은 했지만 방향이 틀린 경우 참고용으로 전달.
     Returns:
         kind=HINT인 Question. parent_question_id는 원래 question의 ID.
     """
