@@ -85,9 +85,10 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd ~/interview-backend
-            git pull origin ${{ github.ref_name }}
-            IMAGE_TAG=$(echo '${{ github.ref_name }}' | tr '/' '-')
-            sed -i "s|interview-agent:.*|interview-agent:${IMAGE_TAG}|" docker-compose.yml
+            git fetch origin ${{ github.ref_name }}
+            git checkout ${{ github.ref_name }}
+            git reset --hard origin/${{ github.ref_name }}
+            export IMAGE_TAG=$(echo '${{ github.ref_name }}' | tr '/' '-')
             docker compose --env-file .env.compose pull
             docker compose --env-file .env.compose up -d
             docker image prune -f
