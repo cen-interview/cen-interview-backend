@@ -17,7 +17,7 @@ services:
       retries: 10
 
   backend:
-    image: ${DOCKERHUB_USERNAME}/interview-agent:feat-strategy
+    image: ${DOCKERHUB_USERNAME}/interview-agent:${IMAGE_TAG}
     container_name: interview-backend
     restart: unless-stopped
     depends_on:
