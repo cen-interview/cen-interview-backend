@@ -34,6 +34,10 @@ from pydantic import BaseModel, Field
 #
 # trap
 #   - 사용자가 개념을 정확히 구분하는지 확인하기 위해 의도적으로 혼동 가능성이 있는 함정 질문
+#
+# hint
+#   - 사용자가 답변을 하기 어려울 때(침묵 시) 제공되는 힌트 질문
+
 class QuestionKind(str, Enum):
     MAIN = "main"
     FOLLOW_UP = "follow_up"
@@ -41,7 +45,7 @@ class QuestionKind(str, Enum):
     CONFIRM_POSITIVE = "confirm_positive"
     CONFIRM_NEGATIVE = "confirm_negative"
     TRAP = "trap"
-
+    HINT = "hint"
 
 
 # ⚠️ 합의 포인트
@@ -74,4 +78,5 @@ class Question(BaseModel):
 
     # 일반 질문이 아닌 경우, 어떤 질문에서 파생되었는지 기록한다.
     # follow_up / challenge / confirm / trap 질문에서 사용한다.
+    # hint 질문은 parent_question_id를 가지지 않는다. (힌트는 원래 질문을 그대로 보여주기 때문)
     parent_question_id: Optional[str] = None
