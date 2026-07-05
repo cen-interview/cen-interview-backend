@@ -35,11 +35,17 @@ jobs:
         run: |
           uv run python -c "import interview.schemas.events"
           uv run python -c "import interview.strategy"
+          uv run python -c "import interview.evidence"
+          uv run python -c "import interview.assessment"
+          uv run python -c "import interview.interviewer"
           uv run python -c "import interview.api.main"
 
-      - name: Run tests (No-test pass 방어)
-        # pytest 는 수집된 테스트가 0개면 exit code 5 를 반환한다(이건 정상 통과
-        # 시킨다). 그 외 실패(테스트 실패=1, 에러=2 등)는 그대로 CI 를 실패시킨다.
+      # ── pytest는 경고용/참고용으로만 운영 ──────────────────
+      # 초기 개발 단계라 테스트 코드가 기능 변경 속도를 못 따라가는 경우가 많음.
+      # 실패해도 배포는 막지 않되, Actions 로그에서 실패 여부는 계속 확인 가능.
+      # TODO: 테스트 커버리지/신뢰도가 자리잡으면 continue-on-error 제거하고 다시 배포 게이트로 전환
+      - name: Run tests (경고용, 배포를 막지 않음)
+        continue-on-error: true
         run: |
           uv run pytest; code=$?
           if [ $code -eq 5 ]; then

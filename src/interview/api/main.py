@@ -48,6 +48,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://cen-interview-front.vercel.app",
+        "https://cen-interview.site",
+        "https://www.cen-interview.site",
     ],
     allow_credentials=True,
     allow_methods=["*"],
