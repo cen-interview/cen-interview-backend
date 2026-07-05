@@ -5,12 +5,13 @@
 """
 
 from interview.schemas.question import Difficulty
-from interview.schemas.signals import AnswerQualitySignal, QualityLevel
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.strategy.state import StrategyState
 
 
 def next_difficulty(
-    state: StrategyState, last_signal: AnswerQualitySignal | None
+    state: StrategyState, 
+    last_signal: AnswerQualitySignal | None
 ) -> Difficulty:
     """다음 질문 난이도 결정.
 
@@ -21,6 +22,17 @@ def next_difficulty(
     """
     if last_signal is None:
         return Difficulty.EASY
-    if last_signal.quality == QualityLevel.SUFFICIENT:
-        return Difficulty.MEDIUM  # TODO: 단계적 상승 로직
+
+    if last_signal.quality == AnswerQuality.SUFFICIENT:
+        return Difficulty.MEDIUM
+
+    if last_signal.quality in (
+        AnswerQuality.BONUS_AVAILABLE,
+        AnswerQuality.MISCONCEPTION,
+        AnswerQuality.CONFIRM_POSITIVE,
+        AnswerQuality.CONFIRM_NEGATIVE,
+        AnswerQuality.TRAP_AVAILABLE,
+    ):
+        return Difficulty.EASY
+
     return Difficulty.EASY

@@ -13,15 +13,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # LLM
-    anthropic_api_key: str = ""
+    openai_api_key: str = ""
     llm_model: str = "gpt-5.4-mini"
 
     # MCP / 외부 소스
     notion_api_key: str = ""
     github_token: str = ""
 
-    # Vector DB
-    evidence_store_path: str = "./.evidence_store"
+    # Vector DB (Postgres + pgvector)
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/interview"
 
     # 면접 진행
     max_questions: int = 10

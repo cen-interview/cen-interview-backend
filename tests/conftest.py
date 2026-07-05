@@ -8,7 +8,7 @@ import pytest
 
 from interview.schemas.evidence import EvidenceChunk, SourceType
 from interview.schemas.question import Difficulty, Question, QuestionKind
-from interview.schemas.signals import AnswerQualitySignal, QualityLevel
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 
 @pytest.fixture
@@ -17,16 +17,16 @@ def sample_question() -> Question:
         question_id="q1",
         text="JPA N+1 문제를 설명하세요.",
         topic="JPA",
-        difficulty=Difficulty.MEDIUM,
-        kind=QuestionKind.MAIN,
-        linked_evidence=["c1"],
+        difficulty="medium",
+        kind="main",
+        evidence_ids=["c1"],
     )
 
 
 @pytest.fixture
 def shallow_signal() -> AnswerQualitySignal:
     return AnswerQualitySignal(
-        quality=QualityLevel.SHALLOW,
+        quality=AnswerQuality.SHALLOW,
         missing_keywords=["fetch join", "지연 로딩"],
     )
 
@@ -37,7 +37,7 @@ def sample_chunk() -> EvidenceChunk:
         chunk_id="c1",
         text="N+1 문제는 연관관계 지연 로딩에서 쿼리가 N번 추가 발생...",
         source_url="https://notion.so/...",
-        source_type=SourceType.NOTION,
+        source_type="notion",
         topic="JPA",
         confidence=0.8,
     )
