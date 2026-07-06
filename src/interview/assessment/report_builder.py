@@ -34,7 +34,9 @@ def build_report(
 ) -> FinalReport:
     """누적 평가를 바탕으로 최종 리포트를 생성한다."""
 
+
     overall_score = _calculate_overall_score(evaluations)
+
 
     topics_to_improve = _find_topics_to_improve(
         competency=competency,
@@ -168,6 +170,7 @@ def _temporary_report_content(
                 "트러블슈팅 과정을 함께 말해 보세요."
             ),
         ],
+
     )
 
 
@@ -177,3 +180,4 @@ def _collect_unique_items(
     """중복을 제거하면서 기존 순서를 유지한다."""
 
     return list(dict.fromkeys(items))
+

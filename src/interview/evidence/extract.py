@@ -5,7 +5,7 @@
 """
 
 from interview.evidence.sources import RawDoc
-from interview.schemas.evidence import EvidenceChunk, SourceType
+from interview.schemas.evidence import EvidenceChunk, SourceType  # noqa: F401 (TODO 담당 A: 실제 구현 시 사용)
 
 
 def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:

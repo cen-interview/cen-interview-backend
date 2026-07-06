@@ -1,5 +1,6 @@
 # 환경변수 / 시크릿
 .env
+.env.compose
 
 # Python
 __pycache__/
@@ -20,3 +21,12 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+
+# Claude Code 로컬 설정
+.claude/
+
+# push 전 actions 오류 로컬 체크 용
+check.bat
+
+# Certbot이 생성하는 SSL 인증서/설정
+certbot/

@@ -38,7 +38,14 @@ class AssessmentAgent:
         answer_text: str,
         delivery_metrics: dict | None = None,
     ) -> AnswerQualitySignal:
-        """답변 하나를 평가하고 결과를 누적한다."""
+        """답변 하나를 평가하고 결과를 누적한다.
+
+
+        TODO(담당 D):
+          - evaluator.check_conflict 로 충돌 시 signal.quality=CONFLICT 보정
+          - 강점/약점 산정 로직 고도화 (지금은 점수 임계값으로 단순 분류)
+        
+        """
 
         signal = evaluator.judge_answer(
             question=question,

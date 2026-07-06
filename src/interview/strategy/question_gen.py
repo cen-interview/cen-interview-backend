@@ -32,7 +32,12 @@ def generate_question(topic: str, difficulty: Difficulty) -> Question:
 
 
 
-def generate_follow_up(topic: str, target: str | None = None) -> Question:
+def generate_follow_up(
+        topic: str,
+        parent_question_id: str,
+        target: str | None = None,
+        answer_excerpt: str | None = None
+    ) -> Question:
     """추가 확인 가능한 요소에 대한 꼬리 질문 생성."""
 
     probe = target or "추가로 설명할 수 있는 부분"
@@ -45,11 +50,16 @@ def generate_follow_up(topic: str, target: str | None = None) -> Question:
         difficulty=Difficulty.EASY,
         kind=QuestionKind.FOLLOW_UP,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=None,
+        parent_question_id=parent_question_id,
     )
 
 
-def generate_challenge(topic: str, target: str | None = None) -> Question:
+def generate_challenge(
+        topic: str,
+        parent_question_id: str,
+        target: str | None = None,
+        answer_excerpt: str | None = None
+    )-> Question:
     """오개념이나 논리적 허점을 검증하는 압박 질문 생성."""
 
     probe = target or "답변의 논리적 근거"
@@ -62,11 +72,16 @@ def generate_challenge(topic: str, target: str | None = None) -> Question:
         difficulty=Difficulty.EASY,
         kind=QuestionKind.CHALLENGE,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=None,
+        parent_question_id=parent_question_id,
     )
 
 
-def generate_confirm_positive(topic: str, target: str | None = None) -> Question:
+def generate_confirm_positive(
+        topic: str,
+        parent_question_id: str,
+        target: str | None = None,
+        answer_excerpt: str | None = None
+    ) -> Question:
     """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
 
     probe = target or "답변의 적용 범위"
@@ -79,11 +94,16 @@ def generate_confirm_positive(topic: str, target: str | None = None) -> Question
         difficulty=Difficulty.EASY,
         kind=QuestionKind.CONFIRM_POSITIVE,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=None,
+        parent_question_id=parent_question_id,
     )
 
 
-def generate_confirm_negative(topic: str, target: str | None = None) -> Question:
+def generate_confirm_negative(
+    topic: str,
+    parent_question_id: str,
+    target: str | None = None,
+    answer_excerpt: str | None = None
+    ) -> Question:
     """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
 
     probe = target or "답변과 근거가 다른 부분"
@@ -96,11 +116,16 @@ def generate_confirm_negative(topic: str, target: str | None = None) -> Question
         difficulty=Difficulty.EASY,
         kind=QuestionKind.CONFIRM_NEGATIVE,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=None,
+        parent_question_id=parent_question_id,
     )
 
 
-def generate_trap(topic: str, target: str | None = None) -> Question:
+def generate_trap(
+    topic: str,
+    parent_question_id: str,
+    target: str | None = None,
+    answer_excerpt: str | None = None
+    ) -> Question:
     """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
 
     probe = target or "헷갈리기 쉬운 개념"
@@ -113,5 +138,36 @@ def generate_trap(topic: str, target: str | None = None) -> Question:
         difficulty=Difficulty.EASY,
         kind=QuestionKind.TRAP,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=None,
+        parent_question_id=parent_question_id,
+    )
+
+def generate_hint(
+    question: Question,
+    target: str | None = None,
+    answer_excerpt: str | None = None
+    ) -> Question:
+    """침묵 등으로 사용자가 답변을 못 할 때 호출하는 힌트 생성.
+
+    정답을 알려주지 않고 접근 방향만 제시한다 (6단계에서 구현 예정).
+
+    Args:
+        question: 힌트를 줄 대상이 되는 원래 질문.
+        target: 힌트를 어느 부분에 집중할지 (선택).
+        answer_excerpt: 사용자의 직전 답변 중 인용할 부분 (선택).
+            완전 침묵이면 None. 답변은 했지만 방향이 틀린 경우 참고용으로 전달.
+    Returns:
+        kind=HINT인 Question. parent_question_id는 원래 question의 ID.
+    """
+
+    probe = target or "힌트 제공"
+    evidence_chunks = search_evidence(query=probe, topic=question.topic)
+
+    return Question(
+        question_id=str(uuid4()),
+        text=f"힌트: {question.text}에 대해 생각할 때 '{probe}' 부분을 고려해 보세요.",
+        topic=question.topic,
+        difficulty=Difficulty.EASY,
+        kind=QuestionKind.HINT,
+        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
+        parent_question_id=question.question_id,
     )

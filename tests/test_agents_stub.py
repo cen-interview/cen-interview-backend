@@ -75,6 +75,7 @@ def test_strategy_next_follow_up_returns_follow_up_question():
 
     question = strategy.next_follow_up(
         topic="FastAPI",
+        parent_question_id="q-1",
         target="Depends의 동작 방식",
     )
 
@@ -86,6 +87,7 @@ def test_strategy_next_challenge_returns_challenge_question():
 
     question = strategy.next_challenge(
         topic="FastAPI",
+        parent_question_id="q-1",
         target="Depends를 라우터 생성 기능으로 오해한 부분",
     )
 
@@ -97,6 +99,7 @@ def test_strategy_next_confirm_positive_returns_confirm_positive_question():
 
     question = strategy.next_confirm_positive(
         topic="FastAPI",
+        parent_question_id="q-1",
         target="Depends를 실제 프로젝트에서 사용한 범위",
     )
 
@@ -108,6 +111,7 @@ def test_strategy_next_confirm_negative_returns_confirm_negative_question():
 
     question = strategy.next_confirm_negative(
         topic="FastAPI",
+        parent_question_id="q-1",
         target="이전 답변 또는 Evidence와 충돌하는 부분",
     )
 
@@ -119,11 +123,23 @@ def test_strategy_next_trap_returns_trap_question():
 
     question = strategy.next_trap(
         topic="FastAPI",
+        parent_question_id="q-1",
         target="Depends와 라우터의 역할 차이",
     )
 
     assert question.kind == QuestionKind.TRAP
 
+def test_strategy_next_hint_returns_hint_question():
+    strategy = StrategyAgent()
+    main_question = make_main_question()
+
+    question = strategy.next_hint(
+        question=main_question,
+        target="핵심 개념",
+    )
+
+    assert question.kind == QuestionKind.HINT
+    assert question.parent_question_id == main_question.question_id
 
 def test_assessment_agent_evaluate_returns_signal():
     assessment = AssessmentAgent()

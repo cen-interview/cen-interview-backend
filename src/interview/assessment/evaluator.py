@@ -10,12 +10,14 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from interview.evidence.retrieval import search_evidence
+
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import (
     Question,
     QuestionCategory,
     QuestionKind,
 )
+
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 """
@@ -55,26 +57,18 @@ class JudgeResult(BaseModel):
     # quality 판정에 영향을 준 핵심 키워드
     rationale: list[str] = Field(default_factory=list)
 
-
 def judge_answer(
     question: Question,
     answer_text: str,
     delivery_metrics: dict | None = None,
 ) -> AnswerQualitySignal:
 
-    if question.category == QuestionCategory.PROJECT_IMPLEMENTATION:
-        evidence_chunks = search_evidence(
-            query=question.text,
-            topic=question.topic,
-        )
-    else:
-        evidence_chunks = []
 
-    judge_result = _judge_with_llm(
-        question=question,
-        answer_text=answer_text,
-        evidence_chunks=evidence_chunks,
-        delivery_metrics=delivery_metrics,
+
+    _ = search_evidence(
+        query=question.text,
+        topic=question.topic,
+
     )
 
     return AnswerQualitySignal(
@@ -118,6 +112,7 @@ def _temporary_judge_result(
                 "추가 확인 불필요",
             ],
         ),
+
 
         # index 1
         JudgeResult(

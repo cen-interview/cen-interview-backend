@@ -45,3 +45,14 @@ class RetrievalResult(BaseModel):
     """
     chunk: EvidenceChunk
     score: float  # 쿼리와의 관련도 (재랭킹 점수). 높을수록 관련 큼.
+
+class CoverageMap(BaseModel):
+    """
+    [Stub] 저장된 청크들의 주제별 신뢰도 집계 맵.
+    EvidenceStore.build_coverage_map()의 반환 타입입니다.
+    """
+    # 임시로 가장 직관적인 구조(주제명: 신뢰도 점수)를 dict 형태로 잡아둡니다.
+    # 예: {"JPA N+1": 0.85, "JWT 인증": 0.9}
+    topic_confidence: dict[str, float] = Field(default_factory=dict, description="주제별 평균 신뢰도")
+    
+    updated_at: str | None = Field(None, description="커버리지 맵 생성/갱신 시점")

@@ -34,6 +34,12 @@ from pydantic import BaseModel, Field
 #
 # trap
 #   - 사용자가 개념을 정확히 구분하는지 확인하기 위해 의도적으로 혼동 가능성이 있는 함정 질문
+#
+# hint
+#   - 사용자가 답변을 하기 어려울 때(침묵 시) 제공되는 힌트 질문
+
+
+
 class QuestionKind(str, Enum):
     MAIN = "main"
     FOLLOW_UP = "follow_up"
@@ -41,10 +47,9 @@ class QuestionKind(str, Enum):
     CONFIRM_POSITIVE = "confirm_positive"
     CONFIRM_NEGATIVE = "confirm_negative"
     TRAP = "trap"
+    HINT = "hint"
 
 
-
-# ⚠️ 합의 포인트
 # 질문 난이도.
 #
 # easy
@@ -60,10 +65,18 @@ class Difficulty(str, Enum):
     MEDIUM = "medium"
     HARD = "hard"
 
+
+# 질문 카테고리.
+# technical
+# - 기술개념
+#
+# project
+# - 프로젝트구현
+
+
 class QuestionCategory(str, Enum):
-    TECHNICAL_CONCEPT = "technical_concept"
-    PROJECT_IMPLEMENTATION = "project_implementation"
-    TROUBLESHOOTING = "troubleshooting"
+    TECHNICAL = "technical"
+    PROJECT = "project"
 
 class Question(BaseModel):
     question_id: str
@@ -77,5 +90,14 @@ class Question(BaseModel):
     # 질문 내용의 평가 유형
     category: QuestionCategory
 
-    evidence_ids: list[str] = Field(default_factory=list)
-    parent_question_id: str | None = None
+
+    # 일반 질문이 아닌 경우, 어떤 질문에서 파생되었는지 기록한다.
+    # follow_up / challenge / confirm / trap 질문에서 사용한다.
+    # hint 질문은 parent_question_id를 가지지 않는다. (힌트는 원래 질문을 그대로 보여주기 때문)
+    parent_question_id: Optional[str] = None
+
+    # 질문 카테고리. (선택)
+    # 기술개념 / 프로젝트구현 / 트러블슈팅으로 분류 (Enum)
+    category: Optional[QuestionCategory] = None
+
+
