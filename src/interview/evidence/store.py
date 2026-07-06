@@ -8,7 +8,7 @@
 """
 
 from interview.config import settings
-from interview.schemas.evidence import CoverageMap, EvidenceChunk
+from interview.schemas.evidence import CoverageMap, EvidenceChunk, TopicCoverage
 
 
 class EvidenceStore:
@@ -56,16 +56,28 @@ class EvidenceStore:
         ]
 
     def build_coverage_map(self) -> CoverageMap:
-        """저장된 청크들의 주제별 신뢰도를 집계해 커버리지 맵 생성.
+        """저장된 청크들의 주제별 근거 커버리지를 집계한다.
 
-        TODO(담당 A): topic 별 confidence 평균 → CoverageMap
+        각 EvidenceChunk 를 topic 기준으로 묶고, 주제별 confidence 평균과
+        청크 수를 계산한다. Strategy 는 이 결과를 보고 질문 주제를 고른다.
+
+        Returns:
+            주제별 평균 신뢰도와 근거 청크 수를 담은 CoverageMap.
         """
         # [현재 Stub 작동] topic 별 confidence 단순 평균
         by_topic: dict[str, list[float]] = {}
         for c in self._chunks:
             by_topic.setdefault(c.topic, []).append(c.confidence)
-        topic_confidence = {t: sum(v) / len(v) for t, v in by_topic.items()}
-        return CoverageMap(topic_confidence=topic_confidence, updated_at=None)
+        return CoverageMap(
+            topic_coverage={
+                topic: TopicCoverage(
+                    confidence=sum(confidences) / len(confidences),
+                    chunk_count=len(confidences),
+                )
+                for topic, confidences in by_topic.items()
+            },
+            updated_at=None,
+        )
 
 
 # 런타임 공용 단일 인스턴스. retrieval.py 가 이걸 연다.
