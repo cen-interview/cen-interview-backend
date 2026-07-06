@@ -4,6 +4,7 @@
 메인 질문과 파생 질문을 질문 세트 단위로 묶어 최종 평가한다.
 면접 종료 시 FinalReport를 생성한다.
 
+
 역할 분리:
   evaluator.py
     → 답변 하나의 quality와 rationale 판단
@@ -14,10 +15,17 @@
   agent.py
     → 답변 시도 누적 및 질문 세트 평가 저장
 """
+      
+        
 
 from interview.assessment import evaluator, report_builder
 from interview.assessment.scoring import AnswerAttempt, score_question_set
-from interview.schemas.question import Question, QuestionKind
+from interview.schemas.question import (
+    Question, 
+    QuestionKind,
+    QuestionCategory,
+    Difficulty
+    )
 from interview.schemas.report import (
     AnswerEvaluation,
     CompetencyModel,
@@ -30,7 +38,14 @@ class AssessmentAgent:
     def __init__(self) -> None:
         self.competency = CompetencyModel()
         self.evaluations: list[AnswerEvaluation] = []
+
+        # 현재 질문 세트의 답변 시도
+        # 메인 질문 + follow_up / challenge / confirm / trap 등을 묶어 점수 산정할 때 사용
         self.current_attempts: list[AnswerAttempt] = []
+
+        # 면접 전체 답변 이력
+        # 이전 답변과 현재 답변의 모순 여부를 확인할 때 사용
+        self.all_attempts: list[AnswerAttempt] = []
 
     def evaluate(
         self,
@@ -38,19 +53,12 @@ class AssessmentAgent:
         answer_text: str,
         delivery_metrics: dict | None = None,
     ) -> AnswerQualitySignal:
-        """답변 하나를 평가하고 결과를 누적한다.
-
-
-        TODO(담당 D):
-          - evaluator.check_conflict 로 충돌 시 signal.quality=CONFLICT 보정
-          - 강점/약점 산정 로직 고도화 (지금은 점수 임계값으로 단순 분류)
-        
-        """
 
         signal = evaluator.judge_answer(
             question=question,
             answer_text=answer_text,
             delivery_metrics=delivery_metrics,
+            history=self.all_attempts,  # 나중에 evaluator에서 받도록 확장 가능
         )
 
         attempt = AnswerAttempt(
@@ -58,12 +66,15 @@ class AssessmentAgent:
             question_id=question.question_id,
             question_text=question.text,
             question_kind=question.kind,
+            question_category=question.category,
+            question_level=question.level,
             answer_text=answer_text,
             signal=signal,
             delivery_metrics=delivery_metrics,
         )
 
         self.current_attempts.append(attempt)
+        self.all_attempts.append(attempt)
 
         return signal
 

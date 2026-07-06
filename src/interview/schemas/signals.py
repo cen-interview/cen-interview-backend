@@ -1,17 +1,42 @@
 """
-AnswerQualitySignal — Assessment가 생성하여 Interviewer에게 전달하는 평가 결과.
+AnswerQualitySignal — Assessment가 생성하여 Interviewer에게 전달하는 평가 신호.
 
-Interviewer는 quality 값만 보고 다음 면접 흐름을 결정한다.
+Assessment는 사용자의 답변을 Evidence와 비교하여 답변 상태를 판단한다.
+Interviewer는 이 신호의 quality 값을 보고 다음 질문 흐름만 결정한다.
 
-  sufficient        → Strategy.next_question()          (다음 메인 질문)
-  bonus_available   → Strategy.next_follow_up()         (추가 확인 가능한 꼬리 질문)
-  misconception     → Strategy.next_challenge()         (오개념/논리 허점에 대한 압박 질문)
-  confirm_positive  → Strategy.next_confirm_positive()  (긍정 확인 질문)
-  confirm_negative  → Strategy.next_confirm_negative()  (부정 확인 질문)
-  trap_available    → Strategy.next_trap()              (함정 질문)
+즉, 이 스키마는 '답변 평가 상세 결과'라기보다
+'다음 면접 흐름을 결정하기 위한 최소 신호'이다.
 
-quality는 Assessment와 Interviewer 사이의 핵심 신호이며,
-면접 진행 방향을 결정하는 기준이 된다.
+흐름:
+  sufficient        → Strategy.next_question()
+  bonus_available   → Strategy.next_follow_up()
+  misconception     → Strategy.next_challenge()
+  confirm_positive  → Strategy.next_confirm_positive()
+  confirm_negative  → Strategy.next_confirm_negative()
+  trap_available    → Strategy.next_trap()
+
+
+class AnswerQualitySignal:
+  answer_id
+    - 어떤 답변에 대한 평가인지 구분하기 위해 필요하다.
+    - 나중에 답변 로그, 평가 기록, 리포트와 연결할 수 있다.
+
+  question_id
+    - 이 답변이 어떤 질문에 대한 답변인지 알기 위해 필요하다.
+    - 꼬리 질문, 압박 질문, 확인 질문이 어떤 원 질문에서 파생됐는지 추적할 수 있다.
+
+  quality
+    - 다음 면접 흐름을 결정하는 핵심 값이다.
+    - Interviewer는 이 값만 보고 Strategy의 어떤 함수를 호출할지 결정한다.
+
+  rationale
+    - 왜 해당 quality로 판단했는지에 대한 평가 근거이다.
+    - Interviewer 라우팅에는 직접 필요하지 않지만, 로그/디버깅/최종 리포트 생성에 활용된다.
+
+  next_probe_target
+    - 다음 질문에서 집중적으로 파고들 대상을 나타낸다.
+    - 예: "fetch join", "지연 로딩", "트랜잭션 전파"
+    - 필수는 아니며, 추가 질문이 필요 없으면 None이 될 수 있다.
 """
 
 from __future__ import annotations
@@ -63,22 +88,9 @@ class AnswerQualitySignal(BaseModel):
     question_id: str
     quality: AnswerQuality
 
-    # 다음 질문에서 무엇을 파고들지
-    next_probe_target: str | None = None
-
-    # 해당 quality로 판단한 핵심 평가 요소
     rationale: list[str] = Field(default_factory=list)
 
+    next_probe_target: Optional[str] = None
 
 
-    """
-    quality
-    → 어떤 질문 유형으로 갈지 결정
 
-    next_probe_target
-    → 다음 질문에서 뭘 물을지 결정
-
-    rationale
-    → 나중에 평가 코멘트 만들 때 참고
-    
-    """
