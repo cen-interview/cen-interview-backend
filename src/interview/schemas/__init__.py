@@ -15,7 +15,13 @@ from .events import (
     ReplayRequested,
     SilenceDetected,
 )
-from .evidence import EvidenceChunk, RetrievalResult, SourceType
+from .evidence import (
+    CoverageMap,
+    EvidenceChunk,
+    RetrievalResult,
+    SourceType,
+    TopicCoverage,
+)
 from .question import Difficulty, Question, QuestionKind
 from .signals import AnswerQuality, AnswerQualitySignal
 from .report import AnswerEvaluation, CompetencyModel, FinalReport
@@ -30,9 +36,11 @@ __all__ = [
     "NoResponseTimeout",
     "InterviewerEvent",
     # evidence
+    "CoverageMap",
     "EvidenceChunk",
     "RetrievalResult",
     "SourceType",
+    "TopicCoverage",
     # question
     "Question",
     "Difficulty",

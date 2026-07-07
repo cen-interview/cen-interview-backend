@@ -8,14 +8,20 @@
 """
 
 from interview.config import settings
-from interview.schemas.evidence import CoverageMap, EvidenceChunk
+from interview.schemas.evidence import CoverageMap, EvidenceChunk, TopicCoverage
 
 
 class EvidenceStore:
     def __init__(self, database_url: str | None = None) -> None:
+        """
+        TODO(담당 A):
+            - psycopg.connect(self.database_url) + CREATE EXTENSION vector
+            - embedding_dimensions 크기의 vector 컬럼과 ivfflat 인덱스 초기화
+            - embedding_model 로 생성한 벡터를 저장/검색에 사용
+        """
         self.database_url = database_url or settings.database_url
-        # TODO(담당 A): psycopg.connect(self.database_url) + CREATE EXTENSION
-        # vector, 임베딩 컬럼(vector(N)) 테이블/인덱스(ivfflat 등) 초기화
+        self.embedding_model = settings.embedding_model
+        self.embedding_dimensions = settings.embedding_dimensions
         self._conn = None
 
         # [Stub 전용] 벡터 DB 대신 인메모리 리스트로 흉내낸다.
@@ -24,18 +30,22 @@ class EvidenceStore:
     def add_chunks(self, chunks: list[EvidenceChunk]) -> None:
         """청크를 임베딩해 저장. 메타데이터도 함께 저장해 검색 후 복원한다.
 
-        TODO(담당 A): 임베딩 → INSERT ... ON CONFLICT (chunk_id) DO UPDATE
+        TODO(담당 A):
+            - settings.embedding_model 로 chunk.text 임베딩 생성
+            - embedding_dimensions 와 DB vector 컬럼 차원 일치 검증
+            - INSERT ... ON CONFLICT (chunk_id) DO UPDATE
         """
         # [현재 Stub 작동] 임베딩 없이 그대로 적재
         self._chunks.extend(chunks)
 
-    def query(
-        self, query: str, topic: str | None = None, k: int = 5
-    ) -> list[EvidenceChunk]:
+    def query(self, query: str, topic: str | None = None, k: int = 5) -> list[EvidenceChunk]:
         """유사 청크 top-k 반환. topic 이 있으면 메타데이터 필터로 좁힌다.
 
-        TODO(담당 A): query 임베딩 후 pgvector `<->` 거리 연산자로 ORDER BY +
-        LIMIT k (topic 있으면 WHERE 절로 필터) → EvidenceChunk 복원
+        TODO(담당 A):
+            - settings.embedding_model 로 query 임베딩 생성
+            - pgvector `<->` 거리 연산자로 ORDER BY
+            - topic 있으면 WHERE 절로 필터
+            - EvidenceChunk 복원
         """
         # [현재 Stub 작동] 유사도 검색 대신 topic 일치 필터 + 앞에서부터 k개
         candidates = [c for c in self._chunks if topic is None or c.topic == topic]
@@ -56,16 +66,28 @@ class EvidenceStore:
         ]
 
     def build_coverage_map(self) -> CoverageMap:
-        """저장된 청크들의 주제별 신뢰도를 집계해 커버리지 맵 생성.
+        """저장된 청크들의 주제별 근거 커버리지를 집계한다.
 
-        TODO(담당 A): topic 별 confidence 평균 → CoverageMap
+        각 EvidenceChunk 를 topic 기준으로 묶고, 주제별 confidence 평균과
+        청크 수를 계산한다. Strategy 는 이 결과를 보고 질문 주제를 고른다.
+
+        Returns:
+            주제별 평균 신뢰도와 근거 청크 수를 담은 CoverageMap.
         """
         # [현재 Stub 작동] topic 별 confidence 단순 평균
         by_topic: dict[str, list[float]] = {}
         for c in self._chunks:
             by_topic.setdefault(c.topic, []).append(c.confidence)
-        topic_confidence = {t: sum(v) / len(v) for t, v in by_topic.items()}
-        return CoverageMap(topic_confidence=topic_confidence, updated_at=None)
+        return CoverageMap(
+            topic_coverage={
+                topic: TopicCoverage(
+                    confidence=sum(confidences) / len(confidences),
+                    chunk_count=len(confidences),
+                )
+                for topic, confidences in by_topic.items()
+            },
+            updated_at=None,
+        )
 
 
 # 런타임 공용 단일 인스턴스. retrieval.py 가 이걸 연다.
