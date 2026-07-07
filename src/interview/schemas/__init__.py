@@ -8,7 +8,7 @@
 """
 from .events import (
     AnswerSubmitted,
-    BaseEvent,
+    InterviewerEvent,
     EndRequested,
     InterviewerEvent,
     NoResponseTimeout,
@@ -22,7 +22,7 @@ from .report import AnswerEvaluation, CompetencyModel, FinalReport
 
 __all__ = [
     # events
-    "BaseEvent",
+    "InterviewerEvent",
     "AnswerSubmitted",
     "EndRequested",
     "SilenceDetected",
