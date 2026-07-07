@@ -37,9 +37,8 @@ class CompetencyModel(BaseModel):
     topic_scores: dict[str, float] = Field(default_factory=dict)
 
     strengths: list[str] = Field(default_factory=list)
-    weaknesses: list[str] = Field(default_factory=list)
-    # 전체 보완 포인트
     improvement_points: list[str] = Field(default_factory=list)
+    learning_recommendations: list[str] = Field(default_factory=list)
     average_score: float = 0
 
 

@@ -1,7 +1,16 @@
 """답변 채점 로직.
 
-한 답변을 받아 근거를 조회하고, 답변 품질/분기 신호를 만든다.
-점수는 여기서 계산하지 않고 scoring.py에서 질문 세트 단위로 계산한다.
+Assessment에서 답변 하나를 평가하는 단계이다.
+
+처리 흐름:
+    1. 현재 질문과 관련된 Evidence를 조회한다.
+    2. 질문, 답변, Evidence를 LLM에게 전달한다.
+    3. LLM의 평가 결과를 JudgeResult로 생성한다.
+    4. Interviewer가 사용할 AnswerQualitySignal을 반환한다.
+
+주의:
+    - 점수(score)는 계산하지 않는다.
+    - 질문 세트(메인 질문 + 파생 질문)의 점수는 scoring.py에서 계산한다.
 """
 
 import random
@@ -14,10 +23,8 @@ from interview.evidence.retrieval import search_evidence
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import (
     Question,
-    QuestionCategory,
-    QuestionKind,
-)
 
+)
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 """
@@ -49,7 +56,24 @@ trap_available
 """
 
 class JudgeResult(BaseModel):
-    """LLM이 생성해야 하는 답변 평가 결과."""
+    """LLM이 생성하는 답변 평가 결과.
+
+    Attributes:
+        quality:
+            답변 품질.
+            Interviewer가 다음 질문 흐름을 결정하는 기준이다.
+
+        next_probe_target:
+            다음 질문에서 추가 확인할 대상.
+            예)
+                "Fetch Join"
+                "지연 로딩"
+                "트랜잭션 전파"
+
+        rationale:
+            quality를 판단한 근거.
+            추후 평가 코멘트 생성에도 활용할 수 있다.
+    """
 
     quality: AnswerQuality
 
@@ -63,16 +87,46 @@ def judge_answer(
     question: Question,
     answer_text: str,
     delivery_metrics: dict | None = None,
+    history: list | None = None,
 ) -> AnswerQualitySignal:
+    
+    """사용자 답변 하나를 평가하여 Interviewer용 평가 신호를 생성한다.
 
+    Args:
+        question:
+            현재 사용자가 답변한 Question.
 
+        answer_text:
+            사용자의 답변.
 
-    _ = search_evidence(
-        query=question.text,
-        topic=question.topic,
+        delivery_metrics:
+            음성 전달력 평가를 위한 보조 정보.
+            예)
+                speech_rate_wpm
+                filler_count
 
-    )
+        history:
+            지금까지의 전체 답변 이력.
+            이전 답변과 현재 답변의 모순 여부를 판단할 때 사용한다.
 
+    Returns:
+        AnswerQualitySignal:
+            Interviewer가 다음 질문 흐름을 결정하기 위한 평가 신호.
+    """
+    
+    evidence_chunks = search_evidence(
+    query=question.text,
+    topic=question.topic,
+)
+    
+    judge_result = _judge_with_llm(
+    question=question,
+    answer_text=answer_text,
+    evidence_chunks=evidence_chunks,
+    delivery_metrics=delivery_metrics,
+    history=history,
+)
+    
     return AnswerQualitySignal(
         answer_id=f"answer-{uuid4()}",
         question_id=question.question_id,
@@ -87,25 +141,71 @@ def _judge_with_llm(
     answer_text: str,
     evidence_chunks: list[EvidenceChunk],
     delivery_metrics: dict | None = None,
+    history: list | None = None,
 ) -> JudgeResult:
-    """질문, 답변, Evidence를 비교하여 답변을 평가한다."""
+    """LLM을 이용하여 답변 하나를 평가한다.
 
-    # TODO: 실제 LLM 연결 시 아래 값들을 프롬프트로 전달
+    Args:
+        question:
+            현재 질문.
+
+        answer_text:
+            사용자 답변.
+
+        evidence_chunks:
+            Retrieval을 통해 검색된 근거 문서.
+
+        delivery_metrics:
+            음성 전달력 보조 정보.
+
+        history:
+            면접 전체 답변 이력.
+            confirm_negative와 같은 모순 검출 시 활용한다.
+
+    Returns:
+        JudgeResult:
+            답변 품질과 다음 질문 방향을 포함한 평가 결과.
+
+    TODO:
+        실제 구현 시 LLM에게 아래 정보를 전달한다.
+
+        - Question
+        - Answer
+        - Evidence
+        - Delivery Metrics
+        - History
+    """
+
+    # TODO : 실제 LLM 호출
+    _ = question
     _ = answer_text
     _ = evidence_chunks
     _ = delivery_metrics
+    _ = history
 
     return _temporary_judge_result(question)
 
 def _temporary_judge_result(
     question: Question,
 ) -> JudgeResult:
-    """LLM 연결 전 랜덤한 임시 평가 결과를 반환한다."""
+    """LLM 연결 전 임시 평가 결과를 생성한다.
+
+    현재는 랜덤한 평가 결과를 반환하는 Stub이다.
+
+    Args:
+        question:
+            현재 질문.
+
+    Returns:
+        JudgeResult:
+            임시 평가 결과.
+    """
 
     _ = question
 
     temporary_results = [
-        # index 0
+        
+        # 답변이 충분한 경우
         JudgeResult(
             quality=AnswerQuality.SUFFICIENT,
             next_probe_target=None,
@@ -116,7 +216,7 @@ def _temporary_judge_result(
         ),
 
 
-        # index 1
+        # 꼬리 질문 가능
         JudgeResult(
             quality=AnswerQuality.BONUS_AVAILABLE,
             next_probe_target="실제 프로젝트 적용 사례",
@@ -126,7 +226,7 @@ def _temporary_judge_result(
             ],
         ),
 
-        # index 2
+        # 오개념 존재
         JudgeResult(
             quality=AnswerQuality.MISCONCEPTION,
             next_probe_target="핵심 개념의 정확한 역할",
@@ -136,7 +236,7 @@ def _temporary_judge_result(
             ],
         ),
 
-        # index 3
+        # 긍정 확인 질문
         JudgeResult(
             quality=AnswerQuality.CONFIRM_POSITIVE,
             next_probe_target="기술의 적용 범위",
@@ -146,7 +246,7 @@ def _temporary_judge_result(
             ],
         ),
 
-        # index 4
+        # 부정 확인 질문
         JudgeResult(
             quality=AnswerQuality.CONFIRM_NEGATIVE,
             next_probe_target="기존 설명과 충돌하는 부분",
@@ -156,7 +256,7 @@ def _temporary_judge_result(
             ],
         ),
 
-        # index 5
+        # 함정 질문 가능
         JudgeResult(
             quality=AnswerQuality.TRAP_AVAILABLE,
             next_probe_target="유사 개념의 차이",
