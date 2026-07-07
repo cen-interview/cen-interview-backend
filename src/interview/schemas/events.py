@@ -92,9 +92,6 @@ InterviewerEvent = Annotated[
     ],
     Field(discriminator="type"),
 ]
-"""Interviewer가 받아들이는 유일한 입력 타입.
-
-# 현재 events 스키마의 의도와 다르게 events.py 에서 Mode 를 요청하는게 있음
 
 class Mode(str, Enum):
     """
@@ -107,6 +104,3 @@ class Mode(str, Enum):
     # 팀원 C가 소문자로 썼을 경우를 대비해 소문자 속성도 방어적으로 추가해 둡니다.
     chat = "chat"
     voice = "voice"
-알 수 없는 type 값이 들어오면 파싱 단계에서 ValidationError가 발생하며,
-이는 도메인 오류 "알 수 없는 이벤트"로 변환되어야 한다 (10번 섹션).
-"""
