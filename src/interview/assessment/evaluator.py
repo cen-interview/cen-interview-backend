@@ -57,6 +57,8 @@ class JudgeResult(BaseModel):
     # quality 판정에 영향을 준 핵심 키워드
     rationale: list[str] = Field(default_factory=list)
 
+
+# 평가
 def judge_answer(
     question: Question,
     answer_text: str,
