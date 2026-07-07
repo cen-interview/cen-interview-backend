@@ -6,12 +6,38 @@
 
 from uuid import uuid4
 
+from pydantic import BaseModel, Field
+
 from interview.evidence.retrieval import search_evidence
-from interview.schemas.question import Difficulty, Question,QuestionKind
+from interview.llm.client import get_llm
+from interview.schemas.question import Difficulty, Question, QuestionCategory,QuestionKind
+from interview.strategy.prompts import QUESTION_GEN_SYSTEM
 
+class GeneratedQuestion(BaseModel):
+    """LLM이 생성하는 질문의 구조화 출력."""
+    text: str = Field(description="생성된 질문 문장. 반드시 하나의 질문만 담는다.")
+    category: QuestionCategory = Field(
+        description="질문 카테고리: technical_concept(기술개념), "
+        "project_implementation(프로젝트구현), troubleshooting(트러블슈팅) 중 하나."
+    )
 
-def generate_question(topic: str, difficulty: Difficulty) -> Question:
+def generate_question(
+    topic: str,
+    difficulty: Difficulty,
+    asked_question_texts: list[str] | None = None,) -> Question:
     """주제 + 난이도로 일반 질문 생성.
+
+    근거를 조회해 QUESTION_GEN_SYSTEM 프롬프트와 함께 LLM에 전달하고,
+    구조화된 출력(text, category)을 받아 Question으로 구성한다.
+
+    Args:
+        topic: 질문 주제.
+        difficulty: 질문 난이도.
+        asked_question_texts: 이미 출제된 질문 문장들 (중복 방지용).
+            LLM에게 "이런 질문은 이미 했으니 겹치지 않게 하라"고 전달한다.
+
+    Returns:
+        kind=MAIN인 Question. evidence_ids에 실제 조회된 근거 chunk_id가 담긴다.
 
     TODO(담당 B):
       - search_evidence(topic=...) 로 근거 chunk 조회
@@ -20,12 +46,46 @@ def generate_question(topic: str, difficulty: Difficulty) -> Question:
     """
     evidence_chunks = search_evidence(query=topic, topic=topic)
 
+    context = (
+        "\n".join(f"- {c.text}" for c in evidence_chunks)
+        if evidence_chunks
+        else "(관련 근거 없음. 근거를 인용하지 말고 일반적인 개념 질문으로 만들 것)"
+    )
+
+    asked_block = (
+        "\n".join(f"- {t}" for t in asked_question_texts)
+        if asked_question_texts
+        else "(없음)"
+    )
+
+    user_prompt = f"""\
+주제: {topic}
+난이도: {difficulty.value}
+
+근거:
+{context}
+
+이미 출제한 질문 (아래와 겹치지 않는 새로운 질문을 만들 것):
+{asked_block}
+"""
+
+    llm = get_llm(temperature=0.6)
+    structured_llm = llm.with_structured_output(GeneratedQuestion)
+
+    result = structured_llm.invoke(
+        [
+            {"role": "system", "content": QUESTION_GEN_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+
     return Question(
         question_id=str(uuid4()),
-        text=f"{topic}에 대해 설명해 주세요.",
+        text=result.text,
         topic=topic,
         difficulty=difficulty,
         kind=QuestionKind.MAIN,
+        category=result.category,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
         parent_question_id=None,
     )

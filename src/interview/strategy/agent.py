@@ -74,13 +74,8 @@ class StrategyAgent:
         # return question_gen.generate_question(topic, diff)
         
         # [현재 Stub 작동]
-        text = self._dummy_questions.get(topic, "공통 질문입니다.")
-        question = Question(
-            question_id=f"q_main_{self._topic_idx}",
-            text=text,
-            topic=topic,
-            difficulty=diff,
-            kind="main"
+        question = question_gen.generate_question(
+            topic, diff, asked_question_texts=self.state.asked_question_texts
         )
 
         if last_signal is not None:
