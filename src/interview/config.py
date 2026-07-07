@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # Vector DB (Postgres + pgvector)
     database_url: str = "postgresql://postgres:postgres@localhost:5432/interview"
 
+    # Embedding
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536   # 차원 지정 1536
+
     # 면접 진행
     max_questions: int = 10
 
