@@ -12,6 +12,23 @@ from interview.strategy.state import StrategyState
 
 
 class StrategyAgent:
+    """면접 질문의 방향·순서·난이도를 결정하는 전략 담당 에이전트.
+
+    Interviewer로부터 답변 평가 신호(AnswerQualitySignal)를 받아 다음 질문을
+    결정하고, 실제 질문 문장 생성은 question_gen 모듈에 위임한다. 세션 동안의
+    출제 이력은 self.state(StrategyState)에 누적된다.
+
+    Attributes:
+        state:
+            세션 동안 누적되는 출제 이력 (주제, 난이도, 질문 수 등).
+
+        _topic_idx:
+            [임시] stub 질문 ID 생성에 사용하는 인덱스. question_gen.generate_question 연결 시 제거될 예정.
+
+        _dummy_questions:
+            [임시] stub 질문 텍스트 매핑. 제거 예정.
+    """
+
     def __init__(self) -> None:
         self.state = StrategyState()
         self._topic_idx = 0
@@ -60,9 +77,10 @@ class StrategyAgent:
             kind="main"
         )
 
-        self.state.asked_topics.append(topic)
-        self.state.asked_difficulties.append(diff)
-        self.state.question_count += 1
+        if last_signal is not None:
+            self.state.topic_last_quality[topic] = last_signal.quality
+
+        self._record(question)
 
         return question
 
@@ -83,8 +101,11 @@ class StrategyAgent:
             Interviewer가 transcript에서 짧게(핵심 문장 1~2개) 잘라 전달한다.
             제공되면 "방금 ~라고 하셨는데" 형태로 답변을 직접 인용하는 질문을 만든다.
         """
-        return question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt)
 
+        question = question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
+    
     def next_challenge(
         self, 
         topic: str,
@@ -102,7 +123,9 @@ class StrategyAgent:
             Interviewer가 transcript에서 짧게(핵심 문장 1~2개) 잘라 전달한다.
             제공되면 "방금 ~라고 하셨는데" 형태로 답변을 직접 인용하는 질문을 만든다.
         """
-        return question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
 
     def next_confirm_positive(
             self, 
@@ -112,7 +135,9 @@ class StrategyAgent:
             answer_excerpt: str | None = None
             ) -> Question:
         """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
-        return question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
 
     def next_confirm_negative(
         self, 
@@ -122,8 +147,10 @@ class StrategyAgent:
         answer_excerpt: str | None = None
         ) -> Question:
         """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
-        return question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt)
-
+        question = question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
+    
     def next_trap(
         self, 
         topic: str, 
@@ -132,7 +159,9 @@ class StrategyAgent:
         answer_excerpt: str | None = None
         ) -> Question:
         """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
-        return question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
 
     def next_hint(
         self, 
@@ -154,6 +183,13 @@ class StrategyAgent:
             kind=HINT인 Question. parent_question_id는 원래 question의 ID.
         """
         return question_gen.generate_hint(question, target, answer_excerpt)
+
+    def _record(self, question: Question) -> None:
+        """질문 생성 후 state를 한 곳에서 갱신한다 (hint 제외 모든 next_*가 호출)."""
+        self.state.asked_topics.append(question.topic)
+        self.state.asked_difficulties.append(question.difficulty)
+        self.state.asked_question_texts.append(question.text)
+        self.state.question_count += 1
 
     def _pick_topic(self) -> str:
         """다음 주제 선택 임시 스텁."""
