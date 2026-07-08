@@ -32,30 +32,46 @@
 Interviewer Agent는 입력이 채팅에서 왔는지 음성에서 왔는지 알 필요 없이
 AdaptedInput만 처리하면 된다.
 
-프론트 / 음성 처리 시스템
-        │
-        │ raw payload
-        ▼
-┌───────────────────┐
-│    adapters.py    │
-│                   │
-│  from_chat()      │
-│  from_voice()     │
-└─────────┬─────────┘
-          │
-          ▼
-     AdaptedInput
-          │
-     ┌────┴──────────────┐
-     ▼                   ▼
-   event          delivery_metrics
-     │                   │
-     ▼                   ▼
-AnswerSubmitted      말하기 속도
-SilenceDetected      추임새 개수
-ReplayRequested      답변 시간
-EndRequested             │
-NoResponseTimeout        └─ 음성 답변일 때만 존재
+            프론트 / 음성 처리 시스템
+                    │
+                    │ raw payload
+                    ▼
+            ┌───────────────────┐
+            │    adapters.py    │
+            │                   │
+            │  from_chat()      │
+            │  from_voice()     │
+            └─────────┬─────────┘
+                      │
+                      ▼
+                 AdaptedInput
+                      │
+                 ┌────┴──────────────┐
+                 ▼                   ▼
+               event          delivery_metrics
+                 │                   │
+                 ▼                   ▼
+            AnswerSubmitted      말하기 속도
+            SilenceDetected      추임새 개수
+            ReplayRequested      답변 시간
+            EndRequested             │
+            NoResponseTimeout        └─ 음성 답변일 때만 존재
+
+            ==============================================
+
+            AdaptedInput
+            │
+            ├── event
+            │   └── AnswerSubmitted
+            │       ├── session_id
+            │       ├── question_id
+            │       └── text
+            │
+            └── delivery_metrics
+                └── DeliveryMetrics
+                    ├── speech_rate_wpm
+                    ├── filler_count
+                    └── duration_seconds
 
 """
 
