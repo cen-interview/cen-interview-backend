@@ -1,0 +1,70 @@
+
+            프론트 / 음성 처리 시스템
+                    │
+                    │ raw payload
+                    ▼
+            ┌───────────────────┐
+            │    adapters.py    │
+            │                   │
+            │  from_chat()      │
+            │  from_voice()     │
+            └─────────┬─────────┘
+                      │
+                      ▼
+                 AdaptedInput
+                      │
+                 ┌────┴──────────────┐
+                 ▼                   ▼
+               event          delivery_metrics
+                 │                   │
+                 ▼                   ▼
+            AnswerSubmitted      말하기 속도
+            SilenceDetected      추임새 개수
+            ReplayRequested      답변 시간
+            EndRequested             │
+            NoResponseTimeout        └─ 음성 답변일 때만 존재
+
+================================================================
+
+            AdaptedInput
+            │
+            ├── event
+            │   └── AnswerSubmitted
+            │       ├── session_id
+            │       ├── question_id
+            │       └── text
+            │
+            └── delivery_metrics
+                └── DeliveryMetrics
+                    ├── speech_rate_wpm
+                    ├── filler_count
+                    └── duration_seconds
+
+================================================================
+
+            프론트 raw payload
+                    │
+                    ▼
+               adapters.py
+                    │
+                    │ 입력 형식 통일
+                    ▼
+               AdaptedInput
+                    │
+                    ├── event
+                    └── delivery_metrics
+                    │
+                    ▼
+                 agent.py
+                    │
+                    │ 이벤트 종류 판단
+                    ▼
+             ┌─────────────────────────┐
+             │      InterviewerAgent   │
+             ├─────────────────────────┤
+             │ AnswerSubmitted         │ → Assessment에 평가 요청
+             │ SilenceDetected         │ → 침묵 정책 처리
+             │ ReplayRequested         │ → 질문 재전달
+             │ EndRequested            │ → 면접 종료
+             │ NoResponseTimeout       │ → 타임아웃 처리
+             └─────────────────────────┘
