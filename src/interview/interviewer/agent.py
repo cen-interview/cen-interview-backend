@@ -16,6 +16,34 @@
   silence_detected     → 현재 질문 다시 제시
   end_requested        → 종료
   no_response_timeout  → 종료
+
+              프론트 raw payload
+                    │
+                    ▼
+               adapters.py
+                    │
+                    │ 입력 형식 통일
+                    ▼
+               AdaptedInput
+                    │
+                    ├── event
+                    └── delivery_metrics
+                    │
+                    ▼
+                 agent.py
+                    │
+                    │ 이벤트 종류 판단
+                    ▼
+             ┌─────────────────────────┐
+             │      InterviewerAgent   │
+             ├─────────────────────────┤
+             │ AnswerSubmitted         │ → Assessment에 평가 요청
+             │ SilenceDetected         │ → 침묵 정책 처리
+             │ ReplayRequested         │ → 질문 재전달
+             │ EndRequested            │ → 면접 종료
+             │ NoResponseTimeout       │ → 타임아웃 처리
+             └─────────────────────────┘
+
 """
 
 from interview.assessment import AssessmentAgent
