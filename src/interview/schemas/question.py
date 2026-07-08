@@ -64,18 +64,16 @@ class Difficulty(str, Enum):
     HARD = "hard"
 
 # 질문 카테고리.
-# technical_concept
+
+# technical
 # - 기술개념
 #
-# project_implementation
+# project
 # - 프로젝트구현
-#
-# troubleshooting
-# - 트러블슈팅
 class QuestionCategory(str, Enum):
-    TECHNICAL_CONCEPT = "technical_concept"
-    PROJECT_IMPLEMENTATION = "project_implementation"
-    TROUBLESHOOTING = "troubleshooting"
+    TECHNICAL = "technical"
+    PROJECT = "project"
+
 
 class Question(BaseModel):
     question_id: str

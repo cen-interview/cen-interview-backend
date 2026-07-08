@@ -13,12 +13,13 @@ from interview.llm.client import get_llm
 from interview.schemas.question import Difficulty, Question, QuestionCategory,QuestionKind
 from interview.strategy.prompts import QUESTION_GEN_SYSTEM
 
+_EVIDENCE_CONFIDENCE_THRESHOLD = 0.4
+
 class GeneratedQuestion(BaseModel):
     """LLM이 생성하는 질문의 구조화 출력."""
     text: str = Field(description="생성된 질문 문장. 반드시 하나의 질문만 담는다.")
     category: QuestionCategory = Field(
-        description="질문 카테고리: technical_concept(기술개념), "
-        "project_implementation(프로젝트구현), troubleshooting(트러블슈팅) 중 하나."
+        description="질문 카테고리: technical(기술개념), project(프로젝트구현)중 하나."
     )
 
 def generate_question(
@@ -40,15 +41,16 @@ def generate_question(
         kind=MAIN인 Question. evidence_ids에 실제 조회된 근거 chunk_id가 담긴다.
 
     TODO(담당 B):
-      - search_evidence(topic=...) 로 근거 chunk 조회
       - prompts.QUESTION_GEN_SYSTEM + 근거로 LLM 호출
       - linked_evidence 에 사용한 chunk_id 기록
     """
     evidence_chunks = search_evidence(query=topic, topic=topic)
 
+    reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
+
     context = (
-        "\n".join(f"- {c.text}" for c in evidence_chunks)
-        if evidence_chunks
+        "\n".join(f"- {c.text}" for c in reliable_chunks)
+        if reliable_chunks
         else "(관련 근거 없음. 근거를 인용하지 말고 일반적인 개념 질문으로 만들 것)"
     )
 
@@ -71,13 +73,16 @@ def generate_question(
 
     llm = get_llm(temperature=0.6)
     structured_llm = llm.with_structured_output(GeneratedQuestion)
+    try :
 
-    result = structured_llm.invoke(
-        [
-            {"role": "system", "content": QUESTION_GEN_SYSTEM},
-            {"role": "user", "content": user_prompt},
-        ]
-    )
+        result = structured_llm.invoke(
+            [
+                {"role": "system", "content": QUESTION_GEN_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+    except Exception :
+        return _fallback_question(topic, difficulty, [c.chunk_id for c in reliable_chunks])
 
     return Question(
         question_id=str(uuid4()),
@@ -86,10 +91,9 @@ def generate_question(
         difficulty=difficulty,
         kind=QuestionKind.MAIN,
         category=result.category,
-        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
+        evidence_ids=[chunk.chunk_id for chunk in reliable_chunks],
         parent_question_id=None,
     )
-
 
 
 def generate_follow_up(
@@ -230,4 +234,17 @@ def generate_hint(
         kind=QuestionKind.HINT,
         evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
         parent_question_id=question.question_id,
+    )
+
+
+def _fallback_question(topic: str, difficulty: Difficulty, evidence_ids: list[str]) -> Question:
+    """LLM 호출 실패 시 사용하는 템플릿 질문."""
+    return Question(
+        question_id=str(uuid4()),
+        text=f"{topic}에 대해 설명해 주세요.",
+        topic=topic,
+        difficulty=difficulty,
+        kind=QuestionKind.MAIN,
+        evidence_ids=evidence_ids,
+        parent_question_id=None,
     )
