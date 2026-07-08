@@ -8,6 +8,8 @@ extract / chunking / store 가 맡는다 (한 파일에 다 넣지 않는다).
 
 from dataclasses import dataclass
 
+from interview.evidence.mcp_client import EvidenceMcpClient
+
 
 @dataclass
 class RawDoc:
@@ -20,8 +22,38 @@ class RawDoc:
     meta: dict                # 주차/날짜/파일경로 등 소스가 아는 정보
 
 
+def _notion_response_to_raw_docs(response: dict, root_link: str) -> list[RawDoc]:
+    """Notion MCP 원본 응답을 Evidence 파이프라인의 RawDoc 목록으로 변환한다.
+
+    Args:
+        response: EvidenceMcpClient가 Notion MCP tool call로 받은 원본 응답.
+        root_link: 사용자가 등록한 Notion 루트 링크.
+
+    Returns:
+        extract 단계로 넘길 Notion RawDoc 목록.
+    """
+    raise NotImplementedError
+
+
+def _github_response_to_raw_docs(response: dict, repo_link: str) -> list[RawDoc]:
+    """GitHub MCP 원본 응답을 Evidence 파이프라인의 RawDoc 목록으로 변환한다.
+
+    Args:
+        response: EvidenceMcpClient가 GitHub MCP tool call로 받은 원본 응답.
+        repo_link: 사용자가 등록한 GitHub 저장소 링크.
+
+    Returns:
+        README, 디렉터리 구조, 핵심 소스 파일 등을 담은 GitHub RawDoc 목록.
+    """
+    raise NotImplementedError
+
+
 class NotionSource:
     """Notion MCP 로 학습 기록을 가져온다."""
+
+    def __init__(self, mcp_client: EvidenceMcpClient | None = None) -> None:
+        """MCP client를 주입받아 테스트와 실제 tool call 경계를 분리한다."""
+        self.mcp_client = mcp_client or EvidenceMcpClient()
 
     def fetch_pages(self, root_link: str) -> list[RawDoc]:
         """입력 링크가 DB / 주차 페이지 / 개별 페이지 중 무엇인지 판단하고,
@@ -32,11 +64,16 @@ class NotionSource:
           - 하위 페이지 재귀 순회
           - 주차/날짜/문서유형을 meta 에 채우기
         """
-        raise NotImplementedError
+        response = self.mcp_client.call_notion_tool(root_link)
+        return _notion_response_to_raw_docs(response, root_link)
 
 
 class GitHubSource:
     """GitHub MCP 로 프로젝트 저장소(최대 3개)를 가져온다."""
+
+    def __init__(self, mcp_client: EvidenceMcpClient | None = None) -> None:
+        """MCP client를 주입받아 테스트와 실제 tool call 경계를 분리한다."""
+        self.mcp_client = mcp_client or EvidenceMcpClient()
 
     MAX_REPOS = 3
 
@@ -49,6 +86,9 @@ class GitHubSource:
           - README / 핵심 구현 파일 선별
           - 언어/프레임워크 식별 → meta
         """
-        if len(repo_links) > self.MAX_REPOS:
-            repo_links = repo_links[: self.MAX_REPOS]
-        raise NotImplementedError
+        repo_links = repo_links[: self.MAX_REPOS]
+        raw_docs: list[RawDoc] = []
+        for repo_link in repo_links:
+            response = self.mcp_client.call_github_tool(repo_link)
+            raw_docs.extend(_github_response_to_raw_docs(response, repo_link))
+        return raw_docs
