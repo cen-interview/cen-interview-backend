@@ -81,6 +81,10 @@ class JudgeResult(BaseModel):
     # quality 판정에 영향을 준 핵심 키워드
     rationale: list[str] = Field(default_factory=list)
 
+    # 이전 답변 또는 Evidence와 충돌이 의심되는지 여부
+    # True면 정밀 충돌 검사 실행
+    conflict_suspected: bool = False
+
 
 # 평가
 def judge_answer(
@@ -117,7 +121,7 @@ def judge_answer(
     evidence_chunks = search_evidence(
     query=question.text,
     topic=question.topic,
-)
+    )
     
     judge_result = _judge_with_llm(
     question=question,
@@ -125,7 +129,14 @@ def judge_answer(
     evidence_chunks=evidence_chunks,
     delivery_metrics=delivery_metrics,
     history=history,
-)
+    )
+    if judge_result.conflict_suspected:
+        judge_result = _run_conflict_check(
+            question=question,
+            answer_text=answer_text,
+            evidence_chunks=evidence_chunks,
+            history=history,
+        )
     
     return AnswerQualitySignal(
         answer_id=f"answer-{uuid4()}",
@@ -184,6 +195,100 @@ def _judge_with_llm(
     _ = history
 
     return _temporary_judge_result(question)
+
+def _run_conflict_check(
+    question: Question,
+    answer_text: str,
+    evidence_chunks: list[EvidenceChunk],
+    history: list | None = None,
+) -> JudgeResult:
+    """이전 답변 및 Evidence와 현재 답변의 충돌 여부를 정밀 검사한다.
+
+    Args:
+        question:
+            현재 질문.
+
+        answer_text:
+            현재 사용자 답변.
+
+        evidence_chunks:
+            현재 질문과 관련된 Evidence 목록.
+
+        history:
+            면접 전체 답변 이력.
+            AssessmentAgent의 all_attempts가 전달된다.
+
+    Returns:
+        JudgeResult:
+            충돌이 있으면 CONFIRM_NEGATIVE,
+            충돌이 없으면 기존 judge 결과를 유지할 수 있도록 충분 또는 추가확인 결과를 반환한다.
+
+    TODO:
+        추후 LLM으로 이전 답변 요약 + 현재 답변 + Evidence를 비교하여
+        실제 충돌 여부를 판단하도록 교체한다.
+    """
+
+    _ = question
+    _ = evidence_chunks
+
+    if not history:
+        return JudgeResult(
+            quality=AnswerQuality.SUFFICIENT,
+            next_probe_target=None,
+            rationale=["이전 답변 이력이 없어 충돌 검사를 생략했습니다."],
+            conflict_suspected=False,
+        )
+
+    previous_answers = [
+        attempt.answer_text
+        for attempt in history
+    ]
+
+    # 임시 충돌 검사 규칙
+    # 예: 이전 답변과 현재 답변에 서로 반대되는 표현이 있는지 확인
+    conflict_pairs = [
+        ("세션", "토큰"),
+        ("동기", "비동기"),
+        ("GET", "POST"),
+        ("상태 유지", "무상태"),
+        ("서버 저장", "클라이언트 저장"),
+    ]
+
+    for previous_answer in previous_answers:
+        for left, right in conflict_pairs:
+            previous_has_left = left in previous_answer
+            previous_has_right = right in previous_answer
+            current_has_left = left in answer_text
+            current_has_right = right in answer_text
+
+            if previous_has_left and current_has_right:
+                return JudgeResult(
+                    quality=AnswerQuality.CONFIRM_NEGATIVE,
+                    next_probe_target=f"{left}와 {right}의 관계",
+                    rationale=[
+                        f"이전 답변에서는 '{left}'에 가깝게 설명했지만 현재 답변에서는 '{right}'에 가깝게 설명했습니다.",
+                        "두 답변의 관계를 확인할 필요가 있습니다.",
+                    ],
+                    conflict_suspected=True,
+                )
+
+            if previous_has_right and current_has_left:
+                return JudgeResult(
+                    quality=AnswerQuality.CONFIRM_NEGATIVE,
+                    next_probe_target=f"{left}와 {right}의 관계",
+                    rationale=[
+                        f"이전 답변에서는 '{right}'에 가깝게 설명했지만 현재 답변에서는 '{left}'에 가깝게 설명했습니다.",
+                        "두 답변의 관계를 확인할 필요가 있습니다.",
+                    ],
+                    conflict_suspected=True,
+                )
+
+    return JudgeResult(
+        quality=AnswerQuality.SUFFICIENT,
+        next_probe_target=None,
+        rationale=["이전 답변과 명확히 충돌하는 내용은 발견되지 않았습니다."],
+        conflict_suspected=False,
+    )
 
 def _temporary_judge_result(
     question: Question,

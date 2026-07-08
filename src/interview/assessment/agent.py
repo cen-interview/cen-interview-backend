@@ -166,7 +166,7 @@ class AssessmentAgent:
         )
 
         self.evaluations.append(evaluation)
-        self.competency.topic_scores[topic] = score.score
+        self.competency.topic_scores[main_attempt.question_topic] = score.score
 
         self.current_attempts.clear()
 
