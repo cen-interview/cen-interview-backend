@@ -13,14 +13,24 @@ from interview.schemas.evidence import EvidenceChunk
 
 
 def search_evidence(
-    query: str, topic: str | None = None, k: int = 5
+    query: str,
+    topic: str | None = None,
+    k: int = 5,
+    user_id: int | str | None = None,
 ) -> list[EvidenceChunk]:
     """evidence_store 에서 관련 근거 chunk 를 반환한다.
 
     Strategy / Assessment 가 직접 import 해서 호출하는 일반 함수 버전.
+
+    Args:
+        query: 검색할 질문 또는 주제 문장.
+        topic: 특정 기술 주제로 검색 범위를 좁히기 위한 선택 필터.
+        k: 반환할 최대 chunk 수.
+        user_id: 사용자별 Evidence namespace를 선택하기 위한 사용자 ID.
+            기존 호출처럼 None이면 store의 기본 namespace에서 검색한다.
     """
     try:
-        return get_store().query(query=query, topic=topic, k=k)
+        return get_store().query(query=query, topic=topic, k=k, user_id=user_id)
     except NotImplementedError:
         return [
             EvidenceChunk(
