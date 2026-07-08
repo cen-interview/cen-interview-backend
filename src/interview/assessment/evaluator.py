@@ -13,6 +13,12 @@ Assessment에서 답변 하나를 평가하는 단계이다.
     - 질문 세트(메인 질문 + 파생 질문)의 점수는 scoring.py에서 계산한다.
 """
 
+
+# TODO:
+# - judge는 정확도 우선 모델을 사용한다.
+# - 목표 지연 시간은 답변당 3초 이내로 둔다.
+# - question generation보다 한 단계 높은 모델 사용을 검토한다.
+
 import random
 from uuid import uuid4
 
@@ -23,7 +29,7 @@ from interview.evidence.retrieval import search_evidence
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import (
     Question,
-
+    QuestionCategory,
 )
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
@@ -118,10 +124,7 @@ def judge_answer(
             Interviewer가 다음 질문 흐름을 결정하기 위한 평가 신호.
     """
     
-    evidence_chunks = search_evidence(
-    query=question.text,
-    topic=question.topic,
-    )
+    evidence_chunks = _collect_evidence_for_question(question)
     
     judge_result = _judge_with_llm(
     question=question,
@@ -136,6 +139,7 @@ def judge_answer(
             answer_text=answer_text,
             evidence_chunks=evidence_chunks,
             history=history,
+            fallback_result=judge_result,
         )
     
     return AnswerQualitySignal(
@@ -193,14 +197,29 @@ def _judge_with_llm(
     _ = evidence_chunks
     _ = delivery_metrics
     _ = history
-
+    
+    history_summary = _build_history_summary(history)
+    _ = history_summary
+    
     return _temporary_judge_result(question)
+
+
+def _build_history_summary(history: list | None) -> str:
+    if not history:
+        return ""
+
+    return "\n".join(
+        f"- {attempt.question_topic} / {attempt.question_kind}: {attempt.answer_text}"
+        for attempt in history
+    )
+
 
 def _run_conflict_check(
     question: Question,
     answer_text: str,
     evidence_chunks: list[EvidenceChunk],
     history: list | None = None,
+    fallback_result: JudgeResult | None = None,
 ) -> JudgeResult:
     """이전 답변 및 Evidence와 현재 답변의 충돌 여부를 정밀 검사한다.
 
@@ -232,6 +251,11 @@ def _run_conflict_check(
     _ = evidence_chunks
 
     if not history:
+        if fallback_result is not None:
+            return fallback_result.model_copy(
+                update={"conflict_suspected": False}
+            )
+
         return JudgeResult(
             quality=AnswerQuality.SUFFICIENT,
             next_probe_target=None,
@@ -283,12 +307,18 @@ def _run_conflict_check(
                     conflict_suspected=True,
                 )
 
+    if fallback_result is not None:
+        return fallback_result.model_copy(
+            update={"conflict_suspected": False}
+        )
+
     return JudgeResult(
         quality=AnswerQuality.SUFFICIENT,
         next_probe_target=None,
         rationale=["이전 답변과 명확히 충돌하는 내용은 발견되지 않았습니다."],
         conflict_suspected=False,
     )
+
 
 def _temporary_judge_result(
     question: Question,
@@ -354,6 +384,7 @@ def _temporary_judge_result(
         # 부정 확인 질문
         JudgeResult(
             quality=AnswerQuality.CONFIRM_NEGATIVE,
+            conflict_suspected=True,
             next_probe_target="기존 설명과 충돌하는 부분",
             rationale=[
                 "근거와 일부 불일치",
@@ -374,3 +405,12 @@ def _temporary_judge_result(
 
     return random.choice(temporary_results)
 
+
+def _collect_evidence_for_question(question: Question) -> list[EvidenceChunk]:
+    if question.category != QuestionCategory.PROJECT:
+        return []
+
+    return search_evidence(
+        query=question.text,
+        topic=question.topic,
+    )
