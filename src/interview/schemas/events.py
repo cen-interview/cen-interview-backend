@@ -1,117 +1,97 @@
 """
-Interviewer 입력 이벤트 (음성/채팅 통합)
+Interviewer Agent 입력 이벤트 계약.
 
-adapters.py가 모드별 raw 입력을 아래 이벤트 중 하나로 변환한다.
+이 모듈은 채팅/음성 등 모든 입력 소스가 adapters.py를 거친 뒤
+반드시 아래 5가지 타입 중 하나로 변환되어야 한다는 계약을 정의한다.
 
-예:
-  - 채팅 제출 버튼
-  - 음성 발화 종료 감지
-  - 침묵 감지
-  - 질문 다시 듣기 요청
-  - 종료 요청
-
-Interviewer는 입력 모드를 직접 알지 않고, 오직 InterviewerEvent만 받아 처리한다.
-따라서 채팅/음성 면접 흐름을 하나의 로직으로 공유할 수 있다.
-
-⚠️ 합의 포인트
-  - 이벤트 종류를 추가/삭제할 때는 반드시 팀 합의가 필요하다.
-  - 음성 전용 이벤트는 채팅 모드에서는 생성하지 않는다.
+- Interviewer는 이 5가지 타입만 알면 되고, 입력이 어떤 모드(채팅/음성)에서
+  왔는지는 알 필요가 없다.
+- 모드별 반응 정책(예: 침묵 시 재전달할지 음성 안내를 할지)은 이 파일이 아니라
+  SessionState 쪽에 정책 값으로 저장되고, Interviewer는 그 정책 값을 읽어 처리한다.
+- 이 파일은 "모양"만 정의한다. session_id/question_id의 유효성 검증,
+  빈 문자열 여부 등의 실제 검증은 validate_event 노드의 책임이다.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal, Optional
+from datetime import datetime, timezone
+from typing import Annotated, Literal, Union
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from enum import Enum
 
 
-class BaseEvent(BaseModel):
-    """모든 이벤트 공통 필드."""
+class _EventBase(BaseModel):
+    """모든 InterviewerEvent가 공유하는 공통 필드."""
+
     session_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class AnswerSubmitted(BaseEvent):
+class AnswerSubmitted(_EventBase):
+    """채팅 제출 또는 음성 발화 종료(STT 완료) 시 발생.
+
+    question_id는 반드시 현재 질문 ID와 일치해야 한다는 불변조건은
+    이 파일이 아니라 이벤트 처리 로직(validate_event)에서 검증한다.
     """
-    답변 제출 이벤트.
 
-    채팅:
-      - 사용자가 제출 버튼을 누른 경우
-
-    음성:
-      - 발화 종료 감지 후 STT 결과가 생성된 경우
-    """
     type: Literal["answer_submitted"] = "answer_submitted"
     question_id: str
-    text: str  # 사용자가 한 답변. 음성도 STT(음성→텍스트) 후 텍스트로 담는다.
-
-    # --- (음성 전용) 전달력 보조 신호. 채팅 모드면 None. ---
-    speech_rate_wpm: Optional[float] = None  # 말 속도 (분당 단어 수)
-    filler_count: Optional[int] = None       # 군더더기("음", "어") 횟수
+    text: str
 
 
-class EndRequested(BaseEvent):
+class ReplayRequested(_EventBase):
+    """현재 질문을 다시 전달해달라는 요청.
+
+    question_id를 생략하면 서버가 현재 질문 기준으로 처리한다.
+    평가 결과나 asked_count에는 영향을 주지 않는다.
     """
-    종료 요청 이벤트.
 
-    채팅:
-      - 종료 버튼 클릭
+    type: Literal["replay_requested"] = "replay_requested"
+    question_id: str | None = None
 
-    음성:
-      - 사용자가 "종료할게요"처럼 종료 의사를 말한 경우
-    """
+
+class EndRequested(_EventBase):
+    """사용자의 명시적 면접 종료 요청."""
+
     type: Literal["end_requested"] = "end_requested"
 
 
-class SilenceDetected(BaseEvent):
-    """
-    음성 전용 침묵 감지 이벤트.
+class SilenceDetected(_EventBase):
+    """음성 입력에서 침묵이 감지되었을 때 발생.
 
-    일정 시간 답변이 없을 때 생성된다.
-    hint 질문을 별도로 두지 않는 현재 구조에서는
-    Interviewer가 현재 질문을 다시 제시하거나,
-    상황에 따라 꼬리/확인 질문으로 전환할 수 있다.
+    이 이벤트는 사실(침묵 지속 시간)만 전달한다.
+    재전달할지 별도 음성 안내를 할지는 SessionState의 silence_policy를
+    Interviewer가 읽어서 결정하며, 여기서 곧바로 오답으로 처리하지 않는다.
     """
+
     type: Literal["silence_detected"] = "silence_detected"
-    silence_sec: float
+    silence_duration_seconds: float
 
 
-class ReplayRequested(BaseEvent):
+class NoResponseTimeout(_EventBase):
+    """일정 시간 동안 어떤 응답도 없을 때 발생.
+
+    일시정지할지 종료할지는 SessionState의 timeout_policy를 따른다.
     """
-    음성 전용 질문 재청취 이벤트.
 
-    사용자가 "질문 다시 들려줘"라고 요청하면
-    Interviewer가 현재 질문을 다시 반환하고,
-    음성 어댑터가 이를 TTS로 재생한다.
-    """
-    type: Literal["replay_requested"] = "replay_requested"
-
-class NoResponseTimeout(BaseEvent):
-    """
-    음성 전용 무응답 타임아웃 이벤트.
-
-    장시간 응답이 없을 때 생성된다.
-    세션을 우아하게 일시정지하거나 종료하는 데 사용한다.
-    """
     type: Literal["no_response_timeout"] = "no_response_timeout"
-    elapsed_sec: float
+    elapsed_seconds: float | None = None
 
 
-# 모든 이벤트의 합집합.
-# Interviewer 는 handle(event: InterviewerEvent) 형태로 받아서
-# event.type 값으로 분기한다.
-InterviewerEvent = (
-    AnswerSubmitted
-    | EndRequested
-    | SilenceDetected
-    | ReplayRequested
-    | NoResponseTimeout
-)
-
-# 현재 events 스키마의 의도와 다르게 events.py 에서 Mode 를 요청하는게 있음
+InterviewerEvent = Annotated[
+    Union[
+        AnswerSubmitted,
+        ReplayRequested,
+        EndRequested,
+        SilenceDetected,
+        NoResponseTimeout,
+    ],
+    Field(discriminator="type"),
+]
 
 class Mode(str, Enum):
     """
