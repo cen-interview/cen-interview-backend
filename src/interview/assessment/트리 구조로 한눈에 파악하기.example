@@ -1,0 +1,1055 @@
+# Assessment 패키지 트리 구조로 한눈에 파악하기
+
+========================================================================
+
+## 0. 큰 그림
+
+역할은 다음 3가지다.
+
+1. 답변 1건을 평가해서 Interviewer가 쓸 AnswerQualitySignal을 만든다.
+2. 메인 질문과 파생 질문 답변을 질문 세트 단위로 묶어 점수를 계산한다.
+3. 면접 종료 시 문항별 평가를 모아 FinalReport를 만든다.
+
+흐름을 아주 크게 보면 아래와 같다.
+
+    Interviewer
+    Question + candidate answer + delivery_metrics
+        │
+        ▼
+    assessment/agent.py
+    AssessmentAgent.evaluate()
+        │
+        ├── evaluator.py
+        │   ├── Evidence 검색
+        │   ├── 답변 품질 판정
+        │   ├── 충돌 의심 시 conflict check
+        │   └── AnswerQualitySignal 반환
+        │
+        ├── current_attempts
+        │   └── 현재 질문 세트 답변 이력
+        │
+        └── all_attempts
+            └── 면접 전체 답변 이력
+        │
+        ▼
+    Interviewer
+    quality에 따라 Strategy.next_* 호출
+
+질문 세트가 끝나면:
+
+    Interviewer
+        │
+        ▼
+    AssessmentAgent.complete_question_set(main_question_id)
+        │
+        ├── scoring.py
+        │   └── current_attempts -> QuestionSetScore
+        │
+        ├── AnswerEvaluation 생성
+        ├── evaluations에 누적
+        ├── competency.topic_scores 갱신
+        └── current_attempts 초기화
+
+면접이 끝나면:
+
+    Interviewer
+        │
+        ▼
+    AssessmentAgent.finalize()
+        │
+        └── report_builder.py
+            ├── overall_score 계산
+            ├── summary / strengths / improvements 생성
+            └── FinalReport 반환
+
+한 문장으로 정리:
+
+    Assessment는 "답변을 평가 신호로 바꾸고, 질문 세트별 점수를 누적한 뒤,
+    면접 종료 시 최종 리포트로 정리하는 평가 계층"이다.
+
+========================================================================
+
+## 1. 현재 Assessment 패키지 파일 트리
+
+    src/interview/assessment/
+    │
+    ├── 트리 구조로 한눈에 파악하기.example
+    │   └── 지금 보고 있는 파일. 구조 파악용 지도.
+    │
+    ├── __init__.py
+    │   └── 외부에서 import할 공개 객체를 정리한다.
+    │       현재: AssessmentAgent
+    │
+    ├── agent.py
+    │   └── AssessmentAgent 본체.
+    │       Interviewer가 직접 호출하는 진입점이 여기에 있다.
+    │
+    │       AssessmentAgent
+    │       ├── __init__()
+    │       ├── evaluate(question, answer_text, delivery_metrics=None)
+    │       ├── complete_question_set(main_question_id)
+    │       ├── finalize()
+    │       ├── _find_main_attempt(main_question_id)
+    │       └── _build_answer_summary()
+    │
+    │       내부 상태
+    │       ├── competency: CompetencyModel
+    │       ├── evaluations: list[AnswerEvaluation]
+    │       ├── current_attempts: list[AnswerAttempt]
+    │       └── all_attempts: list[AnswerAttempt]
+    │
+    ├── evaluator.py
+    │   └── 답변 1건을 AnswerQualitySignal로 평가한다.
+    │       현재는 LLM 연결 전 임시 judge와 간단한 충돌 검사가 섞여 있다.
+    │
+    │       JudgeResult
+    │       ├── quality
+    │       ├── next_probe_target
+    │       ├── rationale
+    │       └── conflict_suspected
+    │
+    │       judge_answer()
+    │       ├── _collect_evidence_for_question()
+    │       ├── _judge_with_llm()
+    │       ├── _run_conflict_check()
+    │       └── AnswerQualitySignal 반환
+    │
+    ├── scoring.py
+    │   └── 질문 세트 단위 점수 산정.
+    │
+    │       AnswerAttempt
+    │       ├── answer_id
+    │       ├── question_id / question_text
+    │       ├── question_topic / question_kind / question_category
+    │       ├── question_difficulty
+    │       ├── answer_text
+    │       ├── signal
+    │       └── delivery_metrics
+    │
+    │       QuestionSetScore
+    │       ├── score
+    │       └── comment
+    │
+    │       score_question_set(attempts)
+    │       └── _calculate_question_set_score(attempts)
+    │
+    ├── report_builder.py
+    │   └── evaluations와 competency를 FinalReport로 변환한다.
+    │
+    │       ReportContent
+    │       ├── summary
+    │       ├── strengths
+    │       ├── improvement_points
+    │       └── learning_recommendations
+    │
+    │       build_report()
+    │       ├── _calculate_overall_score()
+    │       ├── _build_content_with_llm()
+    │       └── _temporary_report_content()
+    │
+    └── prompts.py
+        └── LLM-as-a-Judge 프롬프트 모음.
+
+            JUDGE_SYSTEM
+            CONFLICT_CHECK_SYSTEM
+            DELIVERY_NOTE
+
+========================================================================
+
+## 2. 주변 패키지와 연결 관계
+
+Assessment는 혼자 동작하지 않고 아래 패키지들과 연결된다.
+
+    src/interview/
+    │
+    ├── schemas/
+    │   ├── question.py
+    │   │   └── Strategy가 만든 Question 계약.
+    │   │       Assessment는 question_id, text, topic, kind, category,
+    │   │       difficulty를 평가 입력으로 사용한다.
+    │   │
+    │   ├── signals.py
+    │   │   └── Assessment가 만들고 Interviewer가 소비하는 분기 신호.
+    │   │
+    │   │       AnswerQualitySignal
+    │   │       ├── answer_id
+    │   │       ├── question_id
+    │   │       ├── quality
+    │   │       ├── rationale
+    │   │       └── next_probe_target
+    │   │
+    │   ├── report.py
+    │   │   └── Assessment가 누적/최종 반환하는 리포트 계약.
+    │   │
+    │   │       CompetencyModel
+    │   │       ├── topic_scores
+    │   │       ├── strengths
+    │   │       ├── improvement_points
+    │   │       ├── learning_recommendations
+    │   │       └── average_score
+    │   │
+    │   │       AnswerEvaluation
+    │   │       ├── question_id
+    │   │       ├── topic
+    │   │       ├── question
+    │   │       ├── answer_summary
+    │   │       ├── score
+    │   │       └── comment
+    │   │
+    │   │       FinalReport
+    │   │       ├── summary
+    │   │       ├── overall_score
+    │   │       ├── strengths
+    │   │       ├── improvement_points
+    │   │       ├── learning_recommendations
+    │   │       └── evaluations
+    │   │
+    │   └── evidence.py
+    │       └── evaluator.py가 프로젝트 구현 답변 평가 시 EvidenceChunk를 사용한다.
+    │
+    ├── evidence/
+    │   └── retrieval.py
+    │       └── search_evidence().
+    │           프로젝트 구현 답변을 사용자 자료와 대조할 때 사용한다.
+    │
+    ├── strategy/
+    │   └── agent.py
+    │       └── Assessment의 AnswerQualitySignal을 근거로 다음 질문을 만든다.
+    │           Assessment가 Strategy를 직접 호출하지는 않는다.
+    │
+    └── interviewer/
+        ├── agent.py
+        └── graph.py
+            └── AssessmentAgent.evaluate(), complete_question_set(), finalize()를 호출한다.
+                quality별 라우팅과 세션 종료 판단은 Interviewer 책임이다.
+
+========================================================================
+
+## 3. 데이터 모델 트리
+
+### 3-1. 답변 1건이 AnswerQualitySignal이 되는 과정
+
+    Question
+        │
+        ├── question_id
+        ├── text
+        ├── topic
+        ├── kind
+        ├── category
+        └── difficulty
+        │
+        ▼
+    Candidate answer_text
+        │
+        ├── 채팅 입력 문자열
+        └── 음성 STT 결과 문자열
+        │
+        ▼
+    AssessmentAgent.evaluate()
+        │
+        ├── evaluator.judge_answer()
+        │   │
+        │   ├── _collect_evidence_for_question(question)
+        │   │   ├── category != PROJECT -> []
+        │   │   └── category == PROJECT -> search_evidence(question.text, question.topic)
+        │   │
+        │   ├── _judge_with_llm()
+        │   │   └── 현재는 _temporary_judge_result()
+        │   │
+        │   ├── conflict_suspected=True면
+        │   │   └── _run_conflict_check()
+        │   │
+        │   └── AnswerQualitySignal
+        │
+        ├── AnswerAttempt 생성
+        ├── current_attempts.append()
+        └── all_attempts.append()
+
+AnswerQualitySignal:
+
+    AnswerQualitySignal
+        ├── answer_id
+        ├── question_id
+        ├── quality
+        ├── rationale
+        └── next_probe_target
+
+중요:
+- AnswerQualitySignal은 "다음 흐름을 결정하기 위한 신호"다.
+- 점수는 여기서 만들지 않는다.
+- 점수는 질문 세트가 끝난 뒤 scoring.py에서 만든다.
+
+### 3-2. AnswerAttempt가 질문 세트 평가로 이어지는 과정
+
+    current_attempts
+        │
+        ├── 메인 질문 답변
+        │   └── QuestionKind.MAIN
+        │
+        ├── 꼬리 질문 답변
+        │   └── QuestionKind.FOLLOW_UP
+        │
+        ├── 압박 질문 답변
+        │   └── QuestionKind.CHALLENGE
+        │
+        ├── 확인 질문 답변
+        │   ├── QuestionKind.CONFIRM_POSITIVE
+        │   └── QuestionKind.CONFIRM_NEGATIVE
+        │
+        └── 함정 질문 답변
+            └── QuestionKind.TRAP
+        │
+        ▼
+    complete_question_set(main_question_id)
+        │
+        ├── score_question_set(current_attempts)
+        ├── _find_main_attempt(main_question_id)
+        ├── _build_answer_summary()
+        ├── AnswerEvaluation 생성
+        ├── evaluations.append()
+        ├── competency.topic_scores[topic] = score
+        └── current_attempts.clear()
+
+AnswerEvaluation:
+
+    AnswerEvaluation
+        ├── question_id
+        ├── topic
+        ├── question
+        ├── answer_summary
+        ├── score
+        └── comment
+
+### 3-3. evaluations가 FinalReport가 되는 과정
+
+    evaluations: list[AnswerEvaluation]
+        │
+        ▼
+    AssessmentAgent.finalize()
+        │
+        ▼
+    report_builder.build_report(competency, evaluations)
+        │
+        ├── _calculate_overall_score()
+        │   └── evaluations.score 평균
+        │
+        ├── _build_content_with_llm()
+        │   └── 현재는 _temporary_report_content()
+        │
+        └── FinalReport
+
+FinalReport:
+
+    FinalReport
+        ├── summary
+        ├── overall_score
+        ├── strengths
+        ├── improvement_points
+        ├── learning_recommendations
+        └── evaluations
+
+========================================================================
+
+## 4. evaluate() 상세 흐름
+
+AssessmentAgent.evaluate()는 답변 1건에 대한 평가 진입점이다.
+
+    evaluate(question, answer_text, delivery_metrics=None)
+        │
+        ├── evaluator.judge_answer(
+        │       question=question,
+        │       answer_text=answer_text,
+        │       delivery_metrics=delivery_metrics,
+        │       history=self.all_attempts,
+        │   )
+        │
+        ├── signal: AnswerQualitySignal
+        │
+        ├── AnswerAttempt 생성
+        │   ├── answer_id = signal.answer_id
+        │   ├── question_id = question.question_id
+        │   ├── question_text = question.text
+        │   ├── question_topic = question.topic
+        │   ├── question_kind = question.kind
+        │   ├── question_category = question.category
+        │   ├── question_difficulty = question.difficulty
+        │   ├── answer_text = answer_text
+        │   ├── signal = signal
+        │   └── delivery_metrics = delivery_metrics
+        │
+        ├── self.current_attempts.append(attempt)
+        ├── self.all_attempts.append(attempt)
+        └── signal 반환
+
+Interviewer는 반환된 signal.quality를 보고 다음 흐름을 결정한다.
+
+    SUFFICIENT
+        └── 질문 세트 완료 후 다음 메인 질문
+
+    BONUS_AVAILABLE
+        └── Strategy.next_follow_up()
+
+    MISCONCEPTION
+        └── Strategy.next_challenge()
+
+    CONFIRM_POSITIVE
+        └── Strategy.next_confirm_positive()
+
+    CONFIRM_NEGATIVE
+        └── Strategy.next_confirm_negative()
+
+    TRAP_AVAILABLE
+        └── Strategy.next_trap()
+
+========================================================================
+
+## 5. evaluator.py 평가 구조
+
+evaluator.py는 "답변 1건 -> AnswerQualitySignal" 변환만 담당한다.
+점수 계산과 최종 리포트는 여기서 하지 않는다.
+
+현재 흐름:
+
+    judge_answer(question, answer_text, delivery_metrics, history)
+        │
+        ├── evidence_chunks = _collect_evidence_for_question(question)
+        │
+        ├── judge_result = _judge_with_llm(...)
+        │       │
+        │       ├── 현재는 실제 LLM 호출 없음
+        │       ├── _build_history_summary(history)는 만들지만 아직 사용만 준비
+        │       └── _temporary_judge_result(question) 반환
+        │
+        ├── if judge_result.conflict_suspected:
+        │       └── _run_conflict_check(...)
+        │
+        └── AnswerQualitySignal 생성
+
+JudgeResult:
+
+    JudgeResult
+        ├── quality
+        ├── next_probe_target
+        ├── rationale
+        └── conflict_suspected
+
+_collect_evidence_for_question():
+
+    question.category != QuestionCategory.PROJECT
+        └── []
+
+    question.category == QuestionCategory.PROJECT
+        └── search_evidence(query=question.text, topic=question.topic)
+
+현재 임시 판정:
+
+    _temporary_judge_result()
+        │
+        └── random.choice([
+              SUFFICIENT,
+              BONUS_AVAILABLE,
+              MISCONCEPTION,
+              CONFIRM_POSITIVE,
+              CONFIRM_NEGATIVE,
+              TRAP_AVAILABLE,
+            ])
+
+현재 임시 충돌 검사:
+
+    _run_conflict_check()
+        │
+        ├── history가 없으면 fallback_result 유지
+        ├── 이전 답변들과 현재 답변을 문자열로 비교
+        ├── conflict_pairs:
+        │   ├── 세션 / 토큰
+        │   ├── 동기 / 비동기
+        │   ├── GET / POST
+        │   ├── 상태 유지 / 무상태
+        │   └── 서버 저장 / 클라이언트 저장
+        │
+        ├── 반대 표현이 발견되면 CONFIRM_NEGATIVE
+        └── 없으면 fallback_result 유지
+
+중요:
+- 지금 judge는 랜덤 stub이므로 실제 품질 판정이라고 보면 안 된다.
+- CONFLICT_CHECK_SYSTEM 프롬프트는 있지만 아직 LLM 호출에 연결되어 있지 않다.
+- DELIVERY_NOTE도 프롬프트만 있고 delivery_note 생성/저장은 아직 연결 전이다.
+
+========================================================================
+
+## 6. scoring.py 질문 세트 점수 구조
+
+scoring.py는 메인 질문과 파생 질문 답변을 묶은 질문 세트 단위로 점수를 만든다.
+
+    score_question_set(attempts)
+        │
+        └── _calculate_question_set_score(attempts)
+            │
+            ├── main_attempt = _find_main_attempt(attempts)
+            ├── last_attempt = attempts[-1]
+            ├── final_quality = last_attempt.signal.quality
+            ├── difficulty = main_attempt.question_difficulty
+            ├── category = main_attempt.question_category
+            └── derived_count = len(attempts) - 1
+
+현재 임시 채점 기준:
+
+    attempts 1개 + final_quality == SUFFICIENT
+        └── 90점
+
+    attempts 2개 이상 + final_quality == SUFFICIENT
+        └── 80점
+
+    final_quality == MISCONCEPTION
+        └── 40점
+
+    final_quality == CONFIRM_NEGATIVE
+        └── 50점
+
+    final_quality == TRAP_AVAILABLE
+        └── 60점
+
+    final_quality == CONFIRM_POSITIVE
+        └── 70점
+
+    그 외
+        └── 65점
+
+현재 계산은 last_attempt의 quality를 크게 본다.
+향후에는 다음 요소를 반영해야 한다.
+
+    - judge가 산출한 accuracy / sufficiency
+    - Evidence와의 일치도
+    - 첫 답변의 부족분을 파생 질문에서 보완했는지
+    - 오개념을 정정했는지, 같은 주장을 반복했는지
+    - confirm_negative 이후 착각 인정/정정 여부
+    - question_difficulty 보정
+    - question_category별 평가 기준
+    - delivery_metrics 기반 전달력 참고
+
+========================================================================
+
+## 7. report_builder.py 리포트 생성 구조
+
+report_builder.py는 점수 계산이 끝난 AnswerEvaluation 목록을 최종 리포트로 바꾼다.
+
+    build_report(competency, evaluations)
+        │
+        ├── overall_score = _calculate_overall_score(evaluations)
+        │
+        ├── report_content = _build_content_with_llm(...)
+        │       │
+        │       └── 현재는 _temporary_report_content(evaluations)
+        │
+        └── FinalReport
+            ├── summary
+            ├── overall_score
+            ├── strengths
+            ├── improvement_points
+            ├── learning_recommendations
+            └── evaluations
+
+_calculate_overall_score():
+
+    evaluations가 없으면
+        └── 0.0
+
+    evaluations가 있으면
+        └── round(sum(score) / len(evaluations), 0)
+
+_temporary_report_content():
+
+    evaluations가 없으면
+        ├── "평가할 답변 기록이 없습니다."
+        ├── strengths = []
+        ├── improvement_points = ["답변 기록이 없어 ..."]
+        └── learning_recommendations = ["질문에 답변한 후 ..."]
+
+    evaluations가 있으면
+        ├── 총 문항 수와 평균 점수 기반 summary
+        ├── 고정 strengths 문구
+        ├── 70점 미만 topic을 improvement_points로 변환
+        └── 고정 learning_recommendations 문구
+
+향후 목표:
+- LLM으로 summary, strengths, weaknesses, recommendations를 생성한다.
+- 오개념 이력, 가산점 이력, 충돌 이력을 리포트 문장에 반영한다.
+- topics_to_improve 또는 topic_scores 하위 주제를 다음 면접 개인화에 제공한다.
+
+========================================================================
+
+## 8. prompts.py 프롬프트 구조
+
+현재 프롬프트는 3개다.
+
+    JUDGE_SYSTEM
+        │
+        ├── 답변을 Evidence와 비교해 평가
+        ├── quality 결정
+        ├── next_probe_target 작성
+        └── rationale 작성
+
+    CONFLICT_CHECK_SYSTEM
+        │
+        ├── 이전 답변 또는 Evidence와 충돌하는지 판단
+        ├── 충돌이면 confirm_negative
+        └── 충돌이 없으면 다른 quality 유지/판단
+
+    DELIVERY_NOTE
+        │
+        ├── 음성 모드 전달력 지표 참고
+        ├── 말 속도, 군더더기 표현, 답변 구조 확인
+        └── 내용 정확성 판단은 Evidence/답변 비교 우선
+
+아직 연결되지 않은 부분:
+- evaluator.py에서 JUDGE_SYSTEM을 실제 LLM 호출에 사용하지 않는다.
+- CONFLICT_CHECK_SYSTEM도 실제 LLM conflict check에 사용하지 않는다.
+- DELIVERY_NOTE는 delivery_metrics 입력이 있을 때 judge 프롬프트에 붙일 준비가 되어 있지만,
+  현재는 최종 평가나 AnswerEvaluation에 별도로 저장되지 않는다.
+
+========================================================================
+
+## 9. 3단계 이후 평가 판정 LangGraph 구조
+
+작업순서.md 기준으로, 최종적으로 evaluate() 내부는 작은 LangGraph로 바꿀 수 있다.
+이 그래프는 "면접 전체 흐름"이 아니라 "답변 1건 평가" 그래프다.
+
+예상 파일:
+
+    assessment/graph.py
+        ├── AssessmentEvalState
+        ├── retrieve_evidence
+        ├── judge
+        ├── conflict_check
+        ├── finalize_signal
+        └── get_compiled_graph()
+
+예상 흐름:
+
+    START
+      │
+      ▼
+    retrieve_evidence
+      │
+      ├── question.category 확인
+      ├── PROJECT면 search_evidence()
+      └── TECHNICAL이면 Evidence 없이 일반 지식 기준 준비
+      │
+      ▼
+    judge
+      │
+      ├── JUDGE_SYSTEM
+      ├── Question
+      ├── Answer
+      ├── Evidence
+      ├── 이전 답변 요약
+      ├── delivery_metrics
+      └── JudgeResult 구조화 출력
+      │
+      ▼
+    conflict_suspected?
+      │
+      ├── yes
+      │   └── conflict_check
+      │       ├── CONFLICT_CHECK_SYSTEM
+      │       ├── 이전 답변 요약
+      │       ├── 현재 답변
+      │       └── Evidence
+      │
+      └── no
+          └── finalize_signal
+      │
+      ▼
+    finalize_signal
+      │
+      └── AnswerQualitySignal 생성
+      │
+      ▼
+    END
+
+주의:
+- 그래프 state에는 직렬화 가능한 값만 둔다.
+- LLM 객체나 Evidence store 객체는 state에 넣지 않는다.
+- 충돌 검사는 항상 돌리지 않고 의심될 때만 돌려 지연을 줄인다.
+- judge 실패 시 현재 stub 규칙 같은 fallback이 필요하다.
+
+========================================================================
+
+## 10. Interviewer와의 호출 계약
+
+Interviewer는 Assessment를 아래 시점에 호출한다.
+
+### 10-1. 답변 제출 시
+
+    AssessmentAgent.evaluate(
+        question=current_question,
+        answer_text=answer_text,
+        delivery_metrics=delivery_metrics,
+    )
+        │
+        └── AnswerQualitySignal
+
+Interviewer는 signal.quality를 보고 route_quality를 결정한다.
+Assessment는 Strategy를 직접 호출하지 않는다.
+
+### 10-2. 질문 세트 완료 시
+
+    AssessmentAgent.complete_question_set(main_question_id)
+        │
+        ├── current_attempts를 점수화
+        ├── AnswerEvaluation 누적
+        └── current_attempts clear
+
+보통 다음 시점에 호출된다.
+- SUFFICIENT로 메인 질문 또는 파생 질문 세트가 충분히 끝났을 때
+- challenge를 이미 썼고 더 진행하지 않기로 했을 때
+- 질문 세트가 종료되고 다음 메인 질문으로 넘어갈 때
+
+### 10-3. 면접 종료 시
+
+    AssessmentAgent.finalize()
+        │
+        └── FinalReport
+
+Interviewer는 이 report를 SessionState.report에 저장하고 API 응답에 포함한다.
+
+========================================================================
+
+## 11. Evidence와의 연결
+
+Assessment가 Evidence를 쓰는 지점은 evaluator.py 하나로 모여 있다.
+
+    _collect_evidence_for_question(question)
+        │
+        ├── question.category != PROJECT
+        │   └── []
+        │
+        └── question.category == PROJECT
+            └── search_evidence(query=question.text, topic=question.topic)
+
+의도:
+- 프로젝트 구현 질문은 사용자의 GitHub/Notion 근거와 대조한다.
+- 기술 개념 질문은 Evidence가 부족해도 일반 지식 기준으로 판단할 수 있다.
+
+주의:
+- 현재 search_evidence에는 user_id가 전달되지 않는다.
+- 사용자별 Evidence store가 완성되면 AssessmentAgent.evaluate 또는 evaluator.judge_answer에도 user_id 경로가 필요하다.
+- Evidence 검색 결과가 없어도 judge는 멈추면 안 된다.
+  이 경우 "Evidence 없음. 일반 지식 기준 판단"으로 폴백해야 한다.
+
+========================================================================
+
+## 12. Strategy와의 연결
+
+Assessment는 Strategy 호출 대상을 직접 결정하지 않는다.
+다만 Strategy가 다음 질문을 만들 수 있도록 필요한 신호를 만든다.
+
+    AnswerQualitySignal
+        │
+        ├── quality
+        │   └── 어떤 next_*를 부를지 결정하는 값
+        │
+        └── next_probe_target
+            └── Strategy가 파생 질문에서 집중할 대상
+
+예:
+
+    JudgeResult(
+        quality=BONUS_AVAILABLE,
+        next_probe_target="fetch join을 통한 N+1 해결 방법",
+    )
+        │
+        ▼
+    AnswerQualitySignal
+        │
+        ▼
+    Interviewer
+        │
+        ▼
+    Strategy.next_follow_up(topic, parent_question_id, target="fetch join...")
+
+중요:
+- next_probe_target은 질문 문장이 아니다.
+- Strategy/question_gen이 target을 자연스러운 질문 문장으로 바꾼다.
+- rationale은 라우팅보다 로그/리포트/디버깅에 더 가깝다.
+
+========================================================================
+
+## 13. 현재 Stub / 임시 경계
+
+Assessment는 아직 실제 LLM-as-a-Judge가 완성된 상태가 아니다.
+
+    evaluator.py
+        │
+        ├── _judge_with_llm()
+        │   └── 실제 LLM 호출이 아니라 _temporary_judge_result()를 반환한다.
+        │
+        ├── _temporary_judge_result()
+        │   └── AnswerQuality 6종 중 하나를 random.choice로 반환한다.
+        │
+        ├── _run_conflict_check()
+        │   └── LLM이 아니라 문자열 conflict_pairs 기반 임시 검사다.
+        │
+        └── JudgeResult
+            └── accuracy / sufficiency 같은 채점 재료는 아직 없다.
+
+    scoring.py
+        │
+        ├── _calculate_question_set_score()
+        │   └── 마지막 quality 중심의 고정 점수표다.
+        │
+        └── difficulty/category/derived_count를 변수로 잡지만 아직 점수에 거의 반영하지 않는다.
+
+    report_builder.py
+        │
+        ├── _build_content_with_llm()
+        │   └── 실제 LLM 호출이 아니라 _temporary_report_content()를 반환한다.
+        │
+        └── CompetencyModel.average_score는 build_report에서 직접 갱신하지 않는다.
+
+    prompts.py
+        └── 프롬프트는 준비되어 있지만 evaluator/report_builder의 실제 LLM 호출에 아직 연결 전이다.
+
+계약 주의:
+- schemas/question.py에는 category 필드가 중복 선언되어 있다.
+- AnswerEvaluation에는 delivery_note, quality 흐름, follow_up_question_ids 같은 상세 필드는 없다.
+- 리포트에 파생 질문 이력이나 전달력 노트를 넣으려면 schemas/report.py 확장이 필요하다.
+
+========================================================================
+
+## 14. 단계별로 어느 파일을 보면 되는지
+
+### 1단계. 외부 공개 API 확인
+
+    assessment/__init__.py
+        └── AssessmentAgent export 확인
+
+### 2단계. 전체 평가 상태와 진입점 확인
+
+    assessment/agent.py
+        ├── AssessmentAgent.__init__()
+        ├── evaluate()
+        ├── complete_question_set()
+        ├── finalize()
+        ├── _find_main_attempt()
+        └── _build_answer_summary()
+
+### 3단계. 답변 1건 평가 확인
+
+    assessment/evaluator.py
+        ├── JudgeResult
+        ├── judge_answer()
+        ├── _collect_evidence_for_question()
+        ├── _judge_with_llm()
+        ├── _build_history_summary()
+        ├── _run_conflict_check()
+        └── _temporary_judge_result()
+
+### 4단계. 질문 세트 점수 확인
+
+    assessment/scoring.py
+        ├── AnswerAttempt
+        ├── QuestionSetScore
+        ├── score_question_set()
+        ├── _calculate_question_set_score()
+        └── _find_main_attempt()
+
+### 5단계. 최종 리포트 확인
+
+    assessment/report_builder.py
+        ├── ReportContent
+        ├── build_report()
+        ├── _calculate_overall_score()
+        ├── _build_content_with_llm()
+        ├── _temporary_report_content()
+        └── _collect_unique_items()
+
+### 6단계. 프롬프트 확인
+
+    assessment/prompts.py
+        ├── JUDGE_SYSTEM
+        ├── CONFLICT_CHECK_SYSTEM
+        └── DELIVERY_NOTE
+
+### 7단계. 계약 스키마 확인
+
+    schemas/signals.py
+        ├── AnswerQuality
+        └── AnswerQualitySignal
+
+    schemas/report.py
+        ├── AnswerEvaluation
+        ├── CompetencyModel
+        └── FinalReport
+
+    schemas/question.py
+        ├── Question
+        ├── QuestionKind
+        ├── Difficulty
+        └── QuestionCategory
+
+### 8단계. 주변 연결 확인
+
+    evidence/retrieval.py
+        └── search_evidence()
+
+    interviewer/graph.py 또는 interviewer/agent.py
+        ├── AssessmentAgent.evaluate()
+        ├── AssessmentAgent.complete_question_set()
+        └── AssessmentAgent.finalize()
+
+    strategy/agent.py
+        └── AnswerQualitySignal 이후 Strategy.next_* 호출 흐름 확인
+
+========================================================================
+
+## 15. 작업할 때 기억할 규칙
+
+1. Assessment는 질문 생성자가 아니다.
+   질문 생성은 Strategy가 한다.
+
+2. Assessment는 면접 흐름 관리자 자체가 아니다.
+   quality별 라우팅은 Interviewer가 한다.
+
+3. Assessment는 AnswerQualitySignal을 만든다.
+   이 신호는 점수가 아니라 다음 흐름 결정용이다.
+
+4. 점수는 답변 1건마다 만들지 않는다.
+   메인 질문과 파생 질문을 묶은 질문 세트 단위로 만든다.
+
+5. current_attempts는 현재 질문 세트용이다.
+   complete_question_set 이후 비워진다.
+
+6. all_attempts는 면접 전체 이력이다.
+   충돌 검사나 자기모순 검사에 사용하므로 세트가 끝나도 유지한다.
+
+7. 프로젝트 구현 질문은 Evidence 대조 중심으로 본다.
+   기술 개념 질문은 Evidence가 없어도 일반 지식 기준으로 판단할 수 있다.
+
+8. Evidence가 없다고 평가가 실패하면 안 된다.
+   근거 없음 폴백 기준이 필요하다.
+
+9. delivery_metrics는 내용 정확성보다 우선하지 않는다.
+   전달력 참고나 리포트 노트로만 사용한다.
+
+10. 충돌 검사는 매번 무조건 돌리지 않는다.
+    judge가 conflict_suspected를 줄 때만 정밀 검사하는 구조가 지연에 유리하다.
+
+11. JudgeResult에는 채점 재료가 필요하다.
+    향후 accuracy/sufficiency를 넣어 scoring.py가 고정 점수표에서 벗어나게 한다.
+
+12. rationale은 최종 리포트의 원료가 될 수 있다.
+    단순 로그가 아니라 사람이 이해할 수 있는 근거 문장으로 남기는 것이 좋다.
+
+13. confirm_negative와 misconception은 다르다.
+    confirm_negative는 근거/이전 답변과의 충돌 확인이고,
+    misconception은 개념 자체의 오해나 논리적 허점이다.
+
+14. 파생 질문에서 정정한 답변은 점수에 반영해야 한다.
+    첫 답변이 부족해도 follow_up/challenge에서 보완하면 회복 가능해야 한다.
+
+15. report_builder는 evaluations를 요약한다.
+    답변 판정이나 세트 점수 계산을 report_builder에 넣지 않는다.
+
+16. 다음 면접 개인화를 위해 약점 주제 조회 함수가 필요할 수 있다.
+    이 결과는 Strategy의 topic 선택 입력으로 넘어간다.
+
+17. user_id별 Evidence 검색 경로가 들어오면 AssessmentAgent.evaluate와 evaluator에도 전달 경로가 필요하다.
+
+18. schemas/report.py를 확장할 때는 API 응답과 프론트 표시 구조도 함께 맞춰야 한다.
+
+========================================================================
+
+## 16. 최종 완성 후 목표 구조
+
+최종적으로 Assessment는 아래 모양이 된다.
+
+    Interviewer
+        │
+        ├── Question
+        ├── answer_text
+        └── delivery_metrics
+        │
+        ▼
+    AssessmentAgent.evaluate()
+        │
+        ├── assessment/graph.py
+        │   ├── retrieve_evidence
+        │   ├── judge
+        │   ├── conflict_check
+        │   └── finalize_signal
+        │
+        ├── evaluator.py
+        │   ├── JUDGE_SYSTEM
+        │   ├── CONFLICT_CHECK_SYSTEM
+        │   ├── DELIVERY_NOTE
+        │   ├── Evidence context
+        │   ├── previous answer summary
+        │   └── JudgeResult
+        │
+        └── AnswerQualitySignal
+            ├── quality
+            ├── next_probe_target
+            └── rationale
+        │
+        ▼
+    Interviewer
+        │
+        ├── route_quality
+        └── Strategy.next_* 호출
+
+질문 세트 완료:
+
+    AssessmentAgent.complete_question_set()
+        │
+        ├── current_attempts
+        ├── scoring.py
+        │   ├── accuracy
+        │   ├── sufficiency
+        │   ├── 파생 질문 보완 여부
+        │   ├── 오개념 정정 여부
+        │   └── delivery 참고
+        │
+        └── AnswerEvaluation
+            ├── topic
+            ├── score
+            ├── comment
+            └── answer_summary
+
+면접 종료:
+
+    AssessmentAgent.finalize()
+        │
+        └── report_builder.py
+            ├── evaluations
+            ├── competency
+            ├── LLM summary
+            ├── strengths
+            ├── improvement_points
+            ├── learning_recommendations
+            └── FinalReport
+
+면접 전체에서 보면:
+
+    Strategy
+        └── Question 생성
+                │
+                ▼
+    Interviewer
+        └── 사용자 답변 수집
+                │
+                ▼
+    Assessment
+        ├── AnswerQualitySignal 생성
+        ├── 질문 세트 점수 누적
+        └── FinalReport 생성
+                │
+                ▼
+    Interviewer
+        ├── 다음 질문 라우팅
+        └── 종료 시 report 응답
+
+한 문장으로 정리:
+
+    Assessment는 "답변 1건은 흐름 신호로, 질문 세트는 점수로,
+    전체 면접은 리포트로 바꾸는 평가 전용 계층"이다.
