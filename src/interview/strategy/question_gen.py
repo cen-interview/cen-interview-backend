@@ -18,6 +18,7 @@ from interview.strategy.prompts import (
     CONFIRM_POSITIVE_SYSTEM,
     CONFIRM_NEGATIVE_SYSTEM,
     TRAP_SYSTEM,
+    HINT_SYSTEM
 )
 _EVIDENCE_CONFIDENCE_THRESHOLD = 0.4
 
@@ -50,6 +51,10 @@ class GeneratedDerivedQuestion(BaseModel):
         description="질문 카테고리: technical(기술개념), project(프로젝트구현) 중 하나. "
         "부모 질문의 맥락과 다를 수 있다 (예: 프로젝트 질문에서 파생된 기술개념 확인 질문)."
     )
+
+class GeneratedHint(BaseModel):
+    """LLM이 생성하는 힌트의 구조화 출력."""
+    text: str = Field(description="정답을 직접 알려주지 않는 힌트 문장. 한두 문장으로 짧게.")
 
 def _generate_derived_question(
     kind: QuestionKind,
@@ -260,19 +265,51 @@ def generate_hint(
         kind=HINT인 Question. parent_question_id는 원래 question의 ID.
     """
 
-    probe = target or "힌트 제공"
+    probe = target or "질문의 핵심 개념"
     evidence_chunks = search_evidence(query=probe, topic=question.topic)
+    reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
+
+    context = (
+        "\n".join(f"- {c.text}" for c in reliable_chunks)
+        if reliable_chunks
+        else "(관련 근거 없음)"
+    )
+    excerpt_block = f'"{answer_excerpt}"' if answer_excerpt else "(답변 없음, 완전 침묵 상태)"
+
+    user_prompt = f"""\
+원래 질문: {question.text}
+힌트가 필요한 부분(target): {probe}
+
+지원자의 답변 상태:
+{excerpt_block}
+
+근거 (키워드 1개까지만 활용):
+{context}
+"""
+    
+    llm = get_llm(temperature=0.6)
+    structured_llm = llm.with_structured_output(GeneratedHint)
+
+    try :
+        result = structured_llm.invoke(
+            [
+                {"role": "system", "content": HINT_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+        text = result.text
+    except Exception :
+        text = f"힌트: {question.text}에 대해 생각할 때 '{probe}' 부분을 고려해 보세요."
 
     return Question(
         question_id=str(uuid4()),
-        text=f"힌트: {question.text}에 대해 생각할 때 '{probe}' 부분을 고려해 보세요.",
+        text=text,
         topic=question.topic,
-        difficulty=Difficulty.EASY,
+        difficulty=question.difficulty,
         kind=QuestionKind.HINT,
-        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
+        evidence_ids=[chunk.chunk_id for chunk in reliable_chunks],
         parent_question_id=question.question_id,
     )
-
 
 def _fallback_question(topic: str, difficulty: Difficulty, evidence_ids: list[str]) -> Question:
     """LLM 호출 실패 시 사용하는 템플릿 질문."""
