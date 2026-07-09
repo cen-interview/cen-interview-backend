@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from interview.assessment import AssessmentAgent
@@ -11,6 +12,7 @@ from interview.schemas.question import Question
 from interview.schemas.report import FinalReport
 from interview.schemas.signals import AnswerQualitySignal
 from interview.strategy import StrategyAgent
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
@@ -289,21 +291,59 @@ def after_ask(state: SessionState | dict[str, Any]) -> str:
     return "end" if finished or asked_count >= max_questions else "continue"
 
 
-builder = StateGraph(SessionState, context_schema=InterviewDeps)
-builder.add_node("greet", greet)
-builder.add_node("wait_event", wait_event)
-builder.add_node("evaluate_answer", evaluate_answer)
-builder.add_node("ask_main", ask_main)
+def _build_graph() -> StateGraph:
+    """면접 세션의 LangGraph builder를 조립한다.
 
-builder.add_edge(START, "greet")
-builder.add_edge("greet", "wait_event")
-builder.add_edge("wait_event", "evaluate_answer")
-builder.add_edge("evaluate_answer", "ask_main")
-builder.add_conditional_edges(
-    "ask_main",
-    after_ask,
-    {"end": END, "continue": "wait_event"},
-)
+    왜 필요한가:
+        그래프의 노드/엣지 정의와 컴파일 시점을 분리하기 위해 builder 조립을
+        함수로 감싼다. 이렇게 해두면 `get_compiled_graph()`가 캐시된 compiled
+        graph를 만들 때마다 같은 구조를 명확하게 재사용할 수 있다.
+
+    그래프 흐름:
+        START → greet → wait_event → evaluate_answer → ask_main
+
+        `ask_main` 이후에는 `after_ask()` 라우터가 질문 수와 finished 상태를
+        보고 END로 갈지, 다시 `wait_event`로 돌아갈지 결정한다.
+
+    Returns:
+        아직 compile되지 않은 StateGraph builder.
+    """
+    builder = StateGraph(SessionState, context_schema=InterviewDeps)
+    builder.add_node("greet", greet)
+    builder.add_node("wait_event", wait_event)
+    builder.add_node("evaluate_answer", evaluate_answer)
+    builder.add_node("ask_main", ask_main)
+
+    builder.add_edge(START, "greet")
+    builder.add_edge("greet", "wait_event")
+    builder.add_edge("wait_event", "evaluate_answer")
+    builder.add_edge("evaluate_answer", "ask_main")
+    builder.add_conditional_edges(
+        "ask_main",
+        after_ask,
+        {"end": END, "continue": "wait_event"},
+    )
+    return builder
+
+
+@lru_cache(maxsize=1)
+def get_compiled_graph():
+    """체크포인터가 붙은 compiled graph를 모듈 단위로 1회만 생성한다. -- 싱클턴
+
+    왜 필요한가:
+        LangGraph의 `interrupt()` 기반 흐름은 checkpointer와 `thread_id`를
+        함께 사용해야 재개(resume)가 가능하다. 여기서는 개발/초기 단계에
+        적합한 `InMemorySaver`를 붙여 그래프를 컴파일한다.
+
+        compiled graph는 매 요청마다 새로 만들 필요가 없으므로 `lru_cache`로
+        프로세스 안에서 한 번만 생성한다. 이후 API 계층은 이 함수를 호출해
+        동일한 compiled graph 인스턴스를 재사용하면 된다.
+
+    Returns:
+        `InMemorySaver` checkpointer로 컴파일된 LangGraph 실행 객체.
+    """
+    builder = _build_graph()
+    return builder.compile(checkpointer=InMemorySaver())
 
 
 class InterviewSession:
