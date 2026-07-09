@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 
-from schemas.events import InterviewerEvent
+from interview.schemas.events import InterviewerEvent
 
 
 class DeliveryMetrics(BaseModel):
