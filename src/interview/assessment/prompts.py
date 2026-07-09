@@ -1,7 +1,12 @@
-"""Assessment 프롬프트 (LLM-as-a-Judge).
+"""Assessment 프롬프트.
 
-근거 기반 평가 프롬프트.
-답변을 보고 다음 면접 흐름을 결정할 AnswerQualitySignal을 생성한다.
+LLM-as-a-Judge 방식으로 답변 하나의 품질을 평가한다.
+
+이 프롬프트는 점수를 계산하지 않는다.
+점수는 scoring.py에서 메인 질문 + 파생 질문을 묶은 질문 세트 단위로 계산한다.
+
+이 프롬프트의 목적은 AnswerQualitySignal에 들어갈
+quality, next_probe_target, rationale을 판단하는 것이다.
 """
 
 JUDGE_SYSTEM = """\
