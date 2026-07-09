@@ -4,6 +4,8 @@ from interview.evidence.retrieval import search_evidence
 from interview.schemas.question import Difficulty, Question, QuestionKind
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.strategy.agent import StrategyAgent
+from interview.schemas.evidence import CoverageMap, TopicCoverage
+
 
 
 def make_main_question() -> Question:
@@ -150,3 +152,50 @@ def test_assessment_agent_evaluate_returns_signal():
     )
 
     assert isinstance(signal, AnswerQualitySignal)
+
+def test_pick_topic_avoids_consecutive_same_topic():
+    coverage = CoverageMap(
+        topic_coverage={
+            "FastAPI": TopicCoverage(confidence=0.9, chunk_count=5),
+            "Docker": TopicCoverage(confidence=0.8, chunk_count=5),
+        }
+    )
+    strategy = StrategyAgent(coverage=coverage)
+
+    # 직전 주제를 FastAPI로 만들어둔다
+    strategy.state.asked_topics.append("FastAPI")
+
+    for _ in range(20):
+        topic = strategy._pick_topic()
+        assert topic != "FastAPI"
+
+
+def test_pick_topic_avoids_weak_topics():
+    coverage = CoverageMap(
+        topic_coverage={
+            "FastAPI": TopicCoverage(confidence=0.9, chunk_count=5),
+            "Docker": TopicCoverage(confidence=0.1, chunk_count=1),  # weak (< 0.4)
+        }
+    )
+    strategy = StrategyAgent(coverage=coverage)
+
+    for _ in range(20):
+        topic = strategy._pick_topic()
+        assert topic != "Docker"
+
+
+def test_pick_topic_recycles_when_all_topics_asked():
+    coverage = CoverageMap(
+        topic_coverage={
+            "FastAPI": TopicCoverage(confidence=0.9, chunk_count=5),
+            "Docker": TopicCoverage(confidence=0.8, chunk_count=5),
+        }
+    )
+    strategy = StrategyAgent(coverage=coverage)
+
+    # 둘 다 이미 물어본 것으로 만들어둔다 (주제 소진 상황)
+    strategy.state.asked_topics.extend(["FastAPI", "Docker"])
+
+    # 재순환되어 둘 중 하나는 나와야 함 (에러 없이 정상 반환)
+    topic = strategy._pick_topic()
+    assert topic in {"FastAPI", "Docker"}
