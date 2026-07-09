@@ -27,6 +27,10 @@ class StrategyState(BaseModel):
         question_count:
             지금까지 출제된 메인 질문 수. 파생 질문(꼬리/압박/확인/함정)은
             포함하지 않는다.
+        
+        derived_question_count:
+            지금까지 출제된 파생 질문(꼬리/압박/확인/함정) 수. hint는
+            실제 출제된 질문이 아니므로 포함하지 않는다.
 
         asked_question_texts:
             지금까지 출제된 질문의 실제 문장 목록. 중복 질문 방지를 위해
@@ -40,6 +44,7 @@ class StrategyState(BaseModel):
     asked_topics: list[str] = Field(default_factory=list)
     asked_difficulties: list[Difficulty] = Field(default_factory=list)
     question_count: int = 0
+    derived_question_count: int = 0
 
     asked_question_texts: list[str] = Field(default_factory=list)
     topic_last_quality: dict[str, AnswerQuality] = Field(default_factory=dict)
