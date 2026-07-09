@@ -11,15 +11,103 @@ from pydantic import BaseModel, Field
 from interview.evidence.retrieval import search_evidence
 from interview.llm.client import get_llm
 from interview.schemas.question import Difficulty, Question, QuestionCategory,QuestionKind
-from interview.strategy.prompts import QUESTION_GEN_SYSTEM
-
+from interview.strategy.prompts import (
+    QUESTION_GEN_SYSTEM,
+    FOLLOW_UP_SYSTEM,
+    CHALLENGE_SYSTEM,
+    CONFIRM_POSITIVE_SYSTEM,
+    CONFIRM_NEGATIVE_SYSTEM,
+    TRAP_SYSTEM,
+)
 _EVIDENCE_CONFIDENCE_THRESHOLD = 0.4
 
+_DERIVED_DIFFICULTY: dict[QuestionKind, Difficulty] = {
+    QuestionKind.FOLLOW_UP: Difficulty.EASY,
+    QuestionKind.CHALLENGE: Difficulty.MEDIUM,
+    QuestionKind.CONFIRM_POSITIVE: Difficulty.EASY,
+    QuestionKind.CONFIRM_NEGATIVE: Difficulty.EASY,
+    QuestionKind.TRAP: Difficulty.MEDIUM,
+}
+
+_DERIVED_SYSTEM_PROMPTS: dict[QuestionKind, str] = {
+    QuestionKind.FOLLOW_UP: FOLLOW_UP_SYSTEM,
+    QuestionKind.CHALLENGE: CHALLENGE_SYSTEM,
+    QuestionKind.CONFIRM_POSITIVE: CONFIRM_POSITIVE_SYSTEM,
+    QuestionKind.CONFIRM_NEGATIVE: CONFIRM_NEGATIVE_SYSTEM,
+    QuestionKind.TRAP: TRAP_SYSTEM,
+}
 class GeneratedQuestion(BaseModel):
     """LLM이 생성하는 질문의 구조화 출력."""
     text: str = Field(description="생성된 질문 문장. 반드시 하나의 질문만 담는다.")
     category: QuestionCategory = Field(
         description="질문 카테고리: technical(기술개념), project(프로젝트구현)중 하나."
+    )
+
+class GeneratedDerivedQuestion(BaseModel):
+    """LLM이 생성하는 파생 질문의 구조화 출력."""
+    text: str = Field(description="생성된 질문 문장. 반드시 하나의 질문만 담는다.")
+    category: QuestionCategory = Field(
+        description="질문 카테고리: technical(기술개념), project(프로젝트구현) 중 하나. "
+        "부모 질문의 맥락과 다를 수 있다 (예: 프로젝트 질문에서 파생된 기술개념 확인 질문)."
+    )
+
+def _generate_derived_question(
+    kind: QuestionKind,
+    topic: str,
+    parent_question_id: str,
+    target: str | None,
+    answer_excerpt: str | None,
+) -> Question:
+    """파생 질문(follow_up/challenge/confirm_positive/confirm_negative/trap) 공통 생성 로직."""
+    probe = target or "답변에서 더 확인이 필요한 부분"
+    evidence_chunks = search_evidence(query=probe, topic=topic, k=5)
+    reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
+
+    context = (
+        "\n".join(f"- {c.text}" for c in reliable_chunks)
+        if reliable_chunks
+        else "(관련 근거 없음)"
+    )
+    excerpt_block = f'"{answer_excerpt}"' if answer_excerpt else "(답변 발췌 없음)"
+
+    user_prompt = f"""\
+주제: {topic}
+확인이 필요한 부분(target): {probe}
+
+사용자의 직전 답변 중 관련 발췌:
+{excerpt_block}
+
+근거:
+{context}
+"""
+
+    system_prompt = _DERIVED_SYSTEM_PROMPTS[kind]
+    difficulty = _DERIVED_DIFFICULTY[kind]
+    llm = get_llm(temperature=0.6)
+    structured_llm = llm.with_structured_output(GeneratedDerivedQuestion)
+
+    try:
+        result = structured_llm.invoke(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+        text = result.text
+        category = result.category
+    except Exception:
+        text = f"{topic} 답변에서 '{probe}' 부분을 조금 더 설명해 주시겠어요?"
+        category = None
+
+    return Question(
+        question_id=str(uuid4()),
+        text=text,
+        topic=topic,
+        difficulty=difficulty,
+        kind=kind,
+        category=category,
+        evidence_ids=[c.chunk_id for c in reliable_chunks],
+        parent_question_id=parent_question_id,
     )
 
 def generate_question(
@@ -103,18 +191,8 @@ def generate_follow_up(
         answer_excerpt: str | None = None
     ) -> Question:
     """추가 확인 가능한 요소에 대한 꼬리 질문 생성."""
-
-    probe = target or "추가로 설명할 수 있는 부분"
-    evidence_chunks = search_evidence(query=probe, topic=topic)
-
-    return Question(
-        question_id=str(uuid4()),
-        text=f"{topic} 답변에서 '{probe}' 부분을 조금 더 구체적으로 설명해 주세요.",
-        topic=topic,
-        difficulty=Difficulty.EASY,
-        kind=QuestionKind.FOLLOW_UP,
-        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=parent_question_id,
+    return _generate_derived_question(
+        QuestionKind.FOLLOW_UP, topic, parent_question_id, target, answer_excerpt
     )
 
 
@@ -125,18 +203,8 @@ def generate_challenge(
         answer_excerpt: str | None = None
     )-> Question:
     """오개념이나 논리적 허점을 검증하는 압박 질문 생성."""
-
-    probe = target or "답변의 논리적 근거"
-    evidence_chunks = search_evidence(query=probe, topic=topic)
-
-    return Question(
-        question_id=str(uuid4()),
-        text=f"{topic} 답변에서 '{probe}' 부분이 조금 더 검증이 필요합니다. 그 근거를 다시 설명해 주시겠어요?",
-        topic=topic,
-        difficulty=Difficulty.EASY,
-        kind=QuestionKind.CHALLENGE,
-        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=parent_question_id,
+    return _generate_derived_question(
+        QuestionKind.CHALLENGE, topic, parent_question_id, target, answer_excerpt
     )
 
 
@@ -147,20 +215,9 @@ def generate_confirm_positive(
         answer_excerpt: str | None = None
     ) -> Question:
     """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
-
-    probe = target or "답변의 적용 범위"
-    evidence_chunks = search_evidence(query=probe, topic=topic)
-
-    return Question(
-        question_id=str(uuid4()),
-        text=f"좋습니다. {topic}에서 말씀하신 '{probe}' 부분은 실제 프로젝트에서도 그렇게 적용하신 건가요?",
-        topic=topic,
-        difficulty=Difficulty.EASY,
-        kind=QuestionKind.CONFIRM_POSITIVE,
-        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=parent_question_id,
+    return _generate_derived_question(
+        QuestionKind.CONFIRM_POSITIVE, topic, parent_question_id, target, answer_excerpt
     )
-
 
 def generate_confirm_negative(
     topic: str,
@@ -169,18 +226,8 @@ def generate_confirm_negative(
     answer_excerpt: str | None = None
     ) -> Question:
     """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
-
-    probe = target or "답변과 근거가 다른 부분"
-    evidence_chunks = search_evidence(query=probe, topic=topic)
-
-    return Question(
-        question_id=str(uuid4()),
-        text=f"{topic}에 대해 말씀하신 내용 중 '{probe}' 부분이 기존 근거와 다르게 보입니다. 다른 프로젝트나 계획 단계였던 부분일까요?",
-        topic=topic,
-        difficulty=Difficulty.EASY,
-        kind=QuestionKind.CONFIRM_NEGATIVE,
-        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=parent_question_id,
+    return _generate_derived_question(
+        QuestionKind.CONFIRM_NEGATIVE, topic, parent_question_id, target, answer_excerpt
     )
 
 
@@ -191,18 +238,8 @@ def generate_trap(
     answer_excerpt: str | None = None
     ) -> Question:
     """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
-
-    probe = target or "헷갈리기 쉬운 개념"
-    evidence_chunks = search_evidence(query=probe, topic=topic)
-
-    return Question(
-        question_id=str(uuid4()),
-        text=f"{topic}에서 '{probe}'와 비슷해 보이지만 다른 개념이 있다면 어떻게 구분하시겠어요?",
-        topic=topic,
-        difficulty=Difficulty.EASY,
-        kind=QuestionKind.TRAP,
-        evidence_ids=[chunk.chunk_id for chunk in evidence_chunks],
-        parent_question_id=parent_question_id,
+    return _generate_derived_question(
+        QuestionKind.TRAP, topic, parent_question_id, target, answer_excerpt
     )
 
 def generate_hint(
