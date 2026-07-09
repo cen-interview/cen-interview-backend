@@ -1,70 +1,953 @@
+# Interviewer 패키지 트리 구조로 한눈에 파악하기
 
-            프론트 / 음성 처리 시스템
-                    │
-                    │ raw payload
-                    ▼
-            ┌───────────────────┐
-            │    adapters.py    │
-            │                   │
-            │  from_chat()      │
-            │  from_voice()     │
-            └─────────┬─────────┘
-                      │
-                      ▼
-                 AdaptedInput
-                      │
-                 ┌────┴──────────────┐
-                 ▼                   ▼
-               event          delivery_metrics
-                 │                   │
-                 ▼                   ▼
-            AnswerSubmitted      말하기 속도
-            SilenceDetected      추임새 개수
-            ReplayRequested      답변 시간
-            EndRequested             │
-            NoResponseTimeout        └─ 음성 답변일 때만 존재
+========================================================================
 
-================================================================
+## 0. 큰 그림
 
-            AdaptedInput
-            │
-            ├── event
-            │   └── AnswerSubmitted
-            │       ├── session_id
-            │       ├── question_id
-            │       └── text
-            │
-            └── delivery_metrics
-                └── DeliveryMetrics
-                    ├── speech_rate_wpm
-                    ├── filler_count
-                    └── duration_seconds
+Interviewer 패키지는 "질문을 직접 만들거나 답변을 직접 평가하는 곳"이 아니다.
 
-================================================================
+역할은 다음 3가지다.
 
-            프론트 raw payload
-                    │
-                    ▼
-               adapters.py
-                    │
-                    │ 입력 형식 통일
-                    ▼
-               AdaptedInput
-                    │
-                    ├── event
-                    └── delivery_metrics
-                    │
-                    ▼
-                 agent.py
-                    │
-                    │ 이벤트 종류 판단
-                    ▼
-             ┌─────────────────────────┐
-             │      InterviewerAgent   │
-             ├─────────────────────────┤
-             │ AnswerSubmitted         │ → Assessment에 평가 요청
-             │ SilenceDetected         │ → 침묵 정책 처리
-             │ ReplayRequested         │ → 질문 재전달
-             │ EndRequested            │ → 면접 종료
-             │ NoResponseTimeout       │ → 타임아웃 처리
-             └─────────────────────────┘
+1. 프론트에서 들어온 채팅/음성 입력을 공통 이벤트로 정규화한다.
+2. 현재 세션 상태를 보고 다음 면접 흐름을 결정한다.
+3. Strategy와 Assessment를 연결해서 다음 질문, 종료, 리포트를 오케스트레이션한다.
+
+흐름을 아주 크게 보면 아래와 같다.
+
+    Frontend
+    chat / voice raw payload
+        │
+        ▼
+    interviewer/adapters.py
+    raw payload -> AdaptedInput : raw - 가공되지 않은
+        │
+        ├── event
+        │   ├── AnswerSubmitted
+        │   ├── ReplayRequested
+        │   ├── EndRequested
+        │   ├── SilenceDetected
+        │   └── NoResponseTimeout
+        │
+        └── delivery_metrics
+            └── DeliveryMetrics | None
+        │
+        ▼
+    interviewer/graph.py
+    전체 면접 흐름 실행
+        │
+        ├── SessionState 갱신
+        ├── AssessmentAgent.evaluate() 호출
+        ├── StrategyAgent.next_*() 호출
+        └── finalize 시 AssessmentAgent.finalize() 호출
+        │
+        ▼
+    API response
+    다음 면접관 발화 / 다음 질문 / 종료 여부 / 리포트
+
+========================================================================
+
+## 1. 현재 Interviewer 패키지 파일 트리
+
+    src/interview/interviewer/
+    │
+    ├── 작업순서.md
+    │   └── 전체 구현 로드맵. 이 파일을 기준으로 단계별 작업을 진행한다.
+    │
+    ├── 트리 구조로 한눈에 파악하기.example
+    │   └── 지금 보고 있는 파일. 구조 파악용 지도.
+    │
+    ├── __init__.py
+    │   └── 외부에서 import할 공개 객체를 정리한다.
+    │       현재: InterviewerAgent, SessionState
+    │       6단계 이후: 그래프 파사드 또는 새 API에 맞춰 정리 예정.
+    │
+    ├── models.py
+    │   └── 어댑터가 반환하는 공통 입력 모델.
+    │
+    │       DeliveryMetrics
+    │       ├── speech_rate_wpm: float | None
+    │       ├── filler_count: int | None
+    │       └── duration_seconds: float | None
+    │
+    │       AdaptedInput
+    │       ├── event: InterviewerEvent
+    │       └── delivery_metrics: DeliveryMetrics | None
+    │
+    ├── session.py
+    │   └── 한 면접 세션 동안 유지되는 상태 모델.
+    │
+    │       Turn
+    │       ├── role: "interviewer" | "candidate"
+    │       ├── text
+    │       ├── question_id
+    │       ├── kind
+    │       └── created_at
+    │
+    │       SilencePolicy
+    │       ├── hint_threshold_seconds = 8.0
+    │       ├── first_action = "hint"
+    │       ├── second_action = "represent"
+    │       └── max_events_before_timeout = 3
+    │
+    │       TimeoutPolicy
+    │       └── action = "end" | "pause"
+    │
+    │       SessionState
+    │       ├── session_id / mode / max_questions
+    │       ├── current_question / asked_count
+    │       ├── main_question_id / main_topic
+    │       ├── transcript
+    │       ├── pending_event / pending_delivery_metrics
+    │       ├── evaluations / competency / last_signal
+    │       ├── last_utterance / turn_type
+    │       ├── silence_policy / timeout_policy / silence_count
+    │       ├── challenge_used_in_set
+    │       ├── error / report
+    │       └── finished
+    │
+    ├── adapters.py
+    │   └── 채팅/음성 raw payload를 공통 입력으로 변환한다.
+    │
+    │       from_chat(session_id, question_id, payload)
+    │       ├── action="submit" -> AnswerSubmitted + metrics=None
+    │       └── action="end"    -> EndRequested + metrics=None
+    │
+    │       from_voice(session_id, question_id, payload)
+    │       ├── action="submit"  -> AnswerSubmitted + DeliveryMetrics | None
+    │       ├── action="silence" -> SilenceDetected
+    │       ├── action="replay"  -> ReplayRequested
+    │       ├── action="end"     -> EndRequested
+    │       └── action="timeout" -> NoResponseTimeout
+    │
+    ├── agent.py
+    │   └── 현재는 이벤트별 분기와 Strategy/Assessment 연결을 담당한다.
+    │       3~4단계 이후 이 책임은 graph.py의 노드/엣지로 이동한다.
+    │       6단계에서는 그래프 파사드로 재작성하거나 export만 유지할 수 있다.
+    │
+    └── graph.py
+        └── 현재는 InterviewSession + 인메모리 세션 레지스트리 역할.
+            3단계 이후 LangGraph StateGraph로 교체될 핵심 파일.
+
+========================================================================
+
+## 2. 주변 패키지와 연결 관계
+
+Interviewer는 혼자 동작하지 않고 아래 패키지들과 연결된다.
+
+    src/interview/
+    │
+    ├── schemas/
+    │   ├── events.py
+    │   │   └── InterviewerEvent 계약.
+    │   │       adapters.py가 만들고 graph.py/agent.py가 소비한다.
+    │   │
+    │   ├── question.py
+    │   │   └── Question 계약.
+    │   │       Strategy가 만들고 Interviewer가 세션에 저장한 뒤 API로 반환한다.
+    │   │       kind에는 MAIN / FOLLOW_UP / CHALLENGE / CONFIRM_* / TRAP / HINT가 있다.
+    │   │       category는 Assessment가 기술개념/프로젝트구현/트러블슈팅 판단 기준으로 사용한다.
+    │   │
+    │   ├── signals.py
+    │   │   └── AnswerQualitySignal 계약.
+    │   │       Assessment가 만들고 Interviewer가 다음 분기 판단에 사용한다.
+    │   │
+    │   ├── evidence.py
+    │   │   └── CoverageMap 계약.
+    │   │       Evidence가 만들고 Strategy가 주제 선택/난이도 조정에 참고한다.
+    │   │
+    │   └── report.py
+    │       └── FinalReport / AnswerEvaluation / CompetencyModel.
+    │           Assessment가 최종 리포트 생성 시 사용한다.
+    │
+    ├── strategy/
+    │   └── agent.py
+    │       └── 다음 질문을 만든다.
+    │
+    │           next_question()
+    │           next_follow_up()
+    │           next_challenge()
+    │           next_confirm_positive()
+    │           next_confirm_negative()
+    │           next_trap()
+    │           next_hint()
+    │
+    ├── evidence/
+    │   ├── indexing.py
+    │   │   └── Notion/GitHub 근거를 인덱싱하고 CoverageMap을 만든다.
+    │   │
+    │   └── retrieval.py
+    │       └── search_evidence().
+    │           Strategy와 Assessment 내부 RAG에서 사용한다.
+    │
+    ├── assessment/
+    │   └── agent.py
+    │       └── 답변 평가와 리포트 생성을 담당한다.
+    │
+    │           evaluate()
+    │           complete_question_set()
+    │           finalize()
+    │
+    └── api/
+        ├── main.py
+        │   └── 현재 API 진입점.
+        │
+        └── interviews/router.py
+            └── 6단계에서 새로 만들 예정.
+                /api/sessions, /api/sessions/{id}/events를 담당한다.
+
+========================================================================
+
+## 3. 데이터 모델 트리
+
+### 3-1. 프론트 입력이 Interviewer 내부 입력이 되는 과정
+
+    raw payload
+        │
+        ├── chat mode
+        │   ├── {"action": "submit", "text": "..."}
+        │   └── {"action": "end"}
+        │
+        └── voice mode
+            ├── {"action": "submit", "text": "...", "speech_rate_wpm": 120}
+            ├── {"action": "silence", "silence_duration_seconds": 8.5}
+            ├── {"action": "replay"}
+            ├── {"action": "end"}
+            └── {"action": "timeout", "elapsed_seconds": 30}
+        │
+        ▼
+    adapters.py
+        │
+        ▼
+    AdaptedInput
+        │
+        ├── event
+        │   ├── AnswerSubmitted
+        │   │   ├── session_id
+        │   │   ├── question_id
+        │   │   └── text
+        │   │
+        │   ├── ReplayRequested
+        │   │   ├── session_id
+        │   │   └── question_id | None
+        │   │
+        │   ├── EndRequested
+        │   │   └── session_id
+        │   │
+        │   ├── SilenceDetected
+        │   │   ├── session_id
+        │   │   └── silence_duration_seconds
+        │   │
+        │   └── NoResponseTimeout
+        │       ├── session_id
+        │       └── elapsed_seconds
+        │
+        └── delivery_metrics
+            ├── None
+            └── DeliveryMetrics
+                ├── speech_rate_wpm
+                ├── filler_count
+                └── duration_seconds
+
+### 3-2. 세션 상태가 들고 있어야 하는 핵심 정보
+
+    SessionState
+        │
+        ├── 현재 위치
+        │   ├── current_question
+        │   ├── asked_count
+        │   ├── main_question_id
+        │   └── main_topic
+        │
+        ├── 입력 대기/처리 중 임시값
+        │   ├── pending_event
+        │   └── pending_delivery_metrics
+        │
+        ├── 평가/분기 판단
+        │   ├── last_signal
+        │   ├── challenge_used_in_set
+        │   ├── evaluations
+        │   └── competency
+        │
+        ├── 발화/화면 응답
+        │   ├── transcript
+        │   ├── last_utterance
+        │   └── turn_type
+        │
+        ├── 음성 정책
+        │   ├── silence_policy
+        │   ├── timeout_policy
+        │   └── silence_count
+        │
+        └── 종료/오류
+            ├── finished
+            ├── report
+            └── error
+
+중요:
+- LangGraph 노드는 state 전체가 아니라 "변경할 필드만 dict로 반환"한다.
+- 그래서 SessionState에 추가되는 필드는 기본값이 있어야 한다.
+- pending_event는 Pydantic 이벤트 객체가 아니라 dict로 저장한다.
+  체크포인터 역직렬화에서 discriminated union 문제가 생길 수 있기 때문이다.
+
+========================================================================
+
+## 4. 현재 단순 오케스트레이션 흐름
+
+현재 구조는 아직 LangGraph가 아니라 단순 Python 객체 흐름에 가깝다.
+
+    API
+        │
+        ├── create_session()
+        │       │
+        │       ▼
+        │   graph.create_session()
+        │       │
+        │       ├── InterviewSession 생성
+        │       ├── StrategyAgent 생성
+        │       ├── AssessmentAgent 생성
+        │       ├── SessionState 생성
+        │       └── session.start()
+        │               │
+        │               ▼
+        │           StrategyAgent.next_question()
+        │               │
+        │               ▼
+        │           첫 Question 반환
+        │
+        └── post_event()
+                │
+                ▼
+            adapters.from_chat() / adapters.from_voice()
+                │
+                ▼
+            AdaptedInput.event
+                │
+                ▼
+            InterviewSession.handle_event()
+                │
+                ▼
+            InterviewerAgent.handle()
+                │
+                ├── AnswerSubmitted
+                │   └── _on_answer()
+                │       ├── AssessmentAgent.evaluate()
+                │       ├── AnswerQualitySignal 확인
+                │       ├── StrategyAgent.next_*()
+                │       └── SessionState.current_question 갱신
+                │
+                ├── ReplayRequested
+                │   └── 현재 질문 반환
+                │
+                ├── SilenceDetected
+                │   └── 현재 질문 재제시
+                │
+                ├── EndRequested
+                │   └── finished=True
+                │
+                └── NoResponseTimeout
+                    └── finished=True
+
+========================================================================
+
+## 5. 3단계 이후 LangGraph 뼈대 구조
+
+3단계의 목표:
+- agent.py 안에 있던 흐름 제어를 graph.py의 노드/엣지로 옮긴다.
+- StrategyAgent / AssessmentAgent 같은 직렬화 불가능한 객체는 state가 아니라 runtime context로 주입한다.
+- wait_event 노드에서 interrupt()로 외부 입력을 기다린다.
+
+### 5-1. Runtime Context
+
+    InterviewDeps
+        ├── strategy: StrategyAgent
+        ├── assessment: AssessmentAgent
+        └── llm: optional
+
+이 객체는 SessionState에 넣지 않는다.
+LangGraph의 context_schema로 전달한다.
+
+### 5-2. 3단계 최소 그래프
+
+    START
+      │
+      ▼
+    greet
+      │
+      ├── StrategyAgent.next_question(last_signal=None)
+      ├── current_question 설정
+      └── asked_count=1
+      │
+      ▼
+    wait_event
+      │
+      ├── interrupt()
+      └── resume 값으로 pending_event / pending_delivery_metrics 기록
+      │
+      ▼
+    evaluate_answer
+      │
+      ├── AssessmentAgent.evaluate()
+      └── last_signal 저장
+      │
+      ▼
+    ask_main
+      │
+      ├── StrategyAgent.next_question(last_signal)
+      ├── current_question 갱신
+      └── asked_count += 1
+      │
+      ▼
+    is_done?
+      │
+      ├── yes -> END
+      └── no  -> wait_event
+
+3단계에서는 평가 신호가 BONUS / MISCONCEPTION이어도 일단 무시한다.
+항상 다음 메인 질문으로 넘어가는 뼈대만 만든다.
+
+### 5-3. interrupt 주의점
+
+    wait_event 노드
+        │
+        ├── interrupt() 호출
+        └── resume 값을 받은 뒤 pending_* 저장
+
+주의:
+- interrupt가 있는 노드에는 부작용을 많이 넣지 않는다.
+- Command(resume=...)로 재개하면 해당 노드가 처음부터 다시 실행된다.
+- 같은 질문이 두 번 생성되면 wait_event에 부작용이 들어간 것이다.
+- checkpointer와 thread_id가 있어야 interrupt가 동작한다.
+
+========================================================================
+
+## 6. 4단계 이후 분기 완성 구조
+
+4단계의 목표:
+- 이벤트 종류별 분기
+- 평가 품질별 분기
+- 질문 세트 완료
+- 최종 리포트 생성
+
+### 6-1. 이벤트 검증/라우팅
+
+    wait_event
+      │
+      ▼
+    validate_event
+      │
+      ├── pending_event dict를 TypeAdapter(InterviewerEvent)로 파싱
+      ├── question_id가 current_question과 다르면 error 세팅
+      └── 정상 이벤트면 다음 라우팅으로 이동
+      │
+      ▼
+    route_event
+      │
+      ├── answer_submitted     -> evaluate_answer
+      ├── replay_requested     -> handle_replay
+      ├── silence_detected     -> handle_silence
+      ├── no_response_timeout  -> handle_timeout
+      ├── end_requested        -> finalize
+      └── invalid/error        -> handle_replay
+
+### 6-2. 답변 평가 후 품질 라우팅
+
+    evaluate_answer
+      │
+      ├── AssessmentAgent.evaluate()
+      ├── last_signal 저장
+      └── 후보자 답변을 transcript에 Turn으로 기록
+      │
+      ▼
+    route_quality
+      │
+      ├── SUFFICIENT
+      │   └── complete_set
+      │
+      ├── BONUS_AVAILABLE
+      │   └── ask_follow_up
+      │
+      ├── MISCONCEPTION
+      │   ├── challenge_used_in_set=False -> ask_challenge
+      │   └── challenge_used_in_set=True  -> complete_set
+      │
+      ├── CONFIRM_POSITIVE
+      │   └── ask_confirm_positive
+      │
+      ├── CONFIRM_NEGATIVE
+      │   └── ask_confirm_negative
+      │
+      └── TRAP_AVAILABLE
+          └── ask_trap
+
+중요:
+- challenge는 한 질문 세트당 1회만 사용한다.
+- route_quality 같은 라우팅 함수는 state를 읽기만 한다.
+- 실제 상태 변경은 ask_* 노드나 complete_set 노드에서 한다.
+
+### 6-3. 질문 생성 노드
+
+    ask_main
+        └── StrategyAgent.next_question()
+
+    파생 질문 공통 입력
+        ├── topic: 현재 질문 topic
+        ├── parent_question_id: 현재 질문 세트의 기준 메인 질문 ID
+        ├── target: last_signal.next_probe_target
+        └── answer_excerpt: transcript에서 뽑은 직전 후보자 답변 일부
+
+    ask_follow_up
+        └── StrategyAgent.next_follow_up(topic, parent_question_id, target, answer_excerpt)
+
+    ask_challenge
+        ├── StrategyAgent.next_challenge(topic, parent_question_id, target, answer_excerpt)
+        └── challenge_used_in_set=True
+
+    ask_confirm_positive
+        └── StrategyAgent.next_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+
+    ask_confirm_negative
+        └── StrategyAgent.next_confirm_negative(topic, parent_question_id, target, answer_excerpt)
+
+    ask_trap
+        └── StrategyAgent.next_trap(topic, parent_question_id, target, answer_excerpt)
+
+    handle_replay
+        └── current_question을 다시 제시
+
+    handle_silence
+        ├── 4단계: 임시로 재제시
+        └── 8단계: hint -> represent -> timeout 정책으로 확장
+
+    handle_timeout
+        ├── 4단계: 임시로 종료
+        └── 8단계: pause 또는 end 정책으로 확장
+
+### 6-4. 질문 세트 완료와 종료
+
+    complete_set
+      │
+      ├── AssessmentAgent.complete_question_set()
+      ├── challenge_used_in_set=False
+      └── silence_count=0
+      │
+      ▼
+    is_done?
+      │
+      ├── yes -> finalize
+      └── no  -> ask_main
+
+    finalize
+      │
+      ├── finished=True
+      └── final_report로 이동
+
+    final_report
+      │
+      ├── AssessmentAgent.finalize()
+      └── report 저장
+
+========================================================================
+
+## 7. 5단계 발화 레이어가 들어간 뒤의 구조
+
+5단계부터는 "질문 텍스트"와 "면접관 발화"를 분리한다.
+
+Question.text는 Strategy가 만든 원문 질문이다.
+LLM 또는 템플릿은 질문 앞에 붙는 짧은 preamble만 만든다.
+질문 본문 자체는 바꾸지 않는다.
+
+    ask_* / handle_* 노드
+        │
+        ├── current_question 설정
+        ├── turn_type 설정
+        └── compose_utterance로 이동
+        │
+        ▼
+    compose_utterance
+        │
+        ├── 템플릿 또는 LLM으로 preamble 생성
+        ├── last_utterance = preamble + question.text
+        ├── transcript에 interviewer Turn 추가
+        └── wait_event로 이동
+
+추가될 파일:
+
+    interviewer/utterance.py
+        └── LLM 없이도 동작하는 고정 템플릿 함수.
+            greeting / question / hint / replay / pause_prompt / closing 상황 처리.
+
+    interviewer/prompts.py
+        └── LLM 발화 생성 프롬프트와 ComposedUtterance 모델.
+            조건:
+            - 한국어 존댓말
+            - 질문 앞 최대 2문장
+            - 마크다운/이모지 금지
+            - 질문 본문은 수정 금지
+            - 예외/타임아웃 시 utterance.py 템플릿으로 폴백
+
+5단계 이후 질문 경로는 모두 아래 모양이어야 한다.
+
+    greet
+      └── compose_utterance
+            └── wait_event
+
+    ask_main
+      └── compose_utterance
+            └── wait_event
+
+    ask_follow_up / ask_challenge / ask_confirm_* / ask_trap
+      └── compose_utterance
+            └── wait_event
+
+    handle_replay / handle_silence / handle_timeout
+      └── compose_utterance
+            └── wait_event 또는 finalize
+
+========================================================================
+
+## 8. 6단계 API 배선 후 구조
+
+6단계의 목표:
+- 기존 main.py의 임시 면접 로직을 분리한다.
+- 새 interviews router가 그래프 실행을 담당한다.
+- 채팅/음성 모두 같은 events 엔드포인트를 탄다.
+
+예정 파일:
+
+    src/interview/api/interviews/router.py
+        │
+        ├── CreateSessionRequest
+        │   └── mode
+        │
+        ├── EventRequest
+        │   ├── mode
+        │   └── payload
+        │
+        ├── TurnResponse
+        │   ├── session_id
+        │   ├── turn_type
+        │   ├── utterance
+        │   ├── question
+        │   ├── finished
+        │   └── report
+        │
+        └── SessionRegistry
+            └── session_id -> InterviewDeps + Lock
+
+API 흐름:
+
+    POST /api/sessions
+        │
+        ├── user_id 기준 Evidence CoverageMap 조회 또는 생성 결과 사용
+        ├── CoverageMap을 가진 StrategyAgent 생성
+        ├── SessionRegistry에 InterviewDeps 등록
+        ├── graph.invoke(initial SessionState, config, context)
+        ├── 첫 interrupt까지 실행
+        └── state에서 TurnResponse 구성
+
+    POST /api/sessions/{id}/events
+        │
+        ├── Lock 획득
+        ├── adapters.from_chat() 또는 adapters.from_voice()
+        ├── Command(resume={"event": ..., "delivery_metrics": ...})
+        ├── graph.invoke(...)
+        └── state에서 TurnResponse 구성
+
+6단계 이후 main.py는 면접 로직을 직접 들고 있지 않고 include_router만 하는 형태가 된다.
+
+========================================================================
+
+## 9. 8단계 음성 특화 구조
+
+8단계의 목표:
+- 음성 발화에서 "면접 종료", "다시 말해주세요" 같은 intent를 안전하게 감지한다.
+- 침묵 이벤트를 hint / represent / timeout 정책으로 처리한다.
+
+추가될 파일:
+
+    interviewer/intent.py
+        │
+        ├── END 패턴
+        ├── REPLAY 패턴
+        └── 매칭 함수
+
+주의:
+- 짧고 정규화된 발화에만 intent 매칭을 적용한다.
+- 긴 답변 속 "면접 종료 조건을 구현했습니다" 같은 문장은 종료 요청으로 오인하면 안 된다.
+
+음성 submit 처리:
+
+    AnswerSubmitted(text)
+        │
+        ▼
+    validate_event
+        │
+        ├── 짧은 발화가 END 패턴이면 EndRequested로 재작성
+        ├── 짧은 발화가 REPLAY 패턴이면 ReplayRequested로 재작성
+        └── 일반 답변이면 AnswerSubmitted 유지
+
+침묵 처리:
+
+    SilenceDetected
+        │
+        ▼
+    handle_silence
+        │
+        ├── silence_duration_seconds < hint_threshold
+        │   └── 무시하고 wait_event 복귀
+        │
+        ├── silence_count == 0
+        │   └── hint 제공
+        │
+        ├── silence_count == 1
+        │   └── 질문 재제시
+        │
+        └── silence_count >= max_events_before_timeout
+            └── handle_timeout
+
+타임아웃 처리:
+
+    NoResponseTimeout
+        │
+        ▼
+    handle_timeout
+        │
+        ├── timeout_policy.action == "pause"
+        │   └── 안내 발화 후 wait_event 복귀
+        │
+        └── timeout_policy.action == "end"
+            └── closing 발화 + finalize
+
+========================================================================
+
+## 10. 단계별로 어느 파일을 보면 되는지
+
+### 1단계. 깨진 코드 수리
+
+    adapters.py
+        └── 필드명 정리, 이벤트 변환 수정
+
+    agent.py
+        └── AnswerSubmitted 처리에서 delivery metrics 임시 제거
+
+    api/main.py
+        └── OpenAI client 생성 시점 수정
+
+    schemas/__init__.py
+        └── BaseEvent export 제거 또는 _EventBase 변경 반영
+            events.py 리팩토링 뒤 BaseEvent import가 남아 있으면
+            interview.schemas를 거치는 import가 실패할 수 있다.
+
+### 2단계. 상태·모델 확장
+
+    models.py
+        ├── DeliveryMetrics
+        └── AdaptedInput
+
+    session.py
+        ├── Turn
+        ├── SilencePolicy
+        ├── TimeoutPolicy
+        └── SessionState 필드 확장
+
+    adapters.py
+        └── 반환형을 AdaptedInput으로 통일
+
+### 3단계. 뼈대 그래프
+
+    graph.py
+        ├── InterviewDeps
+        ├── greet
+        ├── wait_event
+        ├── evaluate_answer
+        ├── ask_main
+        └── get_compiled_graph()
+
+### 4단계. 분기 완성
+
+    graph.py
+        ├── validate_event
+        ├── route_event
+        ├── route_quality
+        ├── ask_follow_up
+        ├── ask_challenge
+        ├── ask_confirm_positive
+        ├── ask_confirm_negative
+        ├── ask_trap
+        ├── complete_set
+        ├── finalize
+        └── final_report
+
+### 5단계. 발화 레이어
+
+    interviewer/utterance.py
+        └── 템플릿 기반 fallback 발화
+
+    interviewer/prompts.py
+        └── LLM preamble 생성 프롬프트
+
+    graph.py
+        └── compose_utterance 노드 추가 및 엣지 재배선
+
+### 6단계. API 배선
+
+    api/interviews/router.py
+        ├── 요청/응답 모델
+        ├── SessionRegistry
+        ├── POST /api/sessions
+        └── POST /api/sessions/{id}/events
+
+    api/main.py
+        └── include_router 중심으로 정리
+
+    interviewer/__init__.py
+        └── public export 정리
+
+### 8단계. 음성 특화
+
+    interviewer/intent.py
+        └── 종료/다시듣기 intent 감지
+
+    graph.py
+        ├── handle_silence 완성
+        └── handle_timeout 완성
+
+========================================================================
+
+## 11. 작업할 때 기억할 규칙
+
+1. Interviewer는 질문 생성자가 아니다.
+   질문 생성은 StrategyAgent가 한다.
+
+2. Interviewer는 답변 평가자가 아니다.
+   답변 평가는 AssessmentAgent가 한다.
+
+3. Interviewer는 흐름 관리자다.
+   이벤트, 상태, 평가 신호를 보고 다음 노드나 다음 질문 종류를 결정한다.
+
+4. 채팅과 음성의 차이는 adapters.py에서 최대한 흡수한다.
+   graph.py/agent.py는 공통 이벤트만 보게 만든다.
+
+5. LangGraph state에는 직렬화 가능한 값만 둔다.
+   StrategyAgent, AssessmentAgent, LLM 객체는 InterviewDeps context로 주입한다.
+
+6. pending_event는 이벤트 객체가 아니라 dict로 저장한다.
+   체크포인터 역직렬화 문제를 피하기 위해서다.
+
+7. 질문 본문은 Strategy가 만든 Question.text를 그대로 사용한다.
+   발화 레이어는 앞에 붙는 짧은 말만 만든다.
+
+8. challenge 질문은 한 질문 세트당 1회만 허용한다.
+
+9. 파생 질문의 parent_question_id는 Strategy가 Question을 만들 때 채운다.
+   Interviewer는 parent_question_id와 answer_excerpt를 Strategy에 넘겨준다.
+
+10. delivery_metrics는 음성 답변의 전달력 참고용이다.
+    채팅 모드에서는 None이고, 음성 submit일 때만 Assessment에 dict로 전달한다.
+
+11. CoverageMap은 Evidence가 만들고 Strategy가 소비한다.
+    Interviewer는 세션 생성 시 Strategy에 넘겨주는 연결 역할만 맡는다.
+
+12. route_* 함수는 상태를 읽기만 한다.
+   상태 변경은 노드 함수에서 한다.
+
+13. API 응답은 interrupt payload가 아니라 최종 state에서 구성한다.
+
+========================================================================
+
+## 12. 가장 먼저 보면 좋은 순서
+
+처음 구조를 다시 잡을 때는 아래 순서로 보면 된다.
+
+    1. 작업순서.md
+       └── 지금 몇 단계 작업 중인지 확인
+
+    2. session.py
+       └── SessionState가 무엇을 기억해야 하는지 확인
+
+    3. models.py
+       └── AdaptedInput이 event와 metrics를 어떻게 묶는지 확인
+
+    4. adapters.py
+       └── 프론트 payload가 어떤 이벤트로 바뀌는지 확인
+
+    5. schemas/events.py
+       └── InterviewerEvent 종류와 필드 확인
+
+    6. schemas/signals.py
+       └── Assessment가 주는 quality별 의미 확인
+
+    7. schemas/evidence.py
+       └── CoverageMap이 Strategy 주제 선택에 어떤 정보를 주는지 확인
+
+    8. evidence/retrieval.py
+       └── Strategy/Assessment가 근거 검색을 어떻게 사용할지 확인
+
+    9. strategy/agent.py
+       └── quality별로 호출할 next_* 메서드 확인
+
+    10. assessment/agent.py
+       └── evaluate / complete_question_set / finalize 역할 확인
+
+    11. graph.py
+       └── 전체 흐름을 노드와 엣지로 연결
+
+    12. api/main.py 또는 api/interviews/router.py
+        └── 실제 HTTP 요청과 그래프 연결 확인
+
+========================================================================
+
+## 13. 최종 완성 후 목표 구조
+
+최종적으로 Interviewer는 아래 모양이 된다.
+
+    Frontend
+        │
+        ▼
+    API router
+        │
+        ▼
+    adapters.py
+        │
+        ▼
+    AdaptedInput
+        │
+        ▼
+    LangGraph graph.py
+        │
+        ├── validate_event
+        ├── route_event
+        ├── evaluate_answer
+        ├── route_quality
+        ├── ask_*
+        ├── handle_*
+        ├── compose_utterance
+        ├── complete_set
+        ├── finalize
+        └── final_report
+        │
+        ├── Evidence
+        │   ├── CoverageMap -> StrategyAgent 주제 선택
+        │   └── search_evidence -> Strategy/Assessment 내부 RAG
+        │
+        ├── StrategyAgent
+        │   └── Question 생성
+        │
+        └── AssessmentAgent
+            ├── AnswerQualitySignal 생성
+            ├── 질문 세트 평가 누적
+            └── FinalReport 생성
+        │
+        ▼
+    TurnResponse
+        ├── session_id
+        ├── turn_type
+        ├── utterance
+        ├── question
+        ├── finished
+        └── report
+
+한 문장으로 정리:
+
+    Interviewer는 "입력 이벤트를 받아 현재 세션 상태를 갱신하고,
+    평가 신호에 따라 다음 면접관 발화로 이어주는 흐름 제어 계층"이다.
