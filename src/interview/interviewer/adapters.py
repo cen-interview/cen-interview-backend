@@ -192,7 +192,10 @@ def from_voice(
         event = SilenceDetected(
             session_id=session_id,
             silence_duration_seconds=float(
-                payload.get("silence_sec", 0.0)
+                payload.get(
+                    "silence_duration_seconds",
+                    payload.get("silence_sec", 0.0),
+                )
             ),
         )
 
@@ -216,7 +219,10 @@ def from_voice(
         event = NoResponseTimeout(
             session_id=session_id,
             elapsed_seconds=float(
-                payload.get("elapsed_sec", 0.0)
+                payload.get(
+                    "elapsed_seconds",
+                    payload.get("elapsed_sec", 0.0),
+                )
             ),
         )
 
