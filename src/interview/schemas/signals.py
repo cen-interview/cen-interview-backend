@@ -72,6 +72,9 @@ from pydantic import BaseModel, Field
 # trap_available
 #   - 사용자가 헷갈리기 쉬운 개념을 정확히 구분하는지 확인할 필요가 있음
 #   - 의도적으로 혼동 가능성이 있는 함정 질문 생성
+#
+# fallback_available
+#   - 사용자가 개념을 모를경우
 
 class AnswerQuality(str, Enum):
     SUFFICIENT = "sufficient"
@@ -91,6 +94,9 @@ class AnswerQualitySignal(BaseModel):
     rationale: list[str] = Field(default_factory=list)
 
     next_probe_target: Optional[str] = None
+
+    accuracy: float = Field(default=0.0, ge=0.0, le=1.0)
+    sufficiency: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 
