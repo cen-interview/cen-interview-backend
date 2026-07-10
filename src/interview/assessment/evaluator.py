@@ -278,7 +278,10 @@ def _build_evidence_context(
             "Evidence에 없는 프로젝트 구현 사실은 단정하지 않는다."
         )
 
-    return "Evidence 없음 — technical 질문이므로 일반 기술 지식 기준으로 판단한다."
+    return (
+        "Evidence 없음 — project 질문은 프로젝트 구현 사실을 확인할 근거가 부족하다. "
+        "Evidence에 없는 프로젝트 사실은 단정하지 말고, 확인 필요 또는 설명 부족으로 판단한다."
+)
 
 def _build_history_summary(history: list | None) -> str:
     if not history:
