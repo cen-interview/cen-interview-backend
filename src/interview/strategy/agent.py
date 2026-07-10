@@ -80,6 +80,7 @@ class StrategyAgent:
 
         if last_signal is not None:
             self.state.topic_last_quality[topic] = last_signal.quality
+            self.state.recent_qualities.append(last_signal.quality)
 
         self._record(question)
 

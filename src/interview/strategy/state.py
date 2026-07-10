@@ -39,6 +39,11 @@ class StrategyState(BaseModel):
         topic_last_quality:
             주제별 마지막 답변 평가 결과. next_question() 호출 시에만 갱신된다
             (파생 질문은 답변 평가 신호를 받지 않으므로 갱신하지 않는다).
+
+        recent_qualities:
+            메인 질문에 대한 답변 평가 결과(quality)의 시간순 이력. 연속
+            SUFFICIENT/EASY 판단 등 난이도 조정 규칙(difficulty.py)에서
+            사용한다. next_question() 호출 시에만 갱신된다.
     """
 
     asked_topics: list[str] = Field(default_factory=list)
@@ -48,6 +53,8 @@ class StrategyState(BaseModel):
 
     asked_question_texts: list[str] = Field(default_factory=list)
     topic_last_quality: dict[str, AnswerQuality] = Field(default_factory=dict)
+    recent_qualities: list[AnswerQuality] = Field(default_factory=list)
+
 
     def topic_counts(self) -> dict[str, int]:
         """주제별 출제 횟수"""
