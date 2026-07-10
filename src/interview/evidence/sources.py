@@ -49,44 +49,47 @@ def _github_response_to_raw_docs(response: dict, repo_link: str) -> list[RawDoc]
 
 
 class NotionSource:
-    """Notion MCP 로 학습 기록을 가져온다."""
+    """Notion MCP 로 사용자가 등록한 학습 기록 링크 목록을 가져온다."""
 
     def __init__(self, mcp_client: EvidenceMcpClient | None = None) -> None:
         """MCP client를 주입받아 테스트와 실제 tool call 경계를 분리한다."""
         self.mcp_client = mcp_client or EvidenceMcpClient()
 
-    def fetch_pages(self, root_link: str) -> list[RawDoc]:
-        """입력 링크가 DB / 주차 페이지 / 개별 페이지 중 무엇인지 판단하고,
-        하위 페이지까지 재귀 탐색해 RawDoc 리스트로 반환한다.
+    def fetch_pages(self, root_links: list[str]) -> list[RawDoc]:
+        """등록된 Notion 링크를 순회하며 RawDoc 리스트로 반환한다.
+
+        각 입력 링크가 DB / 주차 페이지 / 개별 페이지 중 무엇인지 판단하고,
+        하위 페이지까지 재귀 탐색한다.
 
         TODO(담당 A):
+          - 등록된 링크를 순서대로 순회
           - 링크 유형 판별 (DB vs page)
           - 하위 페이지 재귀 순회
           - 주차/날짜/문서유형을 meta 에 채우기
         """
-        response = self.mcp_client.call_notion_tool(root_link)
-        return _notion_response_to_raw_docs(response, root_link)
+        raw_docs: list[RawDoc] = []
+        for root_link in root_links:
+            response = self.mcp_client.call_notion_tool(root_link)
+            raw_docs.extend(_notion_response_to_raw_docs(response, root_link))
+        return raw_docs
 
 
 class GitHubSource:
-    """GitHub MCP 로 프로젝트 저장소(최대 3개)를 가져온다."""
+    """GitHub MCP 로 사용자가 등록한 프로젝트 저장소 목록을 가져온다."""
 
     def __init__(self, mcp_client: EvidenceMcpClient | None = None) -> None:
         """MCP client를 주입받아 테스트와 실제 tool call 경계를 분리한다."""
         self.mcp_client = mcp_client or EvidenceMcpClient()
-
-    MAX_REPOS = 3
 
     def fetch_repos(self, repo_links: list[str]) -> list[RawDoc]:
         """저장소 접근 가능 여부, README, 디렉터리 구조, 주요 언어/프레임워크,
         핵심 구현 파일을 확인해 RawDoc 리스트로 반환한다.
 
         TODO(담당 A):
-          - 최대 3개 제한 (초과 시 앞 3개만)
+          - 등록된 링크를 순서대로 순회
           - README / 핵심 구현 파일 선별
           - 언어/프레임워크 식별 → meta
         """
-        repo_links = repo_links[: self.MAX_REPOS]
         raw_docs: list[RawDoc] = []
         for repo_link in repo_links:
             response = self.mcp_client.call_github_tool(repo_link)

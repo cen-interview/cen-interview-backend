@@ -10,6 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """환경변수와 .env 파일에서 읽는 애플리케이션 설정 계약."""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # LLM
@@ -29,12 +31,14 @@ class Settings(BaseSettings):
 
     # 면접 진행
     max_questions: int = 10
+    
+    # Evidence
+    use_stub_evidence: bool = False
 
 
 @lru_cache
 def get_settings() -> Settings:
     """설정 싱글톤. lru_cache 로 한 번만 로딩한다."""
     return Settings()
-
 
 settings = get_settings()

@@ -8,14 +8,15 @@ LangChain Tool 로도 노출해 에이전트가 tool calling 으로 부를 수 �
 
 from langchain_core.tools import tool
 
-from interview.evidence.store import get_store
+from interview.config import settings
+from interview.evidence.store import DEFAULT_TOP_K, get_store
 from interview.schemas.evidence import EvidenceChunk
 
 
 def search_evidence(
     query: str,
     topic: str | None = None,
-    k: int = 5,
+    k: int = DEFAULT_TOP_K,
     user_id: int | str | None = None,
 ) -> list[EvidenceChunk]:
     """evidence_store 에서 관련 근거 chunk 를 반환한다.
@@ -32,19 +33,21 @@ def search_evidence(
     try:
         return get_store().query(query=query, topic=topic, k=k, user_id=user_id)
     except NotImplementedError:
-        return [
-            EvidenceChunk(
-                chunk_id="stub-evidence-1",
-                text=f"{query}와 관련된 임시 근거입니다.",
-                source_type="notion",
-                source_url="https://example.com/stub",
-                topic=topic or "unknown",
-                doc_type="stub",
-                week=None,
-                date=None,
-                confidence=0.5,
-            )
-        ]
+        if settings.use_stub_evidence:
+            return [
+                  EvidenceChunk(
+                      chunk_id="stub-evidence-1",
+                      text=f"{query}와 관련된 임시 근거입니다.",
+                      source_type="notion",
+                      source_url="https://example.com/stub",
+                      topic=topic or "unknown",
+                      doc_type="stub",
+                      week=None,
+                      date=None,
+                      confidence=0.5,
+                  )
+              ]
+    return []
 
 
 @tool
