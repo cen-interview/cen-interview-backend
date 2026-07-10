@@ -5,7 +5,7 @@
 면접 종료 시 FinalReport를 생성한다.
 """ 
 
-from interview.assessment import evaluator, report_builder
+from interview.assessment import report_builder
 from interview.assessment.scoring import AnswerAttempt, score_question_set
 from interview.schemas.question import (
     Question, 
@@ -17,7 +17,7 @@ from interview.schemas.report import (
     FinalReport,
 )
 from interview.schemas.signals import AnswerQualitySignal
-
+from interview.assessment.graph import AssessmentState, get_compiled_graph
 
 class AssessmentAgent:
     """답변 평가 상태를 관리하는 Assessment Agent.
@@ -86,12 +86,16 @@ class AssessmentAgent:
                 quality 값에 따라 다음 메인 질문, 꼬리 질문, 압박 질문,
                 확인 질문, 함정 질문 등의 흐름이 결정된다.
         """
-        signal = evaluator.judge_answer(
+        state = AssessmentState(
             question=question,
             answer_text=answer_text,
             delivery_metrics=delivery_metrics,
-            history=self.all_attempts,  # 나중에 evaluator에서 받도록 확장 가능
+            history=self.all_attempts,
         )
+
+        result_state = assessment_graph.invoke(state)
+
+        signal = result_state.final_signal
 
         # AnswerAttempt는 "질문 1개에 대한 답변 시도 1건"을 기록하는 객체다.
         # 이후 질문 세트 단위 점수 산정(score_question_set)에 사용된다.
