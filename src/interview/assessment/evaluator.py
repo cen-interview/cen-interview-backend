@@ -19,7 +19,6 @@ Assessment에서 답변 하나를 평가하는 단계이다.
 # - 목표 지연 시간은 답변당 3초 이내로 둔다.
 # - question generation보다 한 단계 높은 모델 사용을 검토한다.
 
-import random
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -32,6 +31,8 @@ from interview.schemas.question import (
     QuestionCategory,
 )
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
+from interview.llm.client import get_llm
+from interview.assessment.prompts import JUDGE_SYSTEM
 
 """
 분기 기준:
@@ -79,6 +80,15 @@ class JudgeResult(BaseModel):
         rationale:
             quality를 판단한 근거.
             추후 평가 코멘트 생성에도 활용할 수 있다.
+
+        accuracy:
+            - 답변이 얼마나 정확한지 나타낸다.
+            - 기술 개념이면 일반 지식 기준
+            - 프로젝트 질문이면 Evidence와의 일치 기준
+        
+        sufficiency:
+            - 질문에 필요한 범위를 얼마나 충분히 답했는지 나타낸다.
+            - 맞는 말을 했더라도 설명 범위가 부족하면 낮아진다.
     """
 
     quality: AnswerQuality
@@ -90,6 +100,9 @@ class JudgeResult(BaseModel):
     # 이전 답변 또는 Evidence와 충돌이 의심되는지 여부
     # True면 정밀 충돌 검사 실행
     conflict_suspected: bool = False
+
+    accuracy: float = Field(ge=0.0, le=1.0)
+    sufficiency: float = Field(ge=0.0, le=1.0)
 
 
 # 평가
@@ -124,7 +137,7 @@ def judge_answer(
             Interviewer가 다음 질문 흐름을 결정하기 위한 평가 신호.
     """
     
-    evidence_chunks = _collect_evidence_for_question(question)
+    evidence_chunks = _collect_evidence_for_question(question,answer_text)
     
     judge_result = _judge_with_llm(
     question=question,
@@ -148,6 +161,8 @@ def judge_answer(
         quality=judge_result.quality,
         next_probe_target=judge_result.next_probe_target,
         rationale=judge_result.rationale,
+        accuracy=judge_result.accuracy,
+        sufficiency=judge_result.sufficiency,
     )
 
 
@@ -199,10 +214,74 @@ def _judge_with_llm(
     _ = history
     
     history_summary = _build_history_summary(history)
-    _ = history_summary
+    evidence_context = _build_evidence_context(question,evidence_chunks)
     
-    return _temporary_judge_result(question)
+    user_prompt = f"""
 
+    [평가 대상 질문]
+    question_id: {question.question_id}
+    topic: {question.topic}
+    category: {question.category.value}
+    kind: {question.kind.value}
+    difficulty: {question.difficulty.value}
+
+    질문: {question.text}
+
+    질문 종류: {question.kind.value}
+
+
+    사용자 답변: {answer_text}
+
+
+    Evidence: {evidence_context}
+
+    이전 답변 이력:
+    {history_summary or "(없음)"}
+
+    [평가 요청]
+    위 답변을 category와 kind에 맞는 기준으로 평가하라.
+    반드시 지정된 구조로 quality, next_probe_target, rationale, accuracy, sufficiency를 반환하라.
+
+    """
+    llm = get_llm(temperature=0.0)
+    structured_llm = llm.with_structured_output(JudgeResult)
+
+    try:
+        return structured_llm.invoke(
+            [
+                {"role": "system", "content": JUDGE_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+    except Exception as e:
+        raise RuntimeError("답변 평가 중 LLM 호출에 실패했습니다.") from e
+
+def _build_evidence_context(
+    question: Question,
+    evidence_chunks: list[EvidenceChunk],
+) -> str:
+    if evidence_chunks:
+        return "\n".join(
+            (
+                f"- source_type: {chunk.source_type}\n"
+                f"  source_url: {chunk.source_url}\n"
+                f"  topic: {chunk.topic}\n"
+                f"  confidence: {chunk.confidence}\n"
+                f"  text: {chunk.text}"
+            )
+            for chunk in evidence_chunks
+        )
+
+    if question.category == QuestionCategory.PROJECT:
+        return (
+            "Evidence 없음 — 프로젝트 사실을 확인할 근거가 부족하다. "
+            "Evidence에 없는 프로젝트 구현 사실은 단정하지 않는다."
+        )
+
+    return (
+        "Evidence 없음 — project 질문은 프로젝트 구현 사실을 확인할 근거가 부족하다. "
+        "Evidence에 없는 프로젝트 사실은 단정하지 말고, 확인 필요 또는 설명 부족으로 판단한다."
+)
 
 def _build_history_summary(history: list | None) -> str:
     if not history:
@@ -261,6 +340,7 @@ def _run_conflict_check(
             next_probe_target=None,
             rationale=["이전 답변 이력이 없어 충돌 검사를 생략했습니다."],
             conflict_suspected=False,
+            accuracy=0.85, sufficiency=0.8,
         )
 
     previous_answers = [
@@ -294,6 +374,7 @@ def _run_conflict_check(
                         "두 답변의 관계를 확인할 필요가 있습니다.",
                     ],
                     conflict_suspected=True,
+                    accuracy=0.4, sufficiency=0.5,
                 )
 
             if previous_has_right and current_has_left:
@@ -305,6 +386,7 @@ def _run_conflict_check(
                         "두 답변의 관계를 확인할 필요가 있습니다.",
                     ],
                     conflict_suspected=True,
+                    accuracy=0.4, sufficiency=0.5,
                 )
 
     if fallback_result is not None:
@@ -317,100 +399,16 @@ def _run_conflict_check(
         next_probe_target=None,
         rationale=["이전 답변과 명확히 충돌하는 내용은 발견되지 않았습니다."],
         conflict_suspected=False,
+        accuracy=0.85, sufficiency=0.8,
     )
 
 
-def _temporary_judge_result(
-    question: Question,
-) -> JudgeResult:
-    """LLM 연결 전 임시 평가 결과를 생성한다.
 
-    현재는 랜덤한 평가 결과를 반환하는 Stub이다.
-
-    Args:
-        question:
-            현재 질문.
-
-    Returns:
-        JudgeResult:
-            임시 평가 결과.
-    """
-
-    _ = question
-
-    temporary_results = [
-        
-        # 답변이 충분한 경우
-        JudgeResult(
-            quality=AnswerQuality.SUFFICIENT,
-            next_probe_target=None,
-            rationale=[
-                "핵심 내용 설명 완료",
-                "추가 확인 불필요",
-            ],
-        ),
-
-
-        # 꼬리 질문 가능
-        JudgeResult(
-            quality=AnswerQuality.BONUS_AVAILABLE,
-            next_probe_target="실제 프로젝트 적용 사례",
-            rationale=[
-                "기본 개념 설명 확인",
-                "실제 적용 사례 부족",
-            ],
-        ),
-
-        # 오개념 존재
-        JudgeResult(
-            quality=AnswerQuality.MISCONCEPTION,
-            next_probe_target="핵심 개념의 정확한 역할",
-            rationale=[
-                "핵심 개념 오해",
-                "역할 설명 오류",
-            ],
-        ),
-
-        # 긍정 확인 질문
-        JudgeResult(
-            quality=AnswerQuality.CONFIRM_POSITIVE,
-            next_probe_target="기술의 적용 범위",
-            rationale=[
-                "설명은 대체로 정확함",
-                "적용 범위 확인 필요",
-            ],
-        ),
-
-        # 부정 확인 질문
-        JudgeResult(
-            quality=AnswerQuality.CONFIRM_NEGATIVE,
-            conflict_suspected=True,
-            next_probe_target="기존 설명과 충돌하는 부분",
-            rationale=[
-                "근거와 일부 불일치",
-                "사실관계 재확인 필요",
-            ],
-        ),
-
-        # 함정 질문 가능
-        JudgeResult(
-            quality=AnswerQuality.TRAP_AVAILABLE,
-            next_probe_target="유사 개념의 차이",
-            rationale=[
-                "유사 개념 혼동 가능성",
-                "개념 구분 확인 필요",
-            ],
-        ),
-    ]
-
-    return random.choice(temporary_results)
-
-
-def _collect_evidence_for_question(question: Question) -> list[EvidenceChunk]:
+def _collect_evidence_for_question(question: Question,answer_text:str) -> list[EvidenceChunk]:
     if question.category != QuestionCategory.PROJECT:
         return []
 
     return search_evidence(
-        query=question.text,
+        query=f"{question.text}\n{answer_text}",
         topic=question.topic,
     )
