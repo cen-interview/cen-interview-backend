@@ -77,6 +77,7 @@ class StrategyAgent:
         parent_question_id: str, 
         target: str | None = None,
         answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
         ) -> Question:
         """추가 확인 가능한 요소에 대한 꼬리 질문 생성.
 
@@ -87,9 +88,12 @@ class StrategyAgent:
         answer_excerpt: 사용자의 직전 답변 중 인용할 부분 (선택).
             Interviewer가 transcript에서 짧게(핵심 문장 1~2개) 잘라 전달한다.
             제공되면 "방금 ~라고 하셨는데" 형태로 답변을 직접 인용하는 질문을 만든다.
+        rationale: Assessment가 이 파생 질문이 필요하다고 판단한 이유
+            (AnswerQualitySignal.rationale). 제공되면 프롬프트에 반영해
+            더 정확히 문제 지점을 겨냥한 질문을 만든다.
         """
 
-        question = question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt, rationale)
         self._record(question)
         return question
     
@@ -99,6 +103,7 @@ class StrategyAgent:
         parent_question_id: str, 
         target: str | None = None,
         answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
         ) -> Question:
         """오개념이나 논리적 허점을 검증하는 압박 질문 생성.
         
@@ -109,8 +114,11 @@ class StrategyAgent:
         answer_excerpt: 사용자의 직전 답변 중 인용할 부분 (선택).
             Interviewer가 transcript에서 짧게(핵심 문장 1~2개) 잘라 전달한다.
             제공되면 "방금 ~라고 하셨는데" 형태로 답변을 직접 인용하는 질문을 만든다.
+        rationale: Assessment가 이 파생 질문이 필요하다고 판단한 이유
+            (AnswerQualitySignal.rationale). 제공되면 프롬프트에 반영해
+            더 정확히 문제 지점을 겨냥한 질문을 만든다.
         """
-        question = question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt, rationale)
         self._record(question)
         return question
 
@@ -119,10 +127,11 @@ class StrategyAgent:
             topic: str, 
             parent_question_id: str, 
             target: str | None = None,
-            answer_excerpt: str | None = None
+            answer_excerpt: str | None = None,
+            rationale: list[str] | None = None,
             ) -> Question:
         """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
-        question = question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt, rationale)
         self._record(question)
         return question
 
@@ -131,10 +140,11 @@ class StrategyAgent:
         topic: str, 
         parent_question_id: str, 
         target: str | None = None,
-        answer_excerpt: str | None = None
+        answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
         ) -> Question:
         """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
-        question = question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt, rationale)
         self._record(question)
         return question
     
@@ -143,15 +153,16 @@ class StrategyAgent:
         topic: str, 
         parent_question_id: str, 
         target: str | None = None,
-        answer_excerpt: str | None = None
+        answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
         ) -> Question:
         """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
-        question = question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt, rationale)
         self._record(question)
         return question
 
     def next_hint(
-        self, 
+        self,
         question: Question, 
         target: str | None = None,
         answer_excerpt: str | None = None

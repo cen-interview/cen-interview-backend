@@ -62,6 +62,7 @@ def _generate_derived_question(
     parent_question_id: str,
     target: str | None,
     answer_excerpt: str | None,
+    rationale: list[str] | None = None,
 ) -> Question:
     """파생 질문(follow_up/challenge/confirm_positive/confirm_negative/trap) 공통 생성 로직."""
     probe = target or "답변에서 더 확인이 필요한 부분"
@@ -75,12 +76,21 @@ def _generate_derived_question(
     )
     excerpt_block = f'"{answer_excerpt}"' if answer_excerpt else "(답변 발췌 없음)"
 
+    rationale_block = (
+        "\n".join(f"- {r}" for r in rationale)
+        if rationale
+        else "(없음)"
+    )
+
     user_prompt = f"""\
 주제: {topic}
-확인이 필요한 부분(target): {probe}
+파고들 대상(target): {probe}
 
 사용자의 직전 답변 중 관련 발췌:
 {excerpt_block}
+
+이 부분이 문제로 판단된 이유:
+{rationale_block}
 
 근거:
 {context}
@@ -193,11 +203,12 @@ def generate_follow_up(
         topic: str,
         parent_question_id: str,
         target: str | None = None,
-        answer_excerpt: str | None = None
+        answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
     ) -> Question:
     """추가 확인 가능한 요소에 대한 꼬리 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.FOLLOW_UP, topic, parent_question_id, target, answer_excerpt
+        QuestionKind.FOLLOW_UP, topic, parent_question_id, target, answer_excerpt, rationale
     )
 
 
@@ -205,11 +216,12 @@ def generate_challenge(
         topic: str,
         parent_question_id: str,
         target: str | None = None,
-        answer_excerpt: str | None = None
+        answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
     )-> Question:
     """오개념이나 논리적 허점을 검증하는 압박 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.CHALLENGE, topic, parent_question_id, target, answer_excerpt
+        QuestionKind.CHALLENGE, topic, parent_question_id, target, answer_excerpt, rationale
     )
 
 
@@ -217,22 +229,25 @@ def generate_confirm_positive(
         topic: str,
         parent_question_id: str,
         target: str | None = None,
-        answer_excerpt: str | None = None
+        answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
+
     ) -> Question:
     """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.CONFIRM_POSITIVE, topic, parent_question_id, target, answer_excerpt
+        QuestionKind.CONFIRM_POSITIVE, topic, parent_question_id, target, answer_excerpt, rationale
     )
 
 def generate_confirm_negative(
-    topic: str,
-    parent_question_id: str,
-    target: str | None = None,
-    answer_excerpt: str | None = None
+        topic: str,
+        parent_question_id: str,
+        target: str | None = None,
+        answer_excerpt: str | None = None,
+        rationale: list[str] | None = None,
     ) -> Question:
     """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.CONFIRM_NEGATIVE, topic, parent_question_id, target, answer_excerpt
+        QuestionKind.CONFIRM_NEGATIVE, topic, parent_question_id, target, answer_excerpt, rationale
     )
 
 
@@ -240,11 +255,12 @@ def generate_trap(
     topic: str,
     parent_question_id: str,
     target: str | None = None,
-    answer_excerpt: str | None = None
+    answer_excerpt: str | None = None,
+    rationale: list[str] | None = None,
     ) -> Question:
     """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.TRAP, topic, parent_question_id, target, answer_excerpt
+        QuestionKind.TRAP, topic, parent_question_id, target, answer_excerpt, rationale
     )
 
 def generate_hint(
