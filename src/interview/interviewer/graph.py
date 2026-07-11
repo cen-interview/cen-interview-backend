@@ -338,6 +338,43 @@ def record_candidate_answer(
     }
 
 
+def route_event(state: SessionState | dict[str, Any]) -> str:
+    """검증 결과와 이벤트 종류를 읽어 다음 처리 노드를 선택한다.
+
+    라우팅 함수는 상태를 변경하거나 Strategy, Assessment 같은 외부
+    의존성을 호출하지 않는다. validate_event가 남긴 error가 있으면 현재
+    질문을 다시 제시하도록 handle_replay를 선택한다. 유효한 이벤트라면
+    pending_event의 type 값만 사용해 이벤트별 처리 노드를 반환한다.
+
+    AnswerSubmitted는 지원자 답변을 transcript에 먼저 기록해야 하므로
+    record_candidate_answer로 보낸다. 기록이 끝난 뒤 evaluate_answer로
+    연결하는 edge는 그래프 조립 단계에서 정의한다.
+
+    Args:
+        state:
+            검증된 pending_event와 error를 가진 SessionState 또는 같은 필드를
+            가진 dict.
+
+    Returns:
+        이벤트를 처리할 다음 그래프 노드 이름. 검증 오류나 알 수 없는 이벤트는
+        안전하게 handle_replay로 보낸다.
+    """
+    if _state_get(state, "error") is not None:
+        return "handle_replay"
+
+    pending_event = _state_get(state, "pending_event") or {}
+    event_type = pending_event.get("type")
+
+    routes = {
+        "answer_submitted": "record_candidate_answer",
+        "replay_requested": "handle_replay",
+        "silence_detected": "handle_silence",
+        "no_response_timeout": "handle_timeout",
+        "end_requested": "finalize",
+    }
+    return routes.get(event_type, "handle_replay")
+
+
 def evaluate_answer(state: SessionState, runtime: Any) -> dict[str, Any]:
     """현재 질문과 pending_event의 답변 텍스트를 평가한다.
 
