@@ -90,17 +90,16 @@ class Question(BaseModel):
     kind: QuestionKind = QuestionKind.MAIN
 
     # 질문 내용의 평가 유형
+    # 기술개념 / 프로젝트구현 
     category: QuestionCategory
-
 
     # 일반 질문이 아닌 경우, 어떤 질문에서 파생되었는지 기록한다.
     # follow_up / challenge / confirm / trap 질문에서 사용한다.
     # hint 질문은 parent_question_id를 가지지 않는다. (힌트는 원래 질문을 그대로 보여주기 때문)
     parent_question_id: Optional[str] = None
 
-    # 질문 카테고리. (선택)
-    # 기술개념 / 프로젝트구현 / 트러블슈팅으로 분류 (Enum)
-    category: Optional[QuestionCategory] = None
+    # 질문 생성에 사용된 근거 chunk ID 목록.
+    # 나중에 "이 질문이 어떤 Notion/GitHub 근거에서 나왔는지" 추적할 때 사용한다.
+    evidence_ids: list[str] = Field(default_factory=list)
 
-
- 
+    

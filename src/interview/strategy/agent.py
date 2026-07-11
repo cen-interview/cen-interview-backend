@@ -12,9 +12,7 @@ from interview.strategy.state import StrategyState
 
 import random
 
-# 주제 선택 시 confidence 상위 몇 개를 후보 풀로 삼을지
 _TOP_N_POOL = 3
-
 
 class StrategyAgent:
     """면접 질문의 방향·순서·난이도를 결정하는 전략 담당 에이전트.
