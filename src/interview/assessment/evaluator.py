@@ -30,9 +30,9 @@ from interview.schemas.question import (
     Question,
     QuestionCategory,
 )
-from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal,ConflictType
 from interview.llm.client import get_llm
-from interview.assessment.prompts import JUDGE_SYSTEM
+from interview.assessment.prompts import JUDGE_SYSTEM,DELIVERY_NOTE
 
 """
 분기 기준:
@@ -96,6 +96,7 @@ class JudgeResult(BaseModel):
     next_probe_target: str | None = None
     # quality 판정에 영향을 준 핵심 키워드
     rationale: list[str] = Field(default_factory=list)
+    conflict_type: ConflictType | None = None
 
     # 이전 답변 또는 Evidence와 충돌이 의심되는지 여부
     # True면 정밀 충돌 검사 실행
@@ -103,6 +104,14 @@ class JudgeResult(BaseModel):
 
     accuracy: float = Field(ge=0.0, le=1.0)
     sufficiency: float = Field(ge=0.0, le=1.0)
+
+    delivery_note: str | None = Field(
+    default=None,
+    description=(
+        "speech_rate_wpm과 filler_count만 해석한 전달력 평가 문장. "
+        "기술 내용, 정답 여부, 정확성, 충분성, 해결 방법은 언급하지 않는다."
+    ),
+)
 
 
 # 평가
@@ -145,7 +154,9 @@ def judge_answer(
     evidence_chunks=evidence_chunks,
     delivery_metrics=delivery_metrics,
     history=history,
+    
     )
+
     if judge_result.conflict_suspected:
         judge_result = _run_conflict_check(
             question=question,
@@ -163,6 +174,8 @@ def judge_answer(
         rationale=judge_result.rationale,
         accuracy=judge_result.accuracy,
         sufficiency=judge_result.sufficiency,
+        conflict_type=judge_result.conflict_type,
+        delivery_note=judge_result.delivery_note,
     )
 
 
@@ -216,6 +229,21 @@ def _judge_with_llm(
     history_summary = _build_history_summary(history)
     evidence_context = _build_evidence_context(question,evidence_chunks)
     
+    delivery_context = _build_delivery_context(delivery_metrics)
+
+    system_prompt = JUDGE_SYSTEM
+    if delivery_context:
+        system_prompt += f"\n\n{DELIVERY_NOTE}"
+
+
+    output_fields = (
+    "quality, next_probe_target, rationale, "
+    "accuracy, sufficiency"
+    )
+
+    if delivery_context:
+        output_fields += ", delivery_note"
+
     user_prompt = f"""
 
     [평가 대상 질문]
@@ -232,6 +260,7 @@ def _judge_with_llm(
 
     사용자 답변: {answer_text}
 
+    {delivery_context}
 
     Evidence: {evidence_context}
 
@@ -240,19 +269,26 @@ def _judge_with_llm(
 
     [평가 요청]
     위 답변을 category와 kind에 맞는 기준으로 평가하라.
-    반드시 지정된 구조로 quality, next_probe_target, rationale, accuracy, sufficiency를 반환하라.
-
+    반드시 지정된 구조로 {output_fields}를 반환하라.
     """
     llm = get_llm(temperature=0.0)
     structured_llm = llm.with_structured_output(JudgeResult)
 
     try:
-        return structured_llm.invoke(
+        result = structured_llm.invoke(
             [
-                {"role": "system", "content": JUDGE_SYSTEM},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
         )
+    
+        if not delivery_context:
+            result = result.model_copy(
+            update={"delivery_note": None}
+        )
+
+        return result
+    
     except Exception as e:
         raise RuntimeError("답변 평가 중 LLM 호출에 실패했습니다.") from e
 
@@ -412,3 +448,26 @@ def _collect_evidence_for_question(question: Question,answer_text:str) -> list[E
         query=f"{question.text}\n{answer_text}",
         topic=question.topic,
     )
+
+
+def _build_delivery_context(
+    delivery_metrics: dict | None,
+) -> str:
+    if not delivery_metrics:
+        return ""
+
+    lines = ["[전달력 지표]"]
+
+    speech_rate = delivery_metrics.get("speech_rate_wpm")
+    filler_count = delivery_metrics.get("filler_count")
+
+    if speech_rate is not None:
+        lines.append(f"speech_rate_wpm: {speech_rate}")
+
+    if filler_count is not None:
+        lines.append(f"filler_count: {filler_count}")
+
+    if len(lines) == 1:
+        return ""
+
+    return "\n".join(lines)

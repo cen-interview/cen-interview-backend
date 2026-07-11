@@ -85,6 +85,10 @@ class AnswerQuality(str, Enum):
     TRAP_AVAILABLE = "trap_available"
 
 
+class ConflictType(str, Enum):
+    EVIDENCE_CONFLICT = "evidence_conflict"
+    SELF_CONTRADICTION = "self_contradiction"
+
 
 class AnswerQualitySignal(BaseModel):
     answer_id: str
@@ -92,11 +96,14 @@ class AnswerQualitySignal(BaseModel):
     quality: AnswerQuality
 
     rationale: list[str] = Field(default_factory=list)
-
+    conflict_type: ConflictType | None = None
+    
     next_probe_target: Optional[str] = None
 
     accuracy: float = Field(default=0.0, ge=0.0, le=1.0)
     sufficiency: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    delivery_note: str | None = None
 
 
 

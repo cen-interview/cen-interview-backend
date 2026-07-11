@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from interview.evidence import build_index
 from interview.interviewer.adapters import from_chat, from_voice
-from interview.interviewer.graph import create_session, get_session
+from interview.interviewer.facade import create_session as create_interview_session, get_session
 from interview.schemas.events import Mode
 from uuid import uuid4
 
@@ -20,6 +20,7 @@ from interview.api.users.model import User
 from interview.api.auth.model import RefreshToken
 from interview.api.users.router import router as users_router
 from interview.api.auth.router import router as auth_router
+from interview.api.evidence.router import router as evidence_router
 
 from interview.assessment import AssessmentAgent
 from interview.interviewer.agent import InterviewerAgent
@@ -59,7 +60,7 @@ app.add_middleware(
 
 app.include_router(users_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
-
+app.include_router(evidence_router, prefix="/api")
 # 임시 ======================
 load_dotenv()
 
@@ -80,7 +81,7 @@ def start_session(req: StartRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail=f"unknown mode: {req.mode}")
 
-    session, first_question = create_session(mode=mode)
+    session, first_question = create_interview_session(mode=mode)
     return {
         "session_id": session.state.session_id,
         "question": first_question.model_dump(),

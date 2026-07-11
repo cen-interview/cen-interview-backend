@@ -10,11 +10,25 @@
 from interview.config import settings
 from interview.schemas.evidence import CoverageMap, EvidenceChunk, TopicCoverage
 
+DEFAULT_TOP_K = 5
 
 class EvidenceStore:
+    """Evidence 청크 저장/검색을 담당하는 저장소 경계.
+
+    현재는 Postgres + pgvector 전환 전 POC 단계라 user_id namespace별
+    인메모리 저장소를 사용한다. 호출부는 이 클래스의 메서드 계약만 의존하게
+    해서 실제 DB 구현으로 바뀌어도 Strategy/Assessment 영향을 줄인다.
+    """
+
     DEFAULT_NAMESPACE = "default"
+
     def __init__(self, database_url: str | None = None) -> None:
-        """
+        """EvidenceStore를 초기화하고 POC용 인메모리 저장소를 준비한다.
+
+        Args:
+            database_url: pgvector 저장소로 전환할 때 사용할 DB URL.
+                None이면 전역 settings.database_url을 사용한다.
+
         TODO(담당 A):
             - psycopg.connect(self.database_url) + CREATE EXTENSION vector
             - embedding_dimensions 크기의 vector 컬럼과 ivfflat 인덱스 초기화
@@ -53,7 +67,7 @@ class EvidenceStore:
         self,
         query: str,
         topic: str | None = None,
-        k: int = 5,
+        k: int = DEFAULT_TOP_K,
         user_id: int | str | None = None,
     ) -> list[EvidenceChunk]:
         """유사 청크 top-k 반환. topic 이 있으면 메타데이터 필터로 좁힌다.
@@ -74,23 +88,12 @@ class EvidenceStore:
 
         namespace = self._namespace(user_id)
         chunks = self._chunks_by_user.get(namespace, [])
+
         # [현재 Stub 작동] 유사도 검색 대신 topic 일치 필터 + 앞에서부터 k개
-        candidates = [c for c in chunks if topic is None or c.topic == topic]
-        if candidates:
-            return candidates[:k]
-        if chunks:
-            return chunks[:k]
-        # 아직 인덱싱 전이어도 호출부(Strategy/Assessment)가 죽지 않도록 더미 1건 반환
-        return [
-            EvidenceChunk(
-                chunk_id="stub_chunk_1",
-                text=f"[Stub] '{query}' 관련 근거 예시 텍스트입니다.",
-                source_type="notion",
-                source_url="https://notion.so/stub",
-                topic=topic or "General",
-                confidence=0.5,
-            )
-        ]
+        if topic is not None:
+            chunks = [chunk for chunk in chunks if chunk.topic == topic]
+
+        return chunks[:k]
 
     def build_coverage_map(self, user_id: int | str | None = None) -> CoverageMap:
         """저장된 청크들의 주제별 근거 커버리지를 집계한다.
@@ -133,6 +136,12 @@ _store: EvidenceStore | None = None
 
 
 def get_store() -> EvidenceStore:
+    """런타임 공용 EvidenceStore 싱글톤을 반환한다.
+
+    Retrieval Tool과 indexing 파이프라인이 같은 저장소 경계를 사용하도록 한다.
+    POC 단계에서는 프로세스 메모리에 유지되고, 실제 DB 구현 이후에도 호출부는
+    이 함수로 store 인스턴스를 얻는다.
+    """
     global _store
     if _store is None:
         _store = EvidenceStore()
