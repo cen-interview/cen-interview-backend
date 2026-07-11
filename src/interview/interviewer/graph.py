@@ -370,7 +370,7 @@ def route_event(state: SessionState | dict[str, Any]) -> str:
         "replay_requested": "handle_replay",
         "silence_detected": "handle_silence",
         "no_response_timeout": "handle_timeout",
-        "end_requested": "finalize",
+        "end_requested": "final_report",
     }
     return routes.get(event_type, "handle_replay")
 
@@ -647,6 +647,171 @@ def route_quality(state: SessionState | dict[str, Any]) -> str:
     return routes.get(last_signal.quality, "complete_set")
 
 
+def complete_set(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, Any]:
+    """현재 메인 질문과 파생 질문으로 구성된 평가 단위를 완료한다.
+
+    Assessment에 현재 질문 세트의 완료를 알린 뒤 세트 단위로 사용하는 제한
+    상태를 초기화한다. 다음 메인 질문 생성 또는 최종 리포트 이동 여부는 이
+    노드가 상태를 변경한 후 after_complete_set 라우터가 결정한다.
+
+    Args:
+        state:
+            현재 질문 세트의 메인 질문 ID와 진행 상태를 가진 세션 상태.
+
+        runtime:
+            AssessmentPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        challenge, 파생 질문 수, 침묵 횟수가 초기화된 부분 상태. 기준 메인
+        질문 ID를 찾을 수 없으면 error를 담은 부분 상태.
+    """
+    current_question = _state_get(state, "current_question")
+    main_question_id = _state_get(state, "main_question_id")
+    if main_question_id is None and current_question is not None:
+        main_question_id = current_question.question_id
+
+    if main_question_id is None:
+        return {"error": "완료할 메인 질문 세트를 찾을 수 없습니다."}
+
+    deps = _runtime_deps(runtime)
+    deps.assessment.complete_question_set(main_question_id=main_question_id)
+
+    return {
+        "challenge_used_in_set": False,
+        "derived_turn_count": 0,
+        "silence_count": 0,
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "error": None,
+    }
+
+
+def after_complete_set(state: SessionState | dict[str, Any]) -> str:
+    """질문 세트 완료 후 다음 메인 질문 또는 최종 리포트 경로를 선택한다.
+
+    asked_count는 지금까지 생성된 메인 질문 수다. 종료 판단을 질문 생성 직후가
+    아니라 complete_set 이후에 수행하므로 마지막 메인 질문의 답변과 평가가
+    끝난 뒤에만 최종 리포트로 이동한다. 이 함수는 상태를 읽기만 한다.
+
+    Args:
+        state:
+            메인 질문 수와 세션 종료 여부를 가진 세션 상태.
+
+    Returns:
+        최대 질문 수에 도달했거나 종료 상태이면 "final_report", 아니면
+        "ask_main".
+    """
+    if _state_get(state, "finished", False):
+        return "final_report"
+
+    asked_count = _state_get(state, "asked_count", 0)
+    max_questions = _state_get(state, "max_questions", 10)
+    return "final_report" if asked_count >= max_questions else "ask_main"
+
+
+def final_report(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, Any]:
+    """Assessment가 만든 최종 평가 리포트를 세션 상태에 저장한다.
+
+    리포트는 LangGraph checkpointer가 안전하게 저장할 수 있도록 Pydantic 모델
+    객체가 아닌 JSON 호환 dict로 변환한다. 세션 종료 상태 변경은 다음
+    finalize 노드가 담당한다.
+
+    Args:
+        state:
+            최종 리포트를 생성할 면접 세션 상태.
+
+        runtime:
+            AssessmentPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        직렬화된 최종 리포트와 초기화된 error를 담은 부분 상태.
+    """
+    deps = _runtime_deps(runtime)
+    report = deps.assessment.finalize()
+    return {
+        "report": report.model_dump(mode="json"),
+        "error": None,
+    }
+
+
+def finalize(state: SessionState | dict[str, Any]) -> dict[str, Any]:
+    """최종 리포트 생성이 끝난 세션을 종료 상태로 전환한다.
+
+    Args:
+        state:
+            종료할 현재 면접 세션 상태.
+
+    Returns:
+        종료 여부, closing 턴, 정리된 pending 입력을 담은 부분 상태.
+    """
+    return {
+        "finished": True,
+        "turn_type": "closing",
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "error": None,
+    }
+
+
+def handle_replay(state: SessionState | dict[str, Any]) -> dict[str, Any]:
+    """현재 질문을 유지한 채 다시 제시할 수 있도록 입력 상태를 정리한다.
+
+    Args:
+        state:
+            현재 질문과 처리한 이벤트를 가진 세션 상태.
+
+    Returns:
+        replay 턴과 정리된 pending 입력을 담은 부분 상태.
+    """
+    return {
+        "turn_type": "replay",
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "error": None,
+    }
+
+
+def handle_silence(state: SessionState | dict[str, Any]) -> dict[str, Any]:
+    """침묵 횟수를 증가시키고 현재 질문을 다시 제시하도록 준비한다.
+
+    상세한 힌트 및 반복 정책은 이후 침묵 처리 단계에서 확장한다.
+
+    Args:
+        state:
+            현재 침묵 횟수와 질문을 가진 세션 상태.
+
+    Returns:
+        증가한 침묵 횟수, replay 턴, 정리된 pending 입력을 담은 부분 상태.
+    """
+    return {
+        "silence_count": _state_get(state, "silence_count", 0) + 1,
+        "turn_type": "replay",
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "error": None,
+    }
+
+
+def handle_timeout(state: SessionState | dict[str, Any]) -> dict[str, Any]:
+    """무응답 타임아웃 이벤트를 종료 준비 상태로 전환한다.
+
+    상세한 end/pause 정책 분기는 이후 타임아웃 처리 단계에서 확장한다.
+
+    Args:
+        state:
+            타임아웃 이벤트가 검증된 현재 세션 상태.
+
+    Returns:
+        closing 턴과 정리된 pending 입력을 담은 부분 상태.
+    """
+    return {
+        "turn_type": "closing",
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "error": None,
+    }
+
+
 def ask_main(state: SessionState, runtime: Any) -> dict[str, Any]:
     """답변 품질 분기 없이 다음 메인 질문을 생성한다.
 
@@ -670,26 +835,6 @@ def ask_main(state: SessionState, runtime: Any) -> dict[str, Any]:
     }
 
 
-def after_evaluate(state: SessionState | dict[str, Any]) -> str:
-    """현재 질문의 답변 평가 후 다음 메인 질문 생성 여부를 결정한다.
-
-    질문을 생성한 직후 종료 여부를 판단하면 마지막 질문의 답변을 받기 전에
-    그래프가 끝난다. 따라서 평가가 완료된 시점의 메인 질문 수를 기준으로
-    종료 여부를 판단한다. 라우팅 함수는 state를 읽기만 하고 변경하지 않는다.
-
-    Args:
-        state:
-            현재 면접 세션 상태. SessionState 또는 같은 필드를 가진 dict.
-
-    Returns:
-        최대 메인 질문 수에 도달했으면 "end", 아니면 "continue".
-    """
-    finished = _state_get(state, "finished", False)
-    asked_count = _state_get(state, "asked_count", 0)   
-    max_questions = _state_get(state, "max_questions", 10)
-    return "end" if finished or asked_count >= max_questions else "continue"
-
-
 def _build_graph() -> StateGraph:
     """면접 세션의 LangGraph builder를 조립한다.
 
@@ -699,11 +844,11 @@ def _build_graph() -> StateGraph:
         graph를 만들 때마다 같은 구조를 명확하게 재사용할 수 있다.
 
     그래프 흐름:
-        START → greet → wait_event → evaluate_answer
+        START → greet → wait_event → validate_event → route_event
 
-        `evaluate_answer` 이후에는 `after_evaluate()` 라우터가 현재 질문까지
-        모두 평가했는지 확인한다. 최대 질문 수에 도달했으면 END로 이동하고,
-        아니면 `ask_main`에서 다음 질문을 만든 뒤 `wait_event`로 돌아간다.
+        답변 이벤트는 transcript 기록과 평가를 거친 뒤 route_quality에서
+        파생 질문 또는 complete_set으로 분기한다. 질문 세트가 끝나면 다음
+        메인 질문을 만들거나 final_report와 finalize를 거쳐 END로 이동한다.
 
     Returns:
         아직 compile되지 않은 StateGraph builder.
@@ -711,18 +856,68 @@ def _build_graph() -> StateGraph:
     builder = StateGraph(SessionState, context_schema=InterviewDeps)
     builder.add_node("greet", greet)
     builder.add_node("wait_event", wait_event)
+    builder.add_node("validate_event", validate_event)
+    builder.add_node("record_candidate_answer", record_candidate_answer)
     builder.add_node("evaluate_answer", evaluate_answer)
     builder.add_node("ask_main", ask_main)
+    builder.add_node("ask_follow_up", ask_follow_up)
+    builder.add_node("ask_challenge", ask_challenge)
+    builder.add_node("ask_confirm_positive", ask_confirm_positive)
+    builder.add_node("ask_confirm_negative", ask_confirm_negative)
+    builder.add_node("ask_trap", ask_trap)
+    builder.add_node("complete_set", complete_set)
+    builder.add_node("final_report", final_report)
+    builder.add_node("finalize", finalize)
+    builder.add_node("handle_replay", handle_replay)
+    builder.add_node("handle_silence", handle_silence)
+    builder.add_node("handle_timeout", handle_timeout)
 
     builder.add_edge(START, "greet")
     builder.add_edge("greet", "wait_event")
-    builder.add_edge("wait_event", "evaluate_answer")
+    builder.add_edge("wait_event", "validate_event")
+    builder.add_conditional_edges(
+        "validate_event",
+        route_event,
+        {
+            "record_candidate_answer": "record_candidate_answer",
+            "handle_replay": "handle_replay",
+            "handle_silence": "handle_silence",
+            "handle_timeout": "handle_timeout",
+            "final_report": "final_report",
+        },
+    )
+    builder.add_edge("record_candidate_answer", "evaluate_answer")
     builder.add_conditional_edges(
         "evaluate_answer",
-        after_evaluate,
-        {"end": END, "continue": "ask_main"},
+        route_quality,
+        {
+            "complete_set": "complete_set",
+            "ask_follow_up": "ask_follow_up",
+            "ask_challenge": "ask_challenge",
+            "ask_confirm_positive": "ask_confirm_positive",
+            "ask_confirm_negative": "ask_confirm_negative",
+            "ask_trap": "ask_trap",
+        },
+    )
+    builder.add_conditional_edges(
+        "complete_set",
+        after_complete_set,
+        {
+            "final_report": "final_report",
+            "ask_main": "ask_main",
+        },
     )
     builder.add_edge("ask_main", "wait_event")
+    builder.add_edge("ask_follow_up", "wait_event")
+    builder.add_edge("ask_challenge", "wait_event")
+    builder.add_edge("ask_confirm_positive", "wait_event")
+    builder.add_edge("ask_confirm_negative", "wait_event")
+    builder.add_edge("ask_trap", "wait_event")
+    builder.add_edge("handle_replay", "wait_event")
+    builder.add_edge("handle_silence", "wait_event")
+    builder.add_edge("handle_timeout", "final_report")
+    builder.add_edge("final_report", "finalize")
+    builder.add_edge("finalize", END)
     return builder
 
 
