@@ -306,6 +306,7 @@ def generate_hint(
         text=text,
         topic=question.topic,
         difficulty=question.difficulty,
+        category=question.category,
         kind=QuestionKind.HINT,
         evidence_ids=[chunk.chunk_id for chunk in reliable_chunks],
         parent_question_id=question.question_id,
