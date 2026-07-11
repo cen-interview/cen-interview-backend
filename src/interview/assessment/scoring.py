@@ -21,8 +21,17 @@ from interview.schemas.question import (
     Difficulty,
 )
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
-ACCURACY_BASE_WEIGHT = 0.7
-SUFFICIENCY_BONUS_WEIGHT = 0.3
+from interview.assessment.scoring_policy import (
+    ACCURACY_BASE_WEIGHT,
+    SUFFICIENCY_BONUS_WEIGHT,
+    RESOLVED_RATE_BY_KIND,
+    UNRESOLVED_RATE_BY_KIND,
+    EXPECTED_PRIOR_QUALITY_BY_KIND,
+    DIFFICULTY_MULTIPLIER,
+    CONTENT_SCORE_WEIGHT,
+    DELIVERY_SCORE_WEIGHT,
+)
+
 
 class AnswerAttempt(BaseModel):
     """질문 하나에 대한 답변 및 평가 기록.
@@ -80,7 +89,6 @@ class AnswerAttempt(BaseModel):
 
     delivery_metrics: dict | None = None
 
-
 class QuestionSetScore(BaseModel):
     """메인 질문과 파생 질문을 합산한 문항 최종 점수.
 
@@ -96,6 +104,7 @@ class QuestionSetScore(BaseModel):
 
     score: float = Field(ge=0.0, le=100.0)
     comment: str
+
 
 
 def score_question_set(
@@ -120,12 +129,54 @@ def score_question_set(
 
     return _calculate_question_set_score(attempts)
 
+def _clamp_score(score: float) -> float:
+    """점수를 0~100 범위로 제한하고 소수 둘째 자리까지 반환한다."""
 
+    return round(
+        max(0.0, min(100.0, score)),
+        2,
+    )
 
+def _apply_score_rate(
+    score: float,
+    rate: float,
+) -> float:
+    """기본 점수에 비율 기반 가산·감점을 적용한다."""
+
+    adjusted_score = score * (1.0 + rate)
+
+    return _clamp_score(adjusted_score)
+
+def _apply_difficulty_adjustment(
+    score: float,
+    attempts: list[AnswerAttempt],
+) -> tuple[float, float]:
+    """메인 질문의 난이도에 따라 질문 세트 점수를 보정한다."""
+
+    main_attempt = _find_main_attempt(attempts)
+
+    multiplier = DIFFICULTY_MULTIPLIER.get(
+        main_attempt.question_difficulty,
+        1.0,
+    )
+
+    adjusted_score = _clamp_score(
+        score * multiplier
+    )
+
+    return adjusted_score, multiplier
 
 def _calculate_attempt_base_score(
     attempt: AnswerAttempt,
 ) -> float:
+    """답변 하나의 accuracy와 sufficiency로 기본 점수를 계산한다.
+
+    accuracy를 전체 점수의 기준으로 사용하고,
+    sufficiency는 정확한 답변에 대한 추가 보상으로 반영한다.
+
+    따라서 accuracy가 0이면 sufficiency가 높아도 점수는 0이다.
+    """
+    
     accuracy = attempt.signal.accuracy
     sufficiency = attempt.signal.sufficiency
 
@@ -139,24 +190,179 @@ def _calculate_attempt_base_score(
         * SUFFICIENCY_BONUS_WEIGHT
     )
 
-    score = normalized_score * 100
-
-    return round(
-        max(0.0, min(100.0, score)),
-        2,
+    return _clamp_score(
+        normalized_score * 100
     )
+
+def _has_prior_quality(
+    attempts: list[AnswerAttempt],
+    quality: AnswerQuality,
+) -> bool:
+    """마지막 답변 이전에 지정한 quality가 있었는지 확인한다."""
+
+    return any(
+        attempt.signal.quality == quality
+        for attempt in attempts[:-1]
+    )
+
+def _build_adjustment_comment(
+    question_kind: QuestionKind,
+    resolved: bool,
+) -> str:
+    """파생 질문의 해결 여부에 맞는 평가 문구를 반환한다."""
+
+    comments = {
+        QuestionKind.FOLLOW_UP: {
+            True: (
+                "누락된 내용을 꼬리질문에서 "
+                "보완했습니다."
+            ),
+            False: (
+                "꼬리질문 이후에도 설명이 "
+                "충분히 보완되지 않았습니다."
+            ),
+        },
+        QuestionKind.CHALLENGE: {
+            True: (
+                "초기 오개념을 압박 질문 이후 "
+                "정정했습니다."
+            ),
+            False: (
+                "압박 질문 이후에도 오개념이 "
+                "해소되지 않았습니다."
+            ),
+        },
+        QuestionKind.CONFIRM_POSITIVE: {
+            True: (
+                "적용 범위와 세부 사실을 "
+                "명확히 확인했습니다."
+            ),
+            False: (
+                "적용 범위와 세부 사실이 "
+                "충분히 확인되지 않았습니다."
+            ),
+        },
+        QuestionKind.CONFIRM_NEGATIVE: {
+            True: (
+                "근거와의 불일치를 인정하고 "
+                "답변을 정정했습니다."
+            ),
+            False: (
+                "근거와의 불일치가 "
+                "해소되지 않았습니다."
+            ),
+        },
+        QuestionKind.TRAP: {
+            True: (
+                "유사 개념과 경계 조건을 "
+                "정확히 구분했습니다."
+            ),
+            False: (
+                "유사 개념과 경계 조건을 "
+                "정확히 구분하지 못했습니다."
+            ),
+        },
+    }
+
+    return comments[question_kind][resolved]
+
+def _apply_history_adjustment(
+    base_score: float,
+    attempts: list[AnswerAttempt],
+) -> tuple[float, str]:
+    """마지막 파생 질문에서 문제를 해결했는지에 따라 점수를 보정한다.
+
+    고정 점수를 더하거나 빼지 않고 기본 점수에 비율을 적용한다.
+
+    흐름:
+    - FOLLOW_UP: 설명 누락 보완 여부
+    - CHALLENGE: 오개념 정정 여부
+    - CONFIRM_POSITIVE: 세부 사실 확인 여부
+    - CONFIRM_NEGATIVE: 충돌 정정 여부
+    - TRAP: 유사 개념 구분 여부
+    - HINT: 힌트 이후 답변 회복 여부
+    """
+
+    if len(attempts) < 2:
+        return (
+            _clamp_score(base_score),
+            "첫 답변의 정확도와 충분성을 반영했습니다.",
+        )
+
+    last_attempt = attempts[-1]
+    last_kind = last_attempt.question_kind
+    last_quality = last_attempt.signal.quality
+
+    resolved = (
+        last_quality == AnswerQuality.SUFFICIENT
+    )
+
+    # HINT는 특정 quality 신호로 생성되는 질문이 아니므로
+    # 이전 quality를 확인하지 않고 힌트 사용 자체를 보정한다.
+    if last_kind == QuestionKind.HINT:
+        rate = (
+            RESOLVED_RATE_BY_KIND[last_kind]
+            if resolved
+            else UNRESOLVED_RATE_BY_KIND[last_kind]
+        )
+
+        comment = (
+            "힌트 이후 핵심 답변을 회복했습니다."
+            if resolved
+            else (
+                "힌트 이후에도 핵심 답변을 "
+                "충분히 회복하지 못했습니다."
+            )
+        )
+
+        return (
+            _apply_score_rate(base_score, rate),
+            comment,
+        )
+
+    expected_prior_quality = (
+        EXPECTED_PRIOR_QUALITY_BY_KIND.get(
+            last_kind
+        )
+    )
+
+    # MAIN이거나 이전 quality와 대응되지 않는 파생 질문이면
+    # 이력 보정을 적용하지 않는다.
+    if (
+        expected_prior_quality is None
+        or not _has_prior_quality(
+            attempts,
+            expected_prior_quality,
+        )
+    ):
+        return (
+            _clamp_score(base_score),
+            "마지막 답변의 정확도와 충분성을 반영했습니다.",
+        )
+
+    rate = (
+        RESOLVED_RATE_BY_KIND[last_kind]
+        if resolved
+        else UNRESOLVED_RATE_BY_KIND[last_kind]
+    )
+
+    adjusted_score = _apply_score_rate(
+        base_score,
+        rate,
+    )
+
+    comment = _build_adjustment_comment(
+        question_kind=last_kind,
+        resolved=resolved,
+    )
+
+    return adjusted_score, comment
 
 
 def _calculate_question_set_score(
     attempts: list[AnswerAttempt],
 ) -> QuestionSetScore:
     """마지막 답변의 정확도와 충분성으로 질문 세트 기본 점수를 계산한다.
-
-    accuracy를 기본 점수로 사용하고,
-    sufficiency는 정확한 답변에 대한 추가 보상으로 반영한다.
-
-    6-2에서 답변 이력에 따른 가산·감점을 추가하고,
-    6-3에서 세트의 최종 quality 결정 규칙을 추가한다.
     """
 
     if not attempts:
@@ -170,16 +376,40 @@ def _calculate_question_set_score(
         last_attempt
     )
 
+    history_adjusted_score, adjustment_comment = (
+        _apply_history_adjustment(
+            base_score=base_score,
+            attempts=attempts,
+        )   
+    )
+    difficulty_adjusted_score, _ = (
+        _apply_difficulty_adjustment(
+            score=history_adjusted_score,
+            attempts=attempts,
+        )
+    )
+
+    content_score = difficulty_adjusted_score
+
+    delivery_score = _calculate_set_delivery_score(
+        attempts
+    )
+
+    final_score = (
+        _combine_content_and_delivery_score(
+            content_score=content_score,
+            delivery_score=delivery_score,
+        )
+    )
+
     return QuestionSetScore(
-        score=base_score,
-        comment=(
-            f"정확도 {last_attempt.signal.accuracy:.2f}, "
-            f"충분성 {last_attempt.signal.sufficiency:.2f}를 "
-            "반영해 기본 점수를 계산했습니다."
-        ),
+        score=final_score,
+        comment=adjustment_comment,
     )
     
-def _find_main_attempt(attempts: list[AnswerAttempt]) -> AnswerAttempt:
+def _find_main_attempt(
+    attempts: list[AnswerAttempt],
+    ) -> AnswerAttempt:
     """질문 세트에서 메인 질문 답변을 찾는다."""
 
     for attempt in attempts:
@@ -187,3 +417,138 @@ def _find_main_attempt(attempts: list[AnswerAttempt]) -> AnswerAttempt:
             return attempt
 
     return attempts[0]
+
+# ---------------------------------------------- 
+
+def _calculate_speech_rate_score(
+    speech_rate_wpm: float,
+) -> float:
+    """분당 발화 속도를 0~100 전달력 점수로 변환한다."""
+
+    if 120 <= speech_rate_wpm <= 170:
+        return 100.0
+
+    if 100 <= speech_rate_wpm < 120:
+        return 85.0
+
+    if 170 < speech_rate_wpm <= 200:
+        return 80.0
+
+    return 60.0
+
+def _calculate_filler_score(
+    filler_count: int,
+) -> float:
+    """필러 표현 사용 횟수를 0~100 전달력 점수로 변환한다."""
+
+    if filler_count <= 2:
+        return 100.0
+
+    if filler_count <= 5:
+        return 85.0
+
+    if filler_count <= 9:
+        return 70.0
+
+    return 50.0
+
+
+def _calculate_attempt_delivery_score(
+    delivery_metrics: dict | None,
+) -> float | None:
+    """답변 하나의 전달력 지표를 전달력 점수로 변환한다."""
+
+    # metrics 자체가 없으면 전달력 계산을 하지 않는다.
+    if not delivery_metrics:
+        return None
+
+    speech_rate_wpm = delivery_metrics.get(
+        "speech_rate_wpm"
+    )
+    filler_count = delivery_metrics.get(
+        "filler_count"
+    )
+
+    scores: list[tuple[float, float]] = []
+
+    if speech_rate_wpm is not None:
+        scores.append(
+            (
+                _calculate_speech_rate_score(
+                    speech_rate_wpm
+                ),
+                0.6,
+            )
+        )
+
+    if filler_count is not None:
+        scores.append(
+            (
+                _calculate_filler_score(
+                    filler_count
+                ),
+                0.4,
+            )
+        )
+
+    if not scores:
+        return None
+
+    total_weight = sum(
+        weight
+        for _, weight in scores
+    )
+
+    weighted_score = sum(
+        score * weight
+        for score, weight in scores
+    ) / total_weight
+
+    return _clamp_score(weighted_score)
+
+
+def _calculate_set_delivery_score(
+    attempts: list[AnswerAttempt],
+) -> float | None:
+    """질문 세트에 포함된 음성 답변들의 전달력 점수 평균을 계산한다."""
+
+    delivery_scores = []
+
+    for attempt in attempts:
+        attempt_delivery_score = (
+            _calculate_attempt_delivery_score(
+                attempt.delivery_metrics
+            )
+        )
+
+        # metrics가 없는 답변은 세트 평균에서 제외한다.
+        if attempt_delivery_score is not None:
+            delivery_scores.append(
+                attempt_delivery_score
+            )
+
+  
+
+    if not delivery_scores:
+        return None
+
+    return _clamp_score(
+        sum(delivery_scores)
+        / len(delivery_scores)
+    )
+
+def _combine_content_and_delivery_score(
+    content_score: float,
+    delivery_score: float | None,
+) -> float:
+    """음성 지표가 있으면 내용 점수와 전달력 점수를 결합한다."""
+
+    if delivery_score is None:
+        return _clamp_score(content_score)
+
+    final_score = (
+        content_score * CONTENT_SCORE_WEIGHT
+        + delivery_score * DELIVERY_SCORE_WEIGHT
+    )
+
+    return _clamp_score(final_score)
