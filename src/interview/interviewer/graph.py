@@ -400,6 +400,203 @@ def evaluate_answer(state: SessionState, runtime: Any) -> dict[str, Any]:
     }
 
 
+def ask_follow_up(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, Any]:
+    """평가 신호의 추가 확인 대상을 바탕으로 꼬리 질문을 생성한다.
+
+    Args:
+        state:
+            현재 질문, 마지막 평가 신호, 파생 질문 횟수를 가진 세션 상태.
+
+        runtime:
+            StrategyPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        생성된 꼬리 질문과 증가한 파생 질문 횟수를 담은 부분 상태. 질문 생성에
+        필요한 상태가 없거나 부모 질문 연결이 잘못되면 error를 반환한다.
+    """
+    current_question = _state_get(state, "current_question")
+    last_signal = _restore_signal(_state_get(state, "last_signal"))
+    if current_question is None or last_signal is None:
+        return {"error": "꼬리 질문 생성에 필요한 질문 또는 평가 신호가 없습니다."}
+
+    deps = _runtime_deps(runtime)
+    question = deps.strategy.next_follow_up(
+        topic=current_question.topic,
+        parent_question_id=current_question.question_id,
+        target=last_signal.next_probe_target,
+    )
+    if question.parent_question_id != current_question.question_id:
+        return {"error": "생성된 꼬리 질문의 부모 질문 ID가 올바르지 않습니다."}
+
+    return {
+        "current_question": question,
+        "derived_turn_count": _state_get(state, "derived_turn_count", 0) + 1,
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "turn_type": "question",
+        "error": None,
+    }
+
+
+def ask_challenge(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, Any]:
+    """평가에서 발견한 오개념이나 논리적 허점을 확인할 압박 질문을 생성한다.
+
+    Args:
+        state:
+            현재 질문, 마지막 평가 신호, 질문 세트 상태를 가진 세션 상태.
+
+        runtime:
+            StrategyPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        생성된 압박 질문, 증가한 파생 질문 횟수, challenge 사용 상태를 담은
+        부분 상태. 필요한 상태가 없거나 부모 연결이 잘못되면 error를 반환한다.
+    """
+    current_question = _state_get(state, "current_question")
+    last_signal = _restore_signal(_state_get(state, "last_signal"))
+    if current_question is None or last_signal is None:
+        return {"error": "압박 질문 생성에 필요한 질문 또는 평가 신호가 없습니다."}
+
+    deps = _runtime_deps(runtime)
+    question = deps.strategy.next_challenge(
+        topic=current_question.topic,
+        parent_question_id=current_question.question_id,
+        target=last_signal.next_probe_target,
+    )
+    if question.parent_question_id != current_question.question_id:
+        return {"error": "생성된 압박 질문의 부모 질문 ID가 올바르지 않습니다."}
+
+    return {
+        "current_question": question,
+        "derived_turn_count": _state_get(state, "derived_turn_count", 0) + 1,
+        "challenge_used_in_set": True,
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "turn_type": "question",
+        "error": None,
+    }
+
+
+def ask_confirm_positive(
+    state: SessionState | dict[str, Any],
+    runtime: Any,
+) -> dict[str, Any]:
+    """대체로 맞는 답변의 범위나 사실관계를 확인할 질문을 생성한다.
+
+    Args:
+        state:
+            현재 질문, 마지막 평가 신호, 파생 질문 횟수를 가진 세션 상태.
+
+        runtime:
+            StrategyPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        생성된 긍정 확인 질문과 증가한 파생 질문 횟수를 담은 부분 상태. 필요한
+        상태가 없거나 부모 질문 연결이 잘못되면 error를 반환한다.
+    """
+    current_question = _state_get(state, "current_question")
+    last_signal = _restore_signal(_state_get(state, "last_signal"))
+    if current_question is None or last_signal is None:
+        return {"error": "긍정 확인 질문 생성에 필요한 질문 또는 평가 신호가 없습니다."}
+
+    deps = _runtime_deps(runtime)
+    question = deps.strategy.next_confirm_positive(
+        topic=current_question.topic,
+        parent_question_id=current_question.question_id,
+        target=last_signal.next_probe_target,
+    )
+    if question.parent_question_id != current_question.question_id:
+        return {"error": "생성된 긍정 확인 질문의 부모 질문 ID가 올바르지 않습니다."}
+
+    return {
+        "current_question": question,
+        "derived_turn_count": _state_get(state, "derived_turn_count", 0) + 1,
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "turn_type": "question",
+        "error": None,
+    }
+
+
+def ask_confirm_negative(
+    state: SessionState | dict[str, Any],
+    runtime: Any,
+) -> dict[str, Any]:
+    """근거나 이전 답변과 충돌하는 내용을 재확인할 질문을 생성한다.
+
+    Args:
+        state:
+            현재 질문, 마지막 평가 신호, 파생 질문 횟수를 가진 세션 상태.
+
+        runtime:
+            StrategyPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        생성된 부정 확인 질문과 증가한 파생 질문 횟수를 담은 부분 상태. 필요한
+        상태가 없거나 부모 질문 연결이 잘못되면 error를 반환한다.
+    """
+    current_question = _state_get(state, "current_question")
+    last_signal = _restore_signal(_state_get(state, "last_signal"))
+    if current_question is None or last_signal is None:
+        return {"error": "부정 확인 질문 생성에 필요한 질문 또는 평가 신호가 없습니다."}
+
+    deps = _runtime_deps(runtime)
+    question = deps.strategy.next_confirm_negative(
+        topic=current_question.topic,
+        parent_question_id=current_question.question_id,
+        target=last_signal.next_probe_target,
+    )
+    if question.parent_question_id != current_question.question_id:
+        return {"error": "생성된 부정 확인 질문의 부모 질문 ID가 올바르지 않습니다."}
+
+    return {
+        "current_question": question,
+        "derived_turn_count": _state_get(state, "derived_turn_count", 0) + 1,
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "turn_type": "question",
+        "error": None,
+    }
+
+
+def ask_trap(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, Any]:
+    """혼동하기 쉬운 개념을 정확히 구분하는지 확인할 함정 질문을 생성한다.
+
+    Args:
+        state:
+            현재 질문, 마지막 평가 신호, 파생 질문 횟수를 가진 세션 상태.
+
+        runtime:
+            StrategyPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        생성된 함정 질문과 증가한 파생 질문 횟수를 담은 부분 상태. 필요한
+        상태가 없거나 부모 질문 연결이 잘못되면 error를 반환한다.
+    """
+    current_question = _state_get(state, "current_question")
+    last_signal = _restore_signal(_state_get(state, "last_signal"))
+    if current_question is None or last_signal is None:
+        return {"error": "함정 질문 생성에 필요한 질문 또는 평가 신호가 없습니다."}
+
+    deps = _runtime_deps(runtime)
+    question = deps.strategy.next_trap(
+        topic=current_question.topic,
+        parent_question_id=current_question.question_id,
+        target=last_signal.next_probe_target,
+    )
+    if question.parent_question_id != current_question.question_id:
+        return {"error": "생성된 함정 질문의 부모 질문 ID가 올바르지 않습니다."}
+
+    return {
+        "current_question": question,
+        "derived_turn_count": _state_get(state, "derived_turn_count", 0) + 1,
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "turn_type": "question",
+        "error": None,
+    }
+
+
 def ask_main(state: SessionState, runtime: Any) -> dict[str, Any]:
     """답변 품질 분기 없이 다음 메인 질문을 생성한다.
 
