@@ -133,7 +133,11 @@ def conflict_check(state: AssessmentState) -> AssessmentState:
     )
 
     if conflict_result.conflict_suspected:
-        state.judge_result = conflict_result
+        state.judge_result = conflict_result.model_copy(
+            update={
+                "delivery_note": state.judge_result.delivery_note,
+            }
+        )
     else:
         state.judge_result = state.judge_result.model_copy(
             update={"conflict_suspected": False}
@@ -157,6 +161,7 @@ def finalize_signal(state: AssessmentState) -> AssessmentState:
         rationale=state.judge_result.rationale,
         accuracy=state.judge_result.accuracy,
         sufficiency=state.judge_result.sufficiency,
+        delivery_note=state.judge_result.delivery_note,
     )
 
     return state

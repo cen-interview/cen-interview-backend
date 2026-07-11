@@ -103,5 +103,7 @@ class AnswerQualitySignal(BaseModel):
     accuracy: float = Field(default=0.0, ge=0.0, le=1.0)
     sufficiency: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    delivery_note: str | None = None
+
 
 

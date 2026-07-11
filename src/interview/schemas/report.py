@@ -30,6 +30,8 @@ class AnswerEvaluation(BaseModel):
     # 평가 코멘트
     comment: str
 
+    delivery_note: str | None = None
+
 
 class CompetencyModel(BaseModel):
     """면접 내내 누적되는 역량 상태."""
