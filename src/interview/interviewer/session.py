@@ -140,6 +140,11 @@ class SessionState(BaseModel):
         last_utterance:
             면접관이 마지막으로 생성한 발화 문장.
 
+        utterance_queue:
+            화면 표시나 TTS가 순서대로 처리할 면접관 발화 목록. 현재는 완성된
+            발화 하나를 담고, 이후 reaction과 question을 분리하면 두 문장을
+            재생 순서대로 담는다.
+
         turn_type:
             현재 턴의 성격.
             예: question, hint, represent, feedback 등.
@@ -203,6 +208,7 @@ class SessionState(BaseModel):
 
     # 마지막 출력 및 턴 상태
     last_utterance: str = ""
+    utterance_queue: list[str] = Field(default_factory=list)
     turn_type: str = "question"
 
     # 침묵/타임아웃 처리 정책

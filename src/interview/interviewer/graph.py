@@ -1052,19 +1052,22 @@ def compose_utterance(
     Strategy가 만든 Question.text는 수정하지 않고 짧은 preamble 앞에 그대로
     붙인다. InterviewDeps에 LLM이 있으면 구조화된 preamble 생성을 시도하고,
     LLM이 없거나 호출이 실패하거나 제한 시간을 넘기면 기본 템플릿을 사용한다.
-    조립한 문장은 last_utterance에 저장하고 동일한 내용을 interviewer Turn으로
-    transcript에 추가한다. closing과 pause_prompt에는 질문을 덧붙이지 않는다.
+    조립한 문장은 last_utterance에 저장하고, 순차 재생 가능한 발화 목록인
+    utterance_queue에도 담는다. 동일한 내용을 interviewer Turn으로 transcript에
+    추가한다. closing과 pause_prompt에는 질문을 덧붙이지 않는다.
 
     Args:
         state:
-            현재 질문, 턴 상황, 기존 transcript를 가진 세션 상태.
+            현재 질문, 턴 상황, 기존 transcript와 선택적인 last_signal을 가진
+            세션 상태. last_signal은 LLM preamble 생성 맥락으로 전달한다.
 
         runtime:
             선택적 LLM이 담긴 InterviewDeps를 제공하는 LangGraph runtime.
 
     Returns:
-        조립된 last_utterance와 면접관 Turn이 추가된 transcript를 담은 부분
-        상태. 질문이 필요한 상황인데 현재 질문이 없으면 error를 반환한다.
+        조립된 last_utterance, 순차 재생할 utterance_queue, 면접관 Turn이
+        추가된 transcript를 담은 부분 상태. 질문이 필요한 상황인데 현재
+        질문이 없으면 error를 반환한다.
     """
     turn_type = _state_get(state, "turn_type", "question")
     current_question = _state_get(state, "current_question")
@@ -1104,6 +1107,7 @@ def compose_utterance(
 
     return {
         "last_utterance": last_utterance,
+        "utterance_queue": [last_utterance],
         "transcript": [*transcript, interviewer_turn],
         "error": None,
     }
