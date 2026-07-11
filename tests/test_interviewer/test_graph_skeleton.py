@@ -9,8 +9,9 @@ import uuid
 
 from langgraph.types import Command
 
-from interview.interviewer.graph import InterviewDeps, get_compiled_graph
 from interview.interviewer.session import SessionState
+from interview.interviewer.workflow.graph import get_compiled_graph
+from interview.interviewer.workflow.runtime import InterviewDeps
 from interview.schemas.question import (
     Difficulty,
     Question,

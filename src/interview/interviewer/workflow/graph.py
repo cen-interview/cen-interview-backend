@@ -2,7 +2,6 @@
 
 from functools import lru_cache
 
-from interview.interviewer.facade import InterviewSession, create_session, get_session
 from interview.interviewer.speech.composition import after_compose_utterance, compose_utterance
 from interview.interviewer.workflow.nodes import (
     ask_challenge,
@@ -30,12 +29,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 __all__ = [
-    "InterviewDeps",
-    "InterviewSession",
-    "compose_utterance",
-    "create_session",
     "get_compiled_graph",
-    "get_session",
 ]
 
 

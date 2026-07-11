@@ -7,10 +7,11 @@ from typing import Any
 import pytest
 
 import interview.interviewer.speech.composition as interviewer_composition
-from interview.interviewer.graph import InterviewDeps, compose_utterance
 from interview.interviewer.models import ComposedUtterance
 from interview.interviewer.session import SessionState, Turn
+from interview.interviewer.speech.composition import compose_utterance
 from interview.interviewer.speech import utterance
+from interview.interviewer.workflow.runtime import InterviewDeps
 from interview.schemas.question import Difficulty, Question, QuestionCategory, QuestionKind
 
 
