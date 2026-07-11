@@ -156,6 +156,13 @@ class SessionState(BaseModel):
         challenge_used_in_set:
             현재 메인 질문 세트에서 challenge 질문을 이미 사용했는지 여부.
 
+        derived_turn_count:
+            현재 메인 질문 세트에서 생성한 파생 질문 수.
+
+        max_derived_turns_per_set:
+            하나의 메인 질문 세트에서 허용하는 최대 파생 질문 수.
+            반복적인 꼬리 질문으로 면접이 끝나지 않는 상황을 방지한다.
+
         error:
             세션 처리 중 발생한 오류 메시지.
             오류가 없으면 None이다.
@@ -181,6 +188,8 @@ class SessionState(BaseModel):
     main_question_id: str | None = None
     main_topic: str | None = None
     challenge_used_in_set: bool = False
+    derived_turn_count: int = 0
+    max_derived_turns_per_set: int = 2
 
     # 대화 기록 및 입력 이벤트
     transcript: list[Turn] = Field(default_factory=list)
