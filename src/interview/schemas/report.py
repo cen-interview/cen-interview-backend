@@ -30,6 +30,7 @@ class AnswerEvaluation(BaseModel):
     # 평가 코멘트
     comment: str
 
+
     delivery_note: str | None = None
 
 
