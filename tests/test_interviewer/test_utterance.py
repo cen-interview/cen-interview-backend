@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
-import interview.interviewer.graph as interviewer_graph
-from interview.interviewer import utterance
+import interview.interviewer.speech.composition as interviewer_composition
 from interview.interviewer.graph import InterviewDeps, compose_utterance
 from interview.interviewer.models import ComposedUtterance
 from interview.interviewer.session import SessionState, Turn
+from interview.interviewer.speech import utterance
 from interview.schemas.question import Difficulty, Question, QuestionCategory, QuestionKind
 
 
@@ -279,7 +279,7 @@ def test_llm_timeout_falls_back_to_template(monkeypatch):
         monkeypatch:
             테스트 동안 LLM 제한 시간을 짧게 바꾸는 pytest fixture.
     """
-    monkeypatch.setattr(interviewer_graph, "_UTTERANCE_LLM_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(interviewer_composition, "_UTTERANCE_LLM_TIMEOUT_SECONDS", 0.01)
     question = make_question()
     llm = FakeLlm(
         output={"preamble": "늦게 생성된 안내 문장입니다."},
