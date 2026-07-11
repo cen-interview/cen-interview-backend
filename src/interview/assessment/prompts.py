@@ -197,9 +197,23 @@ CONFLICT_CHECK_SYSTEM = """\
 충돌 판단에는 현재 답변과 직접 비교할 수 있는 문장을 rationale에 구체적으로 작성한다.
 """
 
-DELIVERY_NOTE = """\
-참고: 아래 전달력 지표는 음성 모드에서만 사용하는 보조 신호다.
 
-말 속도, 군더더기 표현, 답변 구조는 내용 평가의 참고 자료로만 사용한다.
-내용의 정확성 판단은 반드시 Evidence와 답변 내용 비교를 우선한다.
+DELIVERY_NOTE = """\
+[전달력 평가 규칙]
+
+delivery_note는 전달력 지표만 해석한 짧은 한국어 문장이다.
+
+- speech_rate_wpm과 filler_count만 사용한다.
+- 답변의 기술적 내용, 정답 여부, 정확성, 충분성을 언급하지 않는다.
+- 질문의 기술 용어, 해결 방법, 누락된 내용을 언급하지 않는다.
+- quality, accuracy, sufficiency, rationale를 delivery_note에 반복하지 않는다.
+- delivery_note는 quality, accuracy, sufficiency,
+  conflict_suspected, conflict_type 판정에 영향을 주지 않는다.
+- 측정값을 근거로 말하는 속도와 필러 표현 사용만 설명한다.
+
+허용 예시:
+"발화 속도는 분당 185단어로 다소 빠르며, 필러 표현이 7회 관찰되었습니다."
+
+금지 예시:
+"답변은 대체로 맞지만 해결 방법에 대한 설명이 부족합니다."
 """

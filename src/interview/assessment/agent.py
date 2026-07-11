@@ -95,7 +95,7 @@ class AssessmentAgent:
 
         result_state = get_compiled_graph().invoke(state)
 
-        signal = result_state.final_signal
+        signal = result_state["final_signal"]
 
         # AnswerAttempt는 "질문 1개에 대한 답변 시도 1건"을 기록하는 객체다.
         # 이후 질문 세트 단위 점수 산정(score_question_set)에 사용된다.
@@ -128,6 +128,7 @@ class AssessmentAgent:
     def complete_question_set(
         self,
         main_question_id: str,
+
     ) -> None:
         """현재 질문 세트를 하나의 AnswerEvaluation으로 저장한다.
 
@@ -167,6 +168,7 @@ class AssessmentAgent:
             answer_summary=self._build_answer_summary(),
             score=score.score,
             comment=score.comment,
+            delivery_note=self._build_delivery_note(),
         )
 
         self.evaluations.append(evaluation)
@@ -205,6 +207,18 @@ class AssessmentAgent:
         # 기존 데이터와의 임시 호환을 위해 첫 답변을 사용한다.
         return self.current_attempts[0]
     
+    def _build_delivery_note(self) -> str | None:
+        notes = [
+            attempt.signal.delivery_note
+            for attempt in self.current_attempts
+            if attempt.signal.delivery_note
+        ]
+
+        if not notes:
+            return None
+
+        return " ".join(dict.fromkeys(notes))
+
     def _build_answer_summary(self) -> str:
         """현재 질문 세트의 답변들을 하나의 답변 요약 문자열로 만든다.
 
