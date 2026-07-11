@@ -6,7 +6,7 @@ from typing import Any
 from interview.assessment import AssessmentAgent
 from interview.interviewer.agent import InterviewerAgent
 from interview.interviewer.contracts import AssessmentPort, StrategyPort
-from interview.interviewer.session import SessionState
+from interview.interviewer.session import SessionState, Turn
 from interview.schemas.events import AnswerSubmitted, InterviewerEvent, Mode
 from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
@@ -283,6 +283,57 @@ def validate_event(state: SessionState | dict[str, Any]) -> dict[str, Any]:
 
     return {
         "pending_event": event.model_dump(mode="json"),
+        "error": None,
+    }
+
+
+def record_candidate_answer(
+    state: SessionState | dict[str, Any],
+) -> dict[str, Any]:
+    """검증된 지원자 답변을 transcript에 기록한다.
+
+    validate_event를 통과한 AnswerSubmitted를 candidate Turn으로 변환한다.
+    기존 transcript를 직접 변경하지 않고 새 리스트를 반환하여 LangGraph의
+    부분 상태 병합 과정에서 이전 대화 기록이 명확하게 보존되도록 한다.
+
+    이 노드는 답변 평가 전에 실행된다. 따라서 이후 Assessment 평가, 답변
+    인용, 모순 검출, 최종 리포트와 대화 화면이 같은 답변 기록을 사용할 수
+    있다.
+
+    Args:
+        state:
+            검증된 pending_event, current_question, transcript를 가진 세션 상태.
+
+    Returns:
+        지원자 Turn이 추가된 transcript를 담은 부분 상태. 선행 검증 결과가
+        없거나 답변 이벤트가 아니면 error를 담은 부분 상태.
+    """
+    pending_event = _state_get(state, "pending_event")
+    if pending_event is None:
+        return {"error": "기록할 답변 이벤트가 없습니다."}
+
+    try:
+        event = _EVENT_ADAPTER.validate_python(pending_event)
+    except ValidationError:
+        return {"error": "기록할 답변 이벤트의 형식이 올바르지 않습니다."}
+
+    if not isinstance(event, AnswerSubmitted):
+        return {"error": "답변 제출 이벤트만 지원자 발화로 기록할 수 있습니다."}
+
+    current_question = _state_get(state, "current_question")
+    if current_question is None:
+        return {"error": "답변을 연결할 현재 질문이 없습니다."}
+
+    candidate_turn = Turn(
+        role="candidate",
+        text=event.text,
+        question_id=event.question_id,
+        kind=current_question.kind.value,
+    )
+    transcript = _state_get(state, "transcript", [])
+
+    return {
+        "transcript": [*transcript, candidate_turn],
         "error": None,
     }
 
