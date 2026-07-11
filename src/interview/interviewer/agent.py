@@ -46,7 +46,7 @@
 
 """
 
-from interview.assessment import AssessmentAgent
+from interview.interviewer.contracts import AssessmentPort, StrategyPort
 from interview.schemas.events import (
     AnswerSubmitted,
     EndRequested,
@@ -60,15 +60,14 @@ from interview.schemas.events import (
 from interview.schemas.question import Question, QuestionKind
 from interview.schemas.signals import AnswerQuality
 from interview.interviewer.session import SessionState
-from interview.strategy import StrategyAgent
 
 
 class InterviewerAgent:
     def __init__(
         self,
         session: SessionState,
-        strategy: StrategyAgent,
-        assessment: AssessmentAgent,
+        strategy: StrategyPort,
+        assessment: AssessmentPort,
     ) -> None:
         self.session = session
         self.strategy = strategy

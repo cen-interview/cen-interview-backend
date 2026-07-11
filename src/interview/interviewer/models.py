@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from interview.schemas.events import InterviewerEvent
 
@@ -45,3 +45,23 @@ class AdaptedInput(BaseModel):
 
     event: InterviewerEvent
     delivery_metrics: DeliveryMetrics | None = None
+
+
+class ComposedUtterance(BaseModel):
+    """LLM이 생성한 면접관 안내 문장을 저장하는 구조화 출력 모델.
+
+    LLM은 Strategy가 만든 질문 본문을 생성하거나 수정하지 않고, 질문 앞에
+    붙일 짧은 안내 문장만 반환한다. 실제 질문과의 결합은 Interviewer의
+    compose_utterance 노드가 담당한다.
+
+    Attributes:
+        preamble:
+            현재 상황에 맞는 한국어 존댓말 안내 문장. 최대 두 문장을
+            요청하며, 질문 본문은 포함하지 않는다.
+    """
+
+    preamble: str = Field(
+        min_length=1,
+        max_length=200,
+        description="질문 본문을 제외한 최대 두 문장의 한국어 면접관 안내 문장.",
+    )
