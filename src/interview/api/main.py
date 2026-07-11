@@ -20,6 +20,7 @@ from interview.api.users.model import User
 from interview.api.auth.model import RefreshToken
 from interview.api.users.router import router as users_router
 from interview.api.auth.router import router as auth_router
+from interview.api.evidence.router import router as evidence_router
 
 from interview.assessment import AssessmentAgent
 from interview.interviewer.agent import InterviewerAgent
@@ -59,7 +60,7 @@ app.add_middleware(
 
 app.include_router(users_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
-
+app.include_router(evidence_router, prefix="/api")
 # 임시 ======================
 load_dotenv()
 

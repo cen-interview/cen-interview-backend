@@ -5,7 +5,6 @@ import 해서 쓰고, 절대 os.environ을 직접 만지지 않는다 (설정 �
 """
 
 from functools import lru_cache
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,7 +18,14 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.4-mini"
 
     # MCP / 외부 소스
-    notion_api_key: str = ""
+    # notion
+    notion_mcp_url: str = "https://mcp.notion.com/mcp"
+    notion_mcp_issuer: str = "https://mcp.notion.com"
+    notion_mcp_resource: str = "https://mcp.notion.com/mcp"
+    notion_redirect_uri: str = "http://localhost:8000/api/auth/notion/callback"
+    notion_mcp_access_token: str = ""
+
+    # github
     github_token: str = ""
 
     # Vector DB (Postgres + pgvector)
