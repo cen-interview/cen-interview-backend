@@ -30,7 +30,7 @@ from interview.schemas.question import (
     Question,
     QuestionCategory,
 )
-from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal,ConflictType
 from interview.llm.client import get_llm
 from interview.assessment.prompts import JUDGE_SYSTEM
 
@@ -96,6 +96,7 @@ class JudgeResult(BaseModel):
     next_probe_target: str | None = None
     # quality 판정에 영향을 준 핵심 키워드
     rationale: list[str] = Field(default_factory=list)
+    conflict_type: ConflictType | None = None
 
     # 이전 답변 또는 Evidence와 충돌이 의심되는지 여부
     # True면 정밀 충돌 검사 실행

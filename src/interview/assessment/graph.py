@@ -153,6 +153,7 @@ def finalize_signal(state: AssessmentState) -> AssessmentState:
         question_id=state.question.question_id,
         quality=state.judge_result.quality,
         next_probe_target=state.judge_result.next_probe_target,
+        conflict_type=state.judge_result.conflict_type,
         rationale=state.judge_result.rationale,
         accuracy=state.judge_result.accuracy,
         sufficiency=state.judge_result.sufficiency,
@@ -221,8 +222,8 @@ difficulty: {state.question.difficulty}
 [현재 답변]
 {state.answer_text}
 
-[이전 답변 이력]
-{state.history_summary or "(없음)"}
+[같은 topic의 이전 답변 이력]
+{state.same_topic_history_summary or "(없음)"}
 
 [Evidence]
 {evaluator._build_evidence_context(state.question, state.evidence_chunks)}
