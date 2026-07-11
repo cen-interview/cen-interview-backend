@@ -93,7 +93,7 @@ class AssessmentAgent:
             history=self.all_attempts,
         )
 
-        result_state = assessment_graph.invoke(state)
+        result_state = get_compiled_graph().invoke(state)
 
         signal = result_state.final_signal
 

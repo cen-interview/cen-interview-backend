@@ -31,6 +31,41 @@ class AssessmentState(BaseModel):
 
     final_signal: AnswerQualitySignal | None = None
 
+    same_topic_history: list[AnswerAttempt] = Field(default_factory=list)
+    same_topic_history_summary: str = ""
+
+def _normalize_topic(topic: str) -> str:
+    return topic.strip().lower()
+
+
+def _filter_same_topic_history(
+    question: Question,
+    history: list[AnswerAttempt],
+) -> list[AnswerAttempt]:
+    current_topic = _normalize_topic(question.topic)
+
+    return [
+        attempt
+        for attempt in history
+        if _normalize_topic(attempt.question_topic) == current_topic
+    ]
+
+def _build_same_topic_history_summary(history: list[AnswerAttempt]) -> str:
+    if not history:
+        return ""
+
+    return "\n".join(
+        (
+            f"- question_id: {attempt.question_id}\n"
+            f"  kind: {attempt.question_kind.value}\n"
+            f"  question: {attempt.question_text}\n"
+            f"  answer: {attempt.answer_text}\n"
+            f"  quality: {attempt.signal.quality.value}\n"
+            f"  rationale: {attempt.signal.rationale}"
+        )
+        for attempt in history
+    )
+
 
 def retrieve_evidence(state: AssessmentState) -> AssessmentState:
     """PROJECT 질문이면 Evidence를 조회하고, 그 외 질문은 근거 없이 진행한다."""
@@ -57,7 +92,14 @@ def judge(state: AssessmentState) -> AssessmentState:
     if state.question is None:
         return state
 
-    state.history_summary = evaluator._build_history_summary(state.history)
+    state.same_topic_history = _filter_same_topic_history(
+        state.question,
+        state.history,
+    )
+
+    state.same_topic_history_summary = _build_same_topic_history_summary(
+    state.same_topic_history,
+    )
     state.judge_result = evaluator._judge_with_llm(
         question=state.question,
         answer_text=state.answer_text,
@@ -75,7 +117,7 @@ def conflict_check(state: AssessmentState) -> AssessmentState:
     if state.question is None or state.judge_result is None:
         return state
 
-    if not state.history_summary and not state.evidence_chunks:
+    if not state.same_topic_history_summary and not state.evidence_chunks:
         state.judge_result = state.judge_result.model_copy(
             update={"conflict_suspected": False}
         )
