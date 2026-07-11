@@ -8,9 +8,8 @@ from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question, QuestionKind
 from interview.schemas.signals import AnswerQualitySignal
 from interview.strategy import difficulty, question_gen  # noqa: F401 (TODO 담당 B: question_gen 연결 시 사용)
-from interview.strategy.graph import QuestionGenState
-from interview.strategy.state import StrategyState
 from interview.strategy.graph import QuestionGenState, get_compiled_graph
+from interview.strategy.state import StrategyState
 
 
 class StrategyAgent:
