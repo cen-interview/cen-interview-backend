@@ -5,6 +5,7 @@ from typing import Any
 
 from interview.assessment import AssessmentAgent
 from interview.interviewer.agent import InterviewerAgent
+from interview.interviewer.contracts import AssessmentPort, StrategyPort
 from interview.interviewer.session import SessionState
 from interview.schemas.events import InterviewerEvent, Mode
 from interview.schemas.evidence import CoverageMap
@@ -37,8 +38,8 @@ class InterviewDeps:
             지금 단계에서는 None이어도 전체 세션 흐름이 동작해야 한다.
     """
 
-    strategy: StrategyAgent
-    assessment: AssessmentAgent
+    strategy: StrategyPort
+    assessment: AssessmentPort
     llm: object | None = None
 
 
@@ -280,13 +281,22 @@ def ask_main(state: SessionState, runtime: Any) -> dict[str, Any]:
     }
 
 
-def after_ask(state: SessionState | dict[str, Any]) -> str:
-    """ask_main 이후 계속 질문할지 종료할지 결정한다.
+def after_evaluate(state: SessionState | dict[str, Any]) -> str:
+    """현재 질문의 답변 평가 후 다음 메인 질문 생성 여부를 결정한다.
 
-    라우팅 함수는 state를 읽기만 하고 변경하지 않는다.
+    질문을 생성한 직후 종료 여부를 판단하면 마지막 질문의 답변을 받기 전에
+    그래프가 끝난다. 따라서 평가가 완료된 시점의 메인 질문 수를 기준으로
+    종료 여부를 판단한다. 라우팅 함수는 state를 읽기만 하고 변경하지 않는다.
+
+    Args:
+        state:
+            현재 면접 세션 상태. SessionState 또는 같은 필드를 가진 dict.
+
+    Returns:
+        최대 메인 질문 수에 도달했으면 "end", 아니면 "continue".
     """
     finished = _state_get(state, "finished", False)
-    asked_count = _state_get(state, "asked_count", 0)
+    asked_count = _state_get(state, "asked_count", 0)   
     max_questions = _state_get(state, "max_questions", 10)
     return "end" if finished or asked_count >= max_questions else "continue"
 
@@ -300,10 +310,11 @@ def _build_graph() -> StateGraph:
         graph를 만들 때마다 같은 구조를 명확하게 재사용할 수 있다.
 
     그래프 흐름:
-        START → greet → wait_event → evaluate_answer → ask_main
+        START → greet → wait_event → evaluate_answer
 
-        `ask_main` 이후에는 `after_ask()` 라우터가 질문 수와 finished 상태를
-        보고 END로 갈지, 다시 `wait_event`로 돌아갈지 결정한다.
+        `evaluate_answer` 이후에는 `after_evaluate()` 라우터가 현재 질문까지
+        모두 평가했는지 확인한다. 최대 질문 수에 도달했으면 END로 이동하고,
+        아니면 `ask_main`에서 다음 질문을 만든 뒤 `wait_event`로 돌아간다.
 
     Returns:
         아직 compile되지 않은 StateGraph builder.
@@ -317,12 +328,12 @@ def _build_graph() -> StateGraph:
     builder.add_edge(START, "greet")
     builder.add_edge("greet", "wait_event")
     builder.add_edge("wait_event", "evaluate_answer")
-    builder.add_edge("evaluate_answer", "ask_main")
     builder.add_conditional_edges(
-        "ask_main",
-        after_ask,
-        {"end": END, "continue": "wait_event"},
+        "evaluate_answer",
+        after_evaluate,
+        {"end": END, "continue": "ask_main"},
     )
+    builder.add_edge("ask_main", "wait_event")
     return builder
 
 
