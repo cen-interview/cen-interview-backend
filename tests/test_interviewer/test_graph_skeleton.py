@@ -17,6 +17,7 @@ from interview.schemas.question import (
     QuestionCategory,
     QuestionKind,
 )
+from interview.schemas.report import FinalReport
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 
@@ -74,6 +75,7 @@ class FakeAssessment:
     def __init__(self) -> None:
         """평가 호출 내역을 보관할 리스트를 초기화한다."""
         self.evaluate_calls = []
+        self.completed_sets = []
 
     def evaluate(
         self,
@@ -114,6 +116,30 @@ class FakeAssessment:
             rationale=["fake assessment"],
         )
 
+    def complete_question_set(self, main_question_id: str) -> None:
+        """완료된 메인 질문 세트 ID를 기록한다.
+
+        Args:
+            main_question_id:
+                평가가 완료된 질문 세트의 메인 질문 ID.
+        """
+        self.completed_sets.append(main_question_id)
+
+    def finalize(self) -> FinalReport:
+        """skeleton 종료 흐름에서 사용할 빈 최종 리포트를 반환한다.
+
+        Returns:
+            그래프 종료 상태 저장에 필요한 테스트용 FinalReport.
+        """
+        return FinalReport(
+            summary="skeleton 테스트 완료",
+            overall_score=0.0,
+            strengths=[],
+            improvement_points=[],
+            learning_recommendations=[],
+            evaluations=[],
+        )
+
 
 def initial_session_state() -> SessionState:
     """그래프 첫 invoke에 넘길 초기 세션 상태를 만든다.
@@ -127,12 +153,19 @@ def initial_session_state() -> SessionState:
     return SessionState(session_id=f"session-{uuid.uuid4().hex}", max_questions=10)
 
 
-def make_answer_payload() -> dict:
+def make_answer_payload(session_id: str, question_id: str) -> dict:
     """wait_event를 재개할 답변 제출 payload를 만든다.
 
     event dict는 events.py의 AnswerSubmitted 필드 구성을 따른다. 현재 skeleton
     그래프는 pending_event의 text만 평가에 사용하지만, 실제 이벤트 계약과
     어긋나지 않도록 type/session_id/question_id도 함께 둔다.
+
+    Args:
+        session_id:
+            현재 그래프 상태의 세션 ID.
+
+        question_id:
+            현재 지원자에게 제시된 질문 ID.
 
     Returns:
         Command(resume=...)에 전달할 답변 payload.
@@ -140,8 +173,8 @@ def make_answer_payload() -> dict:
     return {
         "event": {
             "type": "answer_submitted",
-            "session_id": "session-1",
-            "question_id": "q-current",
+            "session_id": session_id,
+            "question_id": question_id,
             "text": "테스트 답변입니다.",
         },
         "delivery_metrics": None,
@@ -154,13 +187,20 @@ def test_skeleton_reaches_end_after_ten_questions():
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
     deps = InterviewDeps(strategy=FakeStrategy(), assessment=FakeAssessment())
 
-    result = graph.invoke(initial_session_state(), config=config, context=deps)
+    initial_state = initial_session_state()
+    result = graph.invoke(initial_state, config=config, context=deps)
     assert "__interrupt__" in result
     assert result["asked_count"] == 1
 
     for _ in range(10):
+        current_question = result["current_question"]
         result = graph.invoke(
-            Command(resume=make_answer_payload()),
+            Command(
+                resume=make_answer_payload(
+                    initial_state.session_id,
+                    current_question.question_id,
+                )
+            ),
             config=config,
             context=deps,
         )
@@ -168,5 +208,6 @@ def test_skeleton_reaches_end_after_ten_questions():
             break
 
     assert "__interrupt__" not in result
-    assert result["finished"] is False
+    assert result["finished"] is True
     assert result["asked_count"] == 10
+    assert len(deps.assessment.evaluate_calls) == 10
