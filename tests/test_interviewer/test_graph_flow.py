@@ -224,6 +224,23 @@ def test_quality_routes_to_expected_question_kind(quality, expected_kind):
     result = resume(graph, config, deps, answer_event(session_id, question.question_id))
 
     assert result["current_question"].kind == expected_kind
+    assert result["last_utterance"].endswith(result["current_question"].text)
+    assert result["utterance_queue"] == [result["last_utterance"]]
+    assert result["transcript"][-1].role == "interviewer"
+    assert result["transcript"][-1].question_id == result["current_question"].question_id
+
+
+def test_first_question_is_composed_and_recorded_before_interrupt():
+    """첫 질문은 시작 인사와 조립되어 큐와 transcript에 기록된 뒤 대기한다."""
+    _, _, _, _, result = start_graph([AnswerQuality.SUFFICIENT])
+    question = result["current_question"]
+
+    assert "__interrupt__" in result
+    assert result["last_utterance"].startswith("안녕하세요.")
+    assert result["last_utterance"].endswith(question.text)
+    assert result["utterance_queue"] == [result["last_utterance"]]
+    assert result["transcript"][-1].role == "interviewer"
+    assert result["transcript"][-1].question_id == question.question_id
 
 
 def test_challenge_is_not_created_twice_in_same_question_set():
@@ -286,6 +303,10 @@ def test_replay_does_not_increase_asked_count():
     assert result["current_question"] == current_question
     assert result["asked_count"] == 1
     assert deps.assessment.evaluate_calls == []
+    assert result["last_utterance"].startswith("네, 질문을 다시 말씀드리겠습니다.")
+    assert result["last_utterance"].endswith(current_question.text)
+    assert result["utterance_queue"] == [result["last_utterance"]]
+    assert result["transcript"][-1].role == "interviewer"
 
 
 def test_end_event_creates_report_and_finishes_session():
@@ -302,6 +323,10 @@ def test_end_event_creates_report_and_finishes_session():
     assert result["finished"] is True
     assert result["report"]["summary"] == "테스트 면접 완료"
     assert deps.assessment.finalize_count == 1
+    assert result["last_utterance"] == "이상으로 면접을 마치겠습니다. 참여해 주셔서 감사합니다."
+    assert result["utterance_queue"] == [result["last_utterance"]]
+    assert result["transcript"][-1].role == "interviewer"
+    assert result["transcript"][-1].question_id is None
 
 
 def test_ten_main_questions_are_all_evaluated_before_finish():
