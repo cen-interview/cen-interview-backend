@@ -24,6 +24,7 @@ dependencies = [
     "python-jose[cryptography]>=3.5.0",
     "column>=0.4.3",
     "openai>=2.44.0",
+    "interrupt>=1.0.1",
 ]
 
 [project.optional-dependencies]

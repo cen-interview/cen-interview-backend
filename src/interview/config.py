@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     # LLM
     openai_api_key: str = ""
-    llm_model: str = "gpt-5.4-mini"
+    llm_model: str = "gpt-4o-mini" # "gpt-5.4-mini"
 
     # MCP / 외부 소스
     # notion

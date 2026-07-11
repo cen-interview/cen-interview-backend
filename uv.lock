@@ -1154,6 +1154,15 @@ wheels = [
 ]
 
 [[package]]
+name = "interrupt"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/39/c8e0bdb5b47470d7a3ed450c3fc8a51f3d293065b4b9de3662a644779377/interrupt-1.0.1.tar.gz", hash = "sha256:7e43780b64245c188e30a0d91aa97bf4216105e1d7219bddf2a531d37a2154e2", size = 1498, upload-time = "2019-07-14T15:11:24.323Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/31/256744427b3d3dd6fdb8db5838eb04830bc8725cb74317f31b30693569fa/interrupt-1.0.1-py3-none-any.whl", hash = "sha256:867ef27a7f7a8dd6294d2d3f44735f7535b0357ca34758de528547982190e297", size = 2926, upload-time = "2019-07-14T15:11:22.682Z" },
+]
+
+[[package]]
 name = "interview-agent"
 version = "0.1.0"
 source = { editable = "." }
@@ -1163,6 +1172,7 @@ dependencies = [
     { name = "chromadb" },
     { name = "column" },
     { name = "fastapi" },
+    { name = "interrupt" },
     { name = "langchain" },
     { name = "langchain-openai" },
     { name = "langgraph" },
@@ -1198,6 +1208,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=0.5" },
     { name = "column", specifier = ">=0.4.3" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "interrupt", specifier = ">=1.0.1" },
     { name = "langchain", specifier = ">=0.3" },
     { name = "langchain-openai", specifier = ">=1.3.3" },
     { name = "langgraph", specifier = ">=0.2" },

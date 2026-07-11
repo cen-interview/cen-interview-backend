@@ -16,9 +16,37 @@
   silence_detected     → 현재 질문 다시 제시
   end_requested        → 종료
   no_response_timeout  → 종료
+
+              프론트 raw payload
+                    │
+                    ▼
+               adapters.py
+                    │
+                    │ 입력 형식 통일
+                    ▼
+               AdaptedInput
+                    │
+                    ├── event
+                    └── delivery_metrics
+                    │
+                    ▼
+                 agent.py
+                    │
+                    │ 이벤트 종류 판단
+                    ▼
+             ┌─────────────────────────┐
+             │      InterviewerAgent   │
+             ├─────────────────────────┤
+             │ AnswerSubmitted         │ → Assessment에 평가 요청
+             │ SilenceDetected         │ → 침묵 정책 처리
+             │ ReplayRequested         │ → 질문 재전달
+             │ EndRequested            │ → 면접 종료
+             │ NoResponseTimeout       │ → 타임아웃 처리
+             └─────────────────────────┘
+
 """
 
-from interview.assessment import AssessmentAgent
+from interview.interviewer.contracts import AssessmentPort, StrategyPort
 from interview.schemas.events import (
     AnswerSubmitted,
     EndRequested,
@@ -32,15 +60,14 @@ from interview.schemas.events import (
 from interview.schemas.question import Question, QuestionKind
 from interview.schemas.signals import AnswerQuality
 from interview.interviewer.session import SessionState
-from interview.strategy import StrategyAgent
 
 
 class InterviewerAgent:
     def __init__(
         self,
         session: SessionState,
-        strategy: StrategyAgent,
-        assessment: AssessmentAgent,
+        strategy: StrategyPort,
+        assessment: AssessmentPort,
     ) -> None:
         self.session = session
         self.strategy = strategy
@@ -75,8 +102,8 @@ class InterviewerAgent:
 
 
         delivery_metrics = {
-            "speech_rate_wpm": event.speech_rate_wpm,
-            "filler_count": event.filler_count,
+            # 일단 비워둠
+            # 분당 발화 속도 , 음성 공백 시간 등
         }
         
         current_question = self.session.current_question
@@ -88,7 +115,7 @@ class InterviewerAgent:
         signal = self.assessment.evaluate(
             question=current_question,
             answer_text=event.text,
-            delivery_metrics=delivery_metrics,
+            delivery_metrics=None,
         )
 
         topic = current_question.topic
@@ -97,36 +124,40 @@ class InterviewerAgent:
         if signal.quality == AnswerQuality.BONUS_AVAILABLE:
             q = self.strategy.next_follow_up(
                 topic=topic,
+                parent_question_id=current_question.question_id,
                 target=target,
             )
 
         elif signal.quality == AnswerQuality.MISCONCEPTION:
             q = self.strategy.next_challenge(
                 topic=topic,
+                parent_question_id=current_question.question_id,
                 target=target,
             )
 
         elif signal.quality == AnswerQuality.CONFIRM_POSITIVE:
             q = self.strategy.next_confirm_positive(
                 topic=topic,
+                parent_question_id=current_question.question_id,
                 target=target,
             )
 
         elif signal.quality == AnswerQuality.CONFIRM_NEGATIVE:
             q = self.strategy.next_confirm_negative(
                 topic=topic,
+                parent_question_id=current_question.question_id,
                 target=target,
             )
 
         elif signal.quality == AnswerQuality.TRAP_AVAILABLE:
             q = self.strategy.next_trap(
                 topic=topic,
+                parent_question_id=current_question.question_id,
                 target=target,
             )
 
         else:  # AnswerQuality.SUFFICIENT
             self.assessment.complete_question_set(
-                topic=self.session.main_topic or topic,
                 main_question_id=self.session.main_question_id or current_question.question_id,
             )   
 

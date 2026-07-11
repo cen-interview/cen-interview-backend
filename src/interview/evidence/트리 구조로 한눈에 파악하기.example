@@ -1,0 +1,823 @@
+# Evidence 패키지 트리 구조로 한눈에 파악하기
+
+========================================================================
+
+## 0. 큰 그림
+
+역할은 다음 2가지다.
+
+1. 면접 전에 Notion/GitHub 자료를 수집해서 근거 청크로 인덱싱한다.
+2. 면접 중 Strategy와 Assessment가 필요한 근거를 검색할 수 있게 한다.
+
+흐름을 아주 크게 보면 아래와 같다.
+
+    User profile
+    Notion link / GitHub repo links
+        │
+        ▼
+    evidence/indexing.py
+    면접 전 1회 인덱싱 파이프라인 실행
+        │
+        ├── sources.py
+        │   └── Notion/GitHub MCP 응답 -> RawDoc
+        │
+        ├── extract.py
+        │   └── RawDoc -> EvidenceChunk 후보
+        │
+        ├── chunking.py
+        │   └── 긴 EvidenceChunk -> 임베딩 가능한 크기의 청크
+        │
+        └── store.py
+            ├── 청크 저장
+            └── CoverageMap 생성
+        │
+        ▼
+    CoverageMap
+    topic별 confidence / chunk_count
+        │
+        ▼
+    StrategyAgent
+    질문 주제 선택 / 난이도 조정 참고
+
+면접이 시작된 뒤에는 원본 수집을 다시 하지 않는다.
+런타임에는 이미 만들어진 store에 검색만 수행한다.
+
+    StrategyAgent / AssessmentAgent
+        │
+        ▼
+    evidence/retrieval.py
+    search_evidence(query, topic, k, user_id)
+        │
+        ▼
+    evidence/store.py
+    EvidenceStore.query()
+        │
+        ▼
+    list[EvidenceChunk]
+
+한 문장으로 정리:
+
+    Evidence는 "사용자의 학습 기록과 프로젝트 자료를 면접에서 쓸 수 있는
+    근거 청크로 바꾸고, 필요할 때 검색해 주는 지식 베이스 계층"이다.
+
+========================================================================
+
+## 1. 현재 Evidence 패키지 파일 트리
+
+    src/interview/evidence/
+    │
+    ├── 트리 구조로 한눈에 파악하기.example
+    │   └── 지금 보고 있는 파일. 구조 파악용 지도.
+    │
+    ├── __init__.py
+    │   └── 외부에서 import할 공개 API를 정리한다.
+    │       현재: build_index, search_evidence, search_evidence_tool
+    │
+    ├── indexing.py
+    │   └── 면접 전 1회 실행되는 전체 인덱싱 파이프라인.
+    │
+    │       build_index(notion_link, github_links, user_id=None)
+    │       ├── NotionSource.fetch_pages()
+    │       ├── GitHubSource.fetch_repos()
+    │       ├── extract_evidence()
+    │       ├── chunk()
+    │       ├── store.add_chunks()
+    │       └── store.build_coverage_map()
+    │
+    ├── sources.py
+    │   └── 외부 소스에서 원본 문서를 가져와 RawDoc으로 맞춘다.
+    │
+    │       RawDoc
+    │       ├── source_url
+    │       ├── source_type: "notion" | "github"
+    │       ├── title
+    │       ├── raw_text
+    │       └── meta
+    │
+    │       NotionSource
+    │       └── fetch_pages(root_link)
+    │
+    │       GitHubSource
+    │       ├── MAX_REPOS = 3
+    │       └── fetch_repos(repo_links)
+    │
+    ├── mcp_client.py
+    │   └── Notion/GitHub MCP tool call을 실행하는 얇은 래퍼.
+    │
+    │       EvidenceMcpClient
+    │       ├── call_notion_tool(root_link)
+    │       └── call_github_tool(repo_link)
+    │
+    ├── extract.py
+    │   └── RawDoc에서 면접에 쓸 만한 근거 후보를 뽑고 메타데이터를 붙인다.
+    │
+    │       extract_evidence(doc)
+    │       ├── 빈 raw_text면 []
+    │       ├── topic 결정
+    │       ├── confidence 보정
+    │       └── EvidenceChunk 생성
+    │
+    ├── chunking.py
+    │   └── 긴 EvidenceChunk를 임베딩/검색에 적합한 크기로 나눈다.
+    │       현재는 NotImplementedError 상태.
+    │
+    ├── store.py
+    │   └── 근거 청크 저장소와 검색 래퍼.
+    │       실제 목표는 vector DB 래퍼이고, 현재는 인메모리 stub으로 동작한다.
+    │
+    │       EvidenceStore
+    │       ├── add_chunks(chunks, user_id=None)
+    │       ├── query(query, topic=None, k=5, user_id=None)
+    │       ├── build_coverage_map(user_id=None)
+    │       └── _namespace(user_id)
+    │
+    └── retrieval.py
+        └── Strategy/Assessment가 런타임에 부르는 공용 검색 툴.
+
+            search_evidence(query, topic=None, k=5, user_id=None)
+            └── list[EvidenceChunk]
+
+            search_evidence_tool(query, topic=None)
+            └── LangChain tool calling용 문자열 결과
+
+========================================================================
+
+## 2. 주변 패키지와 연결 관계
+
+Evidence는 혼자 완결되는 기능이 아니라 아래 패키지들과 연결된다.
+
+    src/interview/
+    │
+    ├── schemas/
+    │   ├── evidence.py
+    │   │   └── Evidence 패키지가 만들고 Strategy/Assessment가 소비하는 계약.
+    │   │
+    │   │       EvidenceChunk
+    │   │       ├── chunk_id
+    │   │       ├── text
+    │   │       ├── source_type
+    │   │       ├── source_url
+    │   │       ├── topic
+    │   │       ├── doc_type / week / date
+    │   │       └── confidence
+    │   │
+    │   │       TopicCoverage
+    │   │       ├── confidence
+    │   │       └── chunk_count
+    │   │
+    │   │       CoverageMap
+    │   │       ├── topic_coverage
+    │   │       ├── updated_at
+    │   │       ├── topic_confidence
+    │   │       ├── weak_topics()
+    │   │       └── strong_topics()
+    │   │
+    │   ├── question.py
+    │   │   └── Question.evidence_ids가 EvidenceChunk.chunk_id를 참조한다.
+    │   │       Strategy가 질문을 만들 때 근거 추적용으로 채운다.
+    │   │
+    │   └── report.py
+    │       └── Assessment가 평가/리포트에서 근거 기반 판단을 남길 때 연결된다.
+    │
+    ├── strategy/
+    │   └── agent.py
+    │       └── CoverageMap으로 질문 주제를 고르고,
+    │           search_evidence()로 질문 생성용 근거를 찾는다.
+    │
+    ├── assessment/
+    │   └── agent.py
+    │       └── search_evidence()로 후보자 답변과 사용자 자료의 충돌 여부를 본다.
+    │
+    ├── interviewer/
+    │   └── graph.py 또는 세션 생성 경로
+    │       └── 면접 시작 전에 만들어진 CoverageMap을 StrategyAgent에 넘겨준다.
+    │
+    └── api/
+        ├── main.py
+        │   └── 현재 API 진입점.
+        │
+        └── interviews/router.py 또는 evidence router
+            └── 이후 사용자 링크 등록, 인덱싱 요청, 상태 조회를 연결할 위치.
+
+========================================================================
+
+## 3. 데이터 모델 트리
+
+### 3-1. 외부 원본이 EvidenceChunk가 되는 과정
+
+    Notion / GitHub raw response
+        │
+        ▼
+    EvidenceMcpClient
+        │
+        ├── call_notion_tool(root_link)
+        └── call_github_tool(repo_link)
+        │
+        ▼
+    sources.py
+        │
+        ├── _notion_response_to_raw_docs(response, root_link)
+        └── _github_response_to_raw_docs(response, repo_link)
+        │
+        ▼
+    RawDoc
+        │
+        ├── source_url
+        ├── source_type
+        ├── title
+        ├── raw_text
+        └── meta
+            ├── topic
+            ├── doc_type
+            ├── week
+            ├── date
+            ├── file_path
+            └── confidence
+        │
+        ▼
+    extract_evidence()
+        │
+        ▼
+    EvidenceChunk
+        │
+        ├── chunk_id
+        ├── text
+        ├── source_type
+        ├── source_url
+        ├── topic
+        ├── doc_type
+        ├── week
+        ├── date
+        └── confidence
+        │
+        ▼
+    chunk()
+        │
+        ├── 짧으면 그대로 유지
+        └── 길면 parent chunk를 여러 child chunk로 분할
+        │
+        ▼
+    EvidenceStore.add_chunks()
+
+### 3-2. 저장된 청크가 CoverageMap이 되는 과정
+
+    EvidenceStore
+        │
+        └── 저장된 EvidenceChunk 목록
+            │
+            ├── topic = "JPA"
+            │   ├── confidence 0.8
+            │   ├── confidence 0.7
+            │   └── confidence 0.9
+            │
+            └── topic = "Redis"
+                ├── confidence 0.4
+                └── confidence 0.5
+        │
+        ▼
+    build_coverage_map()
+        │
+        ▼
+    CoverageMap
+        │
+        └── topic_coverage
+            ├── "JPA"
+            │   ├── confidence = 0.8
+            │   └── chunk_count = 3
+            │
+            └── "Redis"
+                ├── confidence = 0.45
+                └── chunk_count = 2
+
+중요:
+- CoverageMap은 질문 생성용 입력이지 최종 평가 결과가 아니다.
+- confidence는 "사용자 자료 안에서 이 주제 근거가 얼마나 믿을 만한가"에 가깝다.
+- chunk_count는 "그 주제를 뒷받침할 근거량이 충분한가"를 보는 값이다.
+- Strategy는 confidence와 chunk_count를 같이 보고 질문 깊이를 조절할 수 있다.
+
+========================================================================
+
+## 4. 인덱싱 파이프라인 흐름
+
+현재 indexing.py는 분기/루프가 없는 고정 파이프라인이다.
+그래서 LangGraph나 Agent가 아니라 일반 함수로 두는 것이 맞다.
+
+    build_index(notion_link, github_links, user_id)
+        │
+        ├── raw_docs = []
+        │
+        ├── NotionSource().fetch_pages(notion_link)
+        │       │
+        │       ├── EvidenceMcpClient.call_notion_tool()
+        │       └── _notion_response_to_raw_docs()
+        │
+        ├── GitHubSource().fetch_repos(github_links)
+        │       │
+        │       ├── repo_links[:3]
+        │       ├── EvidenceMcpClient.call_github_tool()
+        │       └── _github_response_to_raw_docs()
+        │
+        ├── for doc in raw_docs
+        │       └── extract_evidence(doc)
+        │
+        ├── chunk(all_chunks)
+        │
+        ├── get_store()
+        │
+        ├── store.add_chunks(all_chunks, user_id)
+        │
+        └── store.build_coverage_map(user_id)
+
+현재 상태:
+- sources.py의 MCP 응답 -> RawDoc 변환은 아직 구현 전이다.
+- mcp_client.py의 실제 MCP tool call도 아직 구현 전이다.
+- extract.py는 최소 stub 로직이 있다.
+- chunking.py는 아직 NotImplementedError다.
+- store.py는 실제 vector DB 대신 인메모리 stub을 사용한다.
+- user_id별 namespace 분리는 stub 구조에 반영되어 있다.
+
+========================================================================
+
+## 5. 런타임 검색 흐름
+
+면접 중에는 build_index를 호출하지 않는다.
+Strategy와 Assessment는 retrieval.py의 search_evidence만 사용한다.
+
+    StrategyAgent
+        │
+        ├── 질문 생성 전 topic 관련 근거 검색
+        └── Question.evidence_ids에 사용한 chunk_id 기록
+        │
+        ▼
+    search_evidence(query, topic, k, user_id)
+
+    AssessmentAgent
+        │
+        ├── 후보자 답변과 근거 비교
+        ├── 프로젝트 구현 답변의 실제 코드/README 근거 확인
+        └── 이전 답변과 Evidence 간 충돌 여부 판단
+        │
+        ▼
+    search_evidence(query, topic, k, user_id)
+
+공통 검색 함수 내부:
+
+    search_evidence()
+        │
+        ├── get_store().query()
+        │
+        ├── 정상: list[EvidenceChunk]
+        │
+        └── NotImplementedError: stub EvidenceChunk 반환
+
+LangChain tool calling이 필요한 경우:
+
+    search_evidence_tool(query, topic)
+        │
+        ├── search_evidence()
+        └── LLM에 넘기기 좋은 문자열로 직렬화
+
+주의:
+- retrieval.py는 새로 수집하지 않는다.
+- 검색 품질은 store.py의 query 구현과 임베딩 모델 품질에 달려 있다.
+- EvidenceChunk 자체에는 고정 메타데이터만 있고, 쿼리별 score는 RetrievalResult로 분리되어 있다.
+
+========================================================================
+
+## 6. 현재 Stub 경계
+
+Evidence는 아직 실제 외부 수집/벡터 검색이 완성된 상태가 아니다.
+어느 파일이 어디까지 가짜 동작인지 구분해야 한다.
+
+    mcp_client.py
+        ├── call_notion_tool()
+        └── call_github_tool()
+            └── 아직 NotImplementedError
+
+    sources.py
+        ├── _notion_response_to_raw_docs()
+        └── _github_response_to_raw_docs()
+            └── 아직 NotImplementedError
+
+    extract.py
+        └── extract_evidence()
+            ├── raw_text 전체를 하나의 EvidenceChunk로 만든다.
+            ├── topic은 meta.topic 또는 title 또는 "general"을 사용한다.
+            └── confidence는 meta.confidence 또는 0.7을 사용한다.
+
+    chunking.py
+        └── chunk()
+            └── 아직 NotImplementedError
+
+    store.py
+        └── EvidenceStore
+            ├── 실제 DB 연결은 아직 없음
+            ├── _chunks_by_user 인메모리 dict에 저장
+            ├── query는 topic 필터 + 앞에서 k개 반환
+            └── 청크가 없으면 stub EvidenceChunk 1건 반환
+
+작업할 때 핵심은 "stub을 지우는 순서"다.
+store가 먼저 실제 저장/검색을 할 수 있어야 sources 없이도 수제 청크로 검색 품질을 확인할 수 있다.
+
+========================================================================
+
+## 7. MCP 수집 구조
+
+현재 Evidence는 Notion/GitHub 공식 SDK 직접 호출이 아니라 MCP client 경계를 둔 구조다.
+
+    NotionSource / GitHubSource
+        │
+        ▼
+    EvidenceMcpClient
+        │
+        ├── MCP client/session 연결
+        ├── tool 이름/스키마 선택
+        ├── timeout/retry/error 처리
+        └── raw response 반환
+        │
+        ▼
+    sources.py 변환 함수
+        │
+        ├── Notion response -> list[RawDoc]
+        └── GitHub response -> list[RawDoc]
+
+MCP 경계에서 기억할 점:
+- mcp_client.py는 MCP 연결과 tool call만 담당한다.
+- sources.py는 tool 응답을 Evidence 파이프라인의 RawDoc으로 바꾼다.
+- extract.py는 RawDoc 이후의 내용 선별/분류만 담당한다.
+- indexing.py는 MCP 세부사항을 몰라야 한다.
+
+Notion 수집에서 채워야 할 것:
+
+    NotionSource.fetch_pages(root_link)
+        │
+        ├── 링크가 database인지 page인지 판별
+        ├── 하위 페이지 재귀 순회
+        ├── heading/paragraph/list/code/quote 텍스트 렌더링
+        ├── 순환 방지와 최대 페이지 수 제한
+        └── RawDoc.meta
+            ├── week
+            ├── date
+            ├── doc_type
+            └── topic 후보
+
+GitHub 수집에서 채워야 할 것:
+
+    GitHubSource.fetch_repos(repo_links)
+        │
+        ├── 최대 3개만 처리
+        ├── owner/repo 파싱
+        ├── README 수집
+        ├── 디렉터리 트리/주요 언어 확인
+        ├── 핵심 구현 파일 선별
+        └── RawDoc.meta
+            ├── file_path
+            ├── language
+            ├── doc_type = "README" | "code" | ...
+            └── topic 후보
+
+========================================================================
+
+## 8. Store와 사용자별 namespace
+
+EvidenceStore는 장기적으로 vector DB 래퍼가 되어야 한다.
+현재 주석은 pgvector 방향을 가리키고 있고, 코드 stub은 인메모리 dict를 사용한다.
+
+목표 구조:
+
+    EvidenceStore
+        │
+        ├── database_url
+        ├── embedding_model
+        ├── embedding_dimensions
+        └── DB connection
+        │
+        ├── add_chunks()
+        │   ├── chunk.text 임베딩
+        │   ├── metadata 저장
+        │   └── chunk_id 기준 upsert
+        │
+        ├── query()
+        │   ├── query 임베딩
+        │   ├── vector distance 정렬
+        │   ├── topic/user_id 필터
+        │   └── EvidenceChunk 복원
+        │
+        └── build_coverage_map()
+            ├── topic별 confidence 평균
+            └── topic별 chunk_count 집계
+
+현재 stub 구조:
+
+    _chunks_by_user: dict[str, list[EvidenceChunk]]
+        │
+        ├── "default"
+        │   └── user_id=None으로 저장된 청크
+        │
+        ├── "1"
+        │   └── user_id=1 사용자의 청크
+        │
+        └── "user-abc"
+            └── user_id="user-abc" 사용자의 청크
+
+주의:
+- 사용자 자료가 섞이면 면접 질문과 평가가 다른 사람 근거를 볼 수 있다.
+- 그래서 build_index, search_evidence, store.add_chunks, store.query 모두 user_id를 받는다.
+- 실제 DB에서도 user_id 또는 namespace 컬럼/컬렉션 분리가 필요하다.
+
+========================================================================
+
+## 9. API 배선 후 구조
+
+Evidence는 보통 면접 시작 요청과 분리해서 먼저 구축하는 편이 안전하다.
+인덱싱은 외부 API 호출과 임베딩 때문에 오래 걸릴 수 있기 때문이다.
+
+예상 API 흐름:
+
+    POST /api/evidence/index
+        │
+        ├── user_id 확인
+        ├── notion_link / github_links 수신
+        ├── BackgroundTasks로 build_index 예약
+        └── status = "running" 반환
+
+    GET /api/evidence/status
+        │
+        ├── user_id 기준 최근 인덱싱 상태 조회
+        ├── 완료 시 CoverageMap 요약 반환
+        └── 실패 시 실패 소스와 메시지 반환
+
+    POST /api/sessions
+        │
+        ├── user_id 기준 CoverageMap 조회
+        ├── StrategyAgent(coverage_map=...) 생성
+        ├── Interviewer graph/session 생성
+        └── 첫 질문 반환
+
+이 구조에서 Evidence의 책임:
+- 링크를 받아 원본을 수집한다.
+- 청크를 만들고 저장한다.
+- CoverageMap을 만든다.
+- 검색 함수로 근거를 제공한다.
+
+이 구조에서 Evidence의 책임이 아닌 것:
+- 다음 질문 종류를 결정하지 않는다.
+- 후보자 답변의 quality를 결정하지 않는다.
+- 세션 상태를 관리하지 않는다.
+- 최종 리포트를 만들지 않는다.
+
+========================================================================
+
+## 10. 단계별로 어느 파일을 보면 되는지
+
+### 1단계. 계약과 현재 stub 경계 확인
+
+    schemas/evidence.py
+        ├── EvidenceChunk
+        ├── RetrievalResult
+        ├── TopicCoverage
+        └── CoverageMap
+
+    evidence/__init__.py
+        └── 외부 공개 API 확인
+
+### 2단계. Store 구현
+
+    evidence/store.py
+        ├── EvidenceStore.__init__
+        ├── add_chunks()
+        ├── query()
+        ├── build_coverage_map()
+        └── get_store()
+
+먼저 store가 실제 저장/검색을 할 수 있어야 나머지 파이프라인을 붙이기 쉽다.
+
+### 3단계. Retrieval 마감
+
+    evidence/retrieval.py
+        ├── search_evidence()
+        └── search_evidence_tool()
+
+Strategy/Assessment는 이 파일만 알면 되도록 유지한다.
+
+### 4단계. MCP client 구현
+
+    evidence/mcp_client.py
+        ├── call_notion_tool()
+        └── call_github_tool()
+
+MCP 연결, tool call, timeout/retry/error 처리는 여기서 끝낸다.
+
+### 5단계. Source 변환 구현
+
+    evidence/sources.py
+        ├── RawDoc
+        ├── _notion_response_to_raw_docs()
+        ├── _github_response_to_raw_docs()
+        ├── NotionSource.fetch_pages()
+        └── GitHubSource.fetch_repos()
+
+MCP 원본 응답을 RawDoc으로 안정적으로 맞추는 단계다.
+
+### 6단계. Extract 고도화
+
+    evidence/extract.py
+        ├── extract_evidence()
+        └── _chunk_id()
+
+목차/잡담을 제거하고, topic/doc_type/confidence를 더 정확히 붙인다.
+
+### 7단계. Chunking 구현
+
+    evidence/chunking.py
+        └── chunk()
+
+문단/코드 경계를 존중해서 긴 근거를 여러 EvidenceChunk로 나눈다.
+
+### 8단계. Pipeline 배선 보강
+
+    evidence/indexing.py
+        └── build_index()
+
+부분 실패 허용, 재인덱싱, user_id별 store 초기화, CoverageMap 갱신을 연결한다.
+
+### 9단계. Strategy/Assessment 연결 확인
+
+    strategy/agent.py
+        ├── CoverageMap 소비
+        ├── search_evidence() 호출
+        └── Question.evidence_ids 기록
+
+    assessment/agent.py
+        ├── search_evidence() 호출
+        └── 답변과 근거 대조
+
+========================================================================
+
+## 11. 작업할 때 기억할 규칙
+
+1. Evidence는 면접 진행자가 아니다.
+   면접 흐름 제어는 Interviewer가 한다.
+
+2. Evidence는 질문 생성자가 아니다.
+   질문 생성은 StrategyAgent가 한다.
+
+3. Evidence는 답변 평가자가 아니다.
+   답변 평가는 AssessmentAgent가 한다.
+
+4. Evidence는 근거를 수집, 정제, 저장, 검색하는 계층이다.
+
+5. build_index는 면접 전 1회 실행한다.
+   면접 중 매 턴마다 외부 소스를 다시 긁으면 안 된다.
+
+6. retrieval.py는 추가 수집을 하지 않는다.
+   이미 구축된 store에서 검색만 한다.
+
+7. RawDoc은 외부 응답을 파이프라인 내부 형식으로 맞춘 원본 문서다.
+   아직 면접용 근거라고 보면 안 된다.
+
+8. EvidenceChunk는 Strategy/Assessment가 실제로 소비하는 최소 근거 단위다.
+
+9. chunk_id는 안정적이어야 한다.
+   질문의 evidence_ids와 리포트 추적이 chunk_id에 의존한다.
+
+10. source_url은 원문 추적을 위해 최대한 실제 페이지/파일 URL을 유지한다.
+
+11. topic은 자유 문자열이지만 너무 제각각이면 검색 필터가 무너진다.
+    예: "JPA", "jpa", "JPA N+1"을 어떻게 묶을지 기준이 필요하다.
+
+12. confidence는 내용의 구체성과 신뢰도를 나타낸다.
+    단순히 검색 score가 아니다.
+
+13. user_id 또는 namespace 분리는 필수다.
+    여러 사용자의 Notion/GitHub 근거가 섞이면 안 된다.
+
+14. MCP client는 외부 도구 호출만 담당한다.
+    RawDoc 변환과 근거 추출을 mcp_client.py에 넣지 않는다.
+
+15. store.py 안에 DB/임베딩 의존성을 가둔다.
+    나중에 pgvector, Chroma, 다른 vector DB로 바꿔도 호출부는 유지되어야 한다.
+
+16. CoverageMap은 Strategy가 소비하는 요약이다.
+    Evidence가 직접 질문 난이도나 질문 순서를 결정하지 않는다.
+
+17. GitHub는 저장소 전체를 무작정 긁지 않는다.
+    README, 디렉터리 구조, 핵심 구현 파일 중심으로 선별한다.
+
+18. Notion은 하위 페이지 재귀와 순환 방지 기준이 필요하다.
+    무한 순회나 너무 많은 페이지 수집을 막아야 한다.
+
+========================================================================
+
+## 12. 가장 먼저 보면 좋은 순서
+
+처음 구조를 다시 잡을 때는 아래 순서로 보면 된다.
+
+    1. 다른에이전트작업순서.md
+       └── Evidence 담당 작업 단계와 팀 합의 사항 확인
+
+    2. schemas/evidence.py
+       └── EvidenceChunk / CoverageMap 계약 확인
+
+    3. evidence/__init__.py
+       └── 외부 공개 API 확인
+
+    4. evidence/indexing.py
+       └── 면접 전 인덱싱 파이프라인 전체 흐름 확인
+
+    5. evidence/sources.py
+       └── RawDoc과 Notion/GitHub 수집 경계 확인
+
+    6. evidence/mcp_client.py
+       └── MCP tool call 책임 확인
+
+    7. evidence/extract.py
+       └── RawDoc이 EvidenceChunk 후보가 되는 방식 확인
+
+    8. evidence/chunking.py
+       └── 긴 근거를 나누는 책임 확인
+
+    9. evidence/store.py
+       └── 저장, 검색, CoverageMap 집계 책임 확인
+
+    10. evidence/retrieval.py
+        └── Strategy/Assessment가 부르는 런타임 검색 API 확인
+
+    11. strategy/agent.py
+        └── CoverageMap과 search_evidence가 질문 생성에 어떻게 쓰이는지 확인
+
+    12. assessment/agent.py
+        └── search_evidence가 답변 평가에 어떻게 쓰일지 확인
+
+========================================================================
+
+## 13. 최종 완성 후 목표 구조
+
+최종적으로 Evidence는 아래 모양이 된다.
+
+    User
+        │
+        ├── Notion link
+        └── GitHub repo links
+        │
+        ▼
+    API evidence router
+        │
+        ├── POST /api/evidence/index
+        └── GET /api/evidence/status
+        │
+        ▼
+    build_index()
+        │
+        ├── EvidenceMcpClient
+        │   ├── Notion MCP
+        │   └── GitHub MCP
+        │
+        ├── sources.py
+        │   └── RawDoc 생성
+        │
+        ├── extract.py
+        │   └── EvidenceChunk 후보 생성
+        │
+        ├── chunking.py
+        │   └── 청크 분할
+        │
+        └── store.py
+            ├── 임베딩
+            ├── vector DB 저장
+            └── CoverageMap 생성
+        │
+        ▼
+    CoverageMap
+        │
+        └── StrategyAgent
+            ├── strong_topics()
+            ├── weak_topics()
+            └── topic별 chunk_count 참고
+
+면접 중:
+
+    Interviewer graph
+        │
+        ├── StrategyAgent
+        │   ├── search_evidence()
+        │   ├── 근거 기반 질문 생성
+        │   └── Question.evidence_ids 기록
+        │
+        └── AssessmentAgent
+            ├── search_evidence()
+            ├── 답변과 근거 대조
+            └── 평가 rationale에 근거 반영
+        │
+        ▼
+    FinalReport
+        ├── topic_scores
+        ├── strengths
+        ├── weaknesses
+        └── learning_recommendations
+
+한 문장으로 정리:
+
+    Evidence는 "면접 전에 사용자 자료를 근거 청크와 CoverageMap으로 만들고,
+    면접 중에는 Strategy와 Assessment가 같은 근거를 검색해 쓰게 해주는
+    공용 지식 베이스"이다.

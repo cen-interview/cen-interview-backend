@@ -4,16 +4,39 @@
 Interviewer가 전달한 AnswerQualitySignal을 바탕으로 다음 질문 생성을 question_gen에 위임한다.
 """
 
-#from interview.schemas.evidence import CoverageMap
+from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
 from interview.schemas.signals import AnswerQualitySignal
 from interview.strategy import difficulty, question_gen  # noqa: F401 (TODO 담당 B: question_gen 연결 시 사용)
 from interview.strategy.state import StrategyState
 
+import random
+
+# 주제 선택 시 confidence 상위 몇 개를 후보 풀로 삼을지
+_TOP_N_POOL = 3
+
 
 class StrategyAgent:
-    def __init__(self) -> None:
+    """면접 질문의 방향·순서·난이도를 결정하는 전략 담당 에이전트.
+
+    Interviewer로부터 답변 평가 신호(AnswerQualitySignal)를 받아 다음 질문을
+    결정하고, 실제 질문 문장 생성은 question_gen 모듈에 위임한다. 세션 동안의
+    출제 이력은 self.state(StrategyState)에 누적된다.
+
+    Attributes:
+        state:
+            세션 동안 누적되는 출제 이력 (주제, 난이도, 질문 수 등).
+
+        _topic_idx:
+            [임시] stub 질문 ID 생성에 사용하는 인덱스. question_gen.generate_question 연결 시 제거될 예정.
+
+        _dummy_questions:
+            [임시] stub 질문 텍스트 매핑. 제거 예정.
+    """
+
+    def __init__(self, coverage: CoverageMap | None=None) -> None:
         self.state = StrategyState()
+        self.coverage = coverage or CoverageMap()
         self._topic_idx = 0
         self._dummy_questions: dict[str, str] = {
             "FastAPI": "FastAPI에서 Depends를 사용하는 이유는 무엇인가요?",
@@ -51,18 +74,14 @@ class StrategyAgent:
         # return question_gen.generate_question(topic, diff)
         
         # [현재 Stub 작동]
-        text = self._dummy_questions.get(topic, "공통 질문입니다.")
-        question = Question(
-            question_id=f"q_main_{self._topic_idx}",
-            text=text,
-            topic=topic,
-            difficulty=diff,
-            kind="main"
+        question = question_gen.generate_question(
+            topic, diff, asked_question_texts=self.state.asked_question_texts
         )
 
-        self.state.asked_topics.append(topic)
-        self.state.asked_difficulties.append(diff)
-        self.state.question_count += 1
+        if last_signal is not None:
+            self.state.topic_last_quality[topic] = last_signal.quality
+
+        self._record(question)
 
         return question
 
@@ -83,8 +102,11 @@ class StrategyAgent:
             Interviewer가 transcript에서 짧게(핵심 문장 1~2개) 잘라 전달한다.
             제공되면 "방금 ~라고 하셨는데" 형태로 답변을 직접 인용하는 질문을 만든다.
         """
-        return question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt)
 
+        question = question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
+    
     def next_challenge(
         self, 
         topic: str,
@@ -102,7 +124,9 @@ class StrategyAgent:
             Interviewer가 transcript에서 짧게(핵심 문장 1~2개) 잘라 전달한다.
             제공되면 "방금 ~라고 하셨는데" 형태로 답변을 직접 인용하는 질문을 만든다.
         """
-        return question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
 
     def next_confirm_positive(
             self, 
@@ -112,7 +136,9 @@ class StrategyAgent:
             answer_excerpt: str | None = None
             ) -> Question:
         """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
-        return question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
 
     def next_confirm_negative(
         self, 
@@ -122,8 +148,10 @@ class StrategyAgent:
         answer_excerpt: str | None = None
         ) -> Question:
         """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
-        return question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt)
-
+        question = question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
+    
     def next_trap(
         self, 
         topic: str, 
@@ -132,7 +160,9 @@ class StrategyAgent:
         answer_excerpt: str | None = None
         ) -> Question:
         """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
-        return question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt)
+        question = question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt)
+        self._record(question)
+        return question
 
     def next_hint(
         self, 
@@ -155,6 +185,54 @@ class StrategyAgent:
         """
         return question_gen.generate_hint(question, target, answer_excerpt)
 
+    def _record(self, question: Question) -> None:
+        """질문 생성 후 state를 한 곳에서 갱신한다 (hint 제외 모든 next_*가 호출)."""
+        self.state.asked_topics.append(question.topic)
+        self.state.asked_difficulties.append(question.difficulty)
+        self.state.asked_question_texts.append(question.text)
+        self.state.question_count += 1
+
     def _pick_topic(self) -> str:
-        """다음 주제 선택 임시 스텁."""
-        return "FastAPI"
+        """다음 질문 주제를 선택한다.
+
+        선택 순서:
+            1) 근거가 약한 주제(weak_topics)는 후보에서 제외한다.
+            2) 남은 후보 중 아직 묻지 않은 주제를 우선한다.
+            3) 직전 주제와 연속되지 않게 회피한다.
+            4) 모든 후보를 다 물었다면(주제 소진) 처음부터 다시 순환한다.
+            5) 근거가 있는 주제가 하나도 없으면(coverage 미주입 등) 폴백 주제를
+            반환한다.
+
+        남은 후보를 confidence 높은 순으로 정렬한 뒤, 상위 _TOP_N_POOL개 안에서
+        무작위로 하나를 선택한다 (confidence 우선 + 매번 다른 순서 확보).
+        """
+        all_topics = list(self.coverage.topic_coverage.keys())
+
+        # coverage가 없거나 비어있는 경우(테스트 등) 폴백
+        if not all_topics:
+            return "FastAPI"
+
+        weak = set(self.coverage.weak_topics())
+        candidates = [t for t in all_topics if t not in weak]
+
+        # 전부 weak라면 어쩔 수 없이 전체 후보에서 선택
+        if not candidates:
+            candidates = all_topics
+
+        asked = self.state.topic_counts()
+        unasked = [t for t in candidates if t not in asked]
+        pool = unasked or candidates  # 다 물었으면 전체 후보로 재순환
+
+        last_topic = self.state.recent_topics(1)
+        if last_topic and len(pool) > 1:
+            filtered = [t for t in pool if t != last_topic[0]]
+            pool = filtered or pool
+
+        pool_sorted = sorted(
+            pool,
+            key=lambda t: self.coverage.topic_coverage[t].confidence,
+            reverse=True,
+        )
+        top_pool = pool_sorted[:_TOP_N_POOL]
+
+        return random.choice(top_pool)

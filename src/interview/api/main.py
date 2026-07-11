@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from interview.evidence import build_index
 from interview.interviewer.adapters import from_chat, from_voice
-from interview.interviewer.graph import create_session, get_session
+from interview.interviewer.facade import create_session as create_interview_session, get_session
 from interview.schemas.events import Mode
 from uuid import uuid4
 
@@ -81,7 +81,7 @@ def start_session(req: StartRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail=f"unknown mode: {req.mode}")
 
-    session, first_question = create_session(mode=mode)
+    session, first_question = create_interview_session(mode=mode)
     return {
         "session_id": session.state.session_id,
         "question": first_question.model_dump(),

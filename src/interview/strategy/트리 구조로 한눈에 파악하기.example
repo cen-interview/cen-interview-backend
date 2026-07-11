@@ -1,0 +1,983 @@
+# Strategy 패키지 트리 구조로 한눈에 파악하기
+
+========================================================================
+
+## 0. 큰 그림
+
+역할은 다음 4가지다.
+
+1. 지금까지 물어본 주제/난이도/질문 문장을 기억한다.
+2. Evidence의 CoverageMap을 보고 다음 메인 질문 주제를 고른다.
+3. Assessment가 준 AnswerQualitySignal을 보고 다음 질문 난이도와 질문 종류를 맞춘다.
+4. question_gen에 실제 질문 생성을 위임하고 Question을 반환한다.
+
+흐름을 아주 크게 보면 아래와 같다.
+
+    Interviewer
+    현재 세션 상태 / 직전 평가 신호
+        │
+        ▼
+    strategy/agent.py
+    다음 질문 전략 결정
+        │
+        ├── StrategyState
+        │   ├── asked_topics
+        │   ├── asked_difficulties
+        │   ├── asked_question_texts
+        │   ├── topic_last_quality
+        │   └── question_count
+        │
+        ├── CoverageMap
+        │   ├── strong_topics()
+        │   ├── weak_topics()
+        │   └── topic_coverage
+        │
+        ├── difficulty.next_difficulty()
+        │   └── 다음 메인 질문 난이도 결정
+        │
+        └── question_gen.py
+            ├── search_evidence()
+            ├── LLM 또는 템플릿 질문 생성
+            └── Question 반환
+        │
+        ▼
+    Interviewer
+    current_question 갱신 / 사용자에게 제시
+
+한 문장으로 정리:
+
+    Strategy는 "무엇을, 어느 난이도로, 어떤 질문 종류로 물을지 결정하고
+    실제 질문 문장 생성을 question_gen에 맡기는 질문 전략 계층"이다.
+
+========================================================================
+
+## 1. 현재 Strategy 패키지 파일 트리
+
+    src/interview/strategy/
+    │
+    ├── 트리 구조로 한눈에 파악하기.example
+    │   └── 지금 보고 있는 파일. 구조 파악용 지도.
+    │
+    ├── __init__.py
+    │   └── 외부에서 import할 공개 객체를 정리한다.
+    │       현재: StrategyAgent
+    │
+    ├── agent.py
+    │   └── StrategyAgent 본체.
+    │       Interviewer가 직접 호출하는 진입점은 대부분 여기에 있다.
+    │
+    │       StrategyAgent
+    │       ├── __init__(coverage=None)
+    │       ├── next_question(last_signal)
+    │       ├── next_follow_up(topic, parent_question_id, target, answer_excerpt)
+    │       ├── next_challenge(topic, parent_question_id, target, answer_excerpt)
+    │       ├── next_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+    │       ├── next_confirm_negative(topic, parent_question_id, target, answer_excerpt)
+    │       ├── next_trap(topic, parent_question_id, target, answer_excerpt)
+    │       ├── next_hint(question, target, answer_excerpt)
+    │       ├── _record(question)
+    │       └── _pick_topic()
+    │
+    ├── state.py
+    │   └── 질문 출제 이력을 관리하는 StrategyState.
+    │
+    │       StrategyState
+    │       ├── asked_topics: list[str]
+    │       ├── asked_difficulties: list[Difficulty]
+    │       ├── question_count: int
+    │       ├── asked_question_texts: list[str]
+    │       ├── topic_last_quality: dict[str, AnswerQuality]
+    │       ├── topic_counts()
+    │       ├── difficulty_counts()
+    │       └── recent_topics(n)
+    │
+    ├── difficulty.py
+    │   └── 다음 메인 질문 난이도를 결정하는 순수 함수.
+    │
+    │       next_difficulty(state, last_signal)
+    │       ├── 첫 질문이면 EASY
+    │       ├── SUFFICIENT면 MEDIUM
+    │       └── 그 외 신호면 EASY
+    │
+    ├── question_gen.py
+    │   └── 실제 Question 객체를 생성하는 모듈.
+    │       메인 질문은 LLM 호출을 시도하고, 실패하면 fallback 질문을 만든다.
+    │       파생 질문은 현재 템플릿 기반이다.
+    │
+    │       generate_question(topic, difficulty, asked_question_texts)
+    │       ├── search_evidence(query=topic, topic=topic)
+    │       ├── confidence threshold로 근거 필터
+    │       ├── QUESTION_GEN_SYSTEM + user prompt 구성
+    │       ├── get_llm().with_structured_output(GeneratedQuestion)
+    │       └── Question(kind=MAIN) 반환
+    │
+    │       generate_follow_up()
+    │       generate_challenge()
+    │       generate_confirm_positive()
+    │       generate_confirm_negative()
+    │       generate_trap()
+    │       generate_hint()
+    │
+    └── prompts.py
+        └── 질문 생성 프롬프트 모음.
+
+            QUESTION_GEN_SYSTEM
+            FOLLOW_UP_SYSTEM
+            CHALLENGE_SYSTEM
+            CONFIRM_POSITIVE_SYSTEM
+            CONFIRM_NEGATIVE_SYSTEM
+            TRAP_SYSTEM
+
+========================================================================
+
+## 2. 주변 패키지와 연결 관계
+
+Strategy는 단독으로 면접을 진행하지 않고 아래 패키지들과 연결된다.
+
+    src/interview/
+    │
+    ├── schemas/
+    │   ├── question.py
+    │   │   └── Strategy가 생성해서 Interviewer에게 넘기는 Question 계약.
+    │   │
+    │   │       Question
+    │   │       ├── question_id
+    │   │       ├── text
+    │   │       ├── topic
+    │   │       ├── difficulty
+    │   │       ├── kind
+    │   │       ├── category
+    │   │       └── parent_question_id
+    │   │
+    │   │       QuestionKind
+    │   │       ├── MAIN
+    │   │       ├── FOLLOW_UP
+    │   │       ├── CHALLENGE
+    │   │       ├── CONFIRM_POSITIVE
+    │   │       ├── CONFIRM_NEGATIVE
+    │   │       ├── TRAP
+    │   │       └── HINT
+    │   │
+    │   ├── signals.py
+    │   │   └── Assessment가 만들고 Interviewer가 Strategy 호출 분기에 쓰는 신호.
+    │   │
+    │   │       AnswerQualitySignal
+    │   │       ├── answer_id
+    │   │       ├── question_id
+    │   │       ├── quality
+    │   │       ├── rationale
+    │   │       └── next_probe_target
+    │   │
+    │   └── evidence.py
+    │       └── Evidence가 만들고 Strategy가 주제 선택에 쓰는 CoverageMap.
+    │
+    ├── evidence/
+    │   ├── retrieval.py
+    │   │   └── search_evidence().
+    │   │       question_gen.py가 질문 생성용 근거 검색에 사용한다.
+    │   │
+    │   └── store.py / indexing.py
+    │       └── CoverageMap을 만들고 user_id별 근거 청크를 저장한다.
+    │
+    ├── assessment/
+    │   └── agent.py
+    │       └── 답변을 평가해서 AnswerQualitySignal을 만든다.
+    │           Strategy는 이 신호를 직접 만들지 않고 소비만 한다.
+    │
+    ├── interviewer/
+    │   ├── agent.py
+    │   └── graph.py
+    │       └── StrategyAgent의 next_* 메서드를 호출한다.
+    │           어떤 next_*를 호출할지는 Interviewer의 흐름 제어 책임이다.
+    │
+    └── llm/
+        └── client.py
+            └── question_gen.py가 get_llm()으로 질문 생성 LLM을 가져온다.
+
+========================================================================
+
+## 3. 데이터 모델 트리
+
+### 3-1. StrategyState가 기억하는 정보
+
+    StrategyState
+        │
+        ├── 출제 이력
+        │   ├── asked_topics
+        │   ├── asked_difficulties
+        │   ├── asked_question_texts
+        │   └── question_count
+        │
+        ├── 평가 신호 요약
+        │   └── topic_last_quality
+        │
+        └── 조회 헬퍼
+            ├── topic_counts()
+            ├── difficulty_counts()
+            └── recent_topics(n)
+
+현재 _record(question)가 질문 생성 후 state를 갱신한다.
+
+    _record(question)
+        │
+        ├── asked_topics.append(question.topic)
+        ├── asked_difficulties.append(question.difficulty)
+        ├── asked_question_texts.append(question.text)
+        └── question_count += 1
+
+주의:
+- 현재 _record는 메인 질문과 파생 질문 모두에 호출된다.
+- state.py 주석에는 question_count가 메인 질문 수라고 되어 있다.
+- 실제 구현은 파생 질문에서도 question_count가 증가한다.
+- 이 값이 max_questions나 난이도 분포에 쓰이면 메인/파생 카운트 분리가 필요하다.
+
+### 3-2. CoverageMap이 주제 선택에 쓰이는 과정
+
+    CoverageMap
+        │
+        └── topic_coverage
+            ├── "JPA"
+            │   ├── confidence
+            │   └── chunk_count
+            │
+            ├── "Redis"
+            │   ├── confidence
+            │   └── chunk_count
+            │
+            └── "FastAPI"
+                ├── confidence
+                └── chunk_count
+        │
+        ▼
+    StrategyAgent._pick_topic()
+        │
+        ├── all_topics = coverage.topic_coverage.keys()
+        ├── coverage가 비어 있으면 "FastAPI" 폴백
+        ├── weak_topics() 제외
+        ├── 전부 weak면 전체 후보 사용
+        ├── 아직 묻지 않은 주제 우선
+        ├── 직전 주제와 연속 회피
+        ├── confidence 높은 순 정렬
+        ├── 상위 _TOP_N_POOL개 후보 풀 생성
+        └── random.choice(top_pool)
+
+중요:
+- Evidence는 CoverageMap만 제공한다.
+- 어떤 주제를 실제로 물을지는 Strategy가 결정한다.
+- weak topic을 아예 버릴지, 일반 개념 질문으로 낮춰 물을지는 Strategy 정책이다.
+
+### 3-3. AnswerQualitySignal이 다음 질문 종류로 이어지는 과정
+
+Interviewer가 신호를 보고 Strategy의 어떤 메서드를 호출할지 결정한다.
+
+    AnswerQualitySignal.quality
+        │
+        ├── SUFFICIENT
+        │   └── StrategyAgent.next_question(last_signal)
+        │
+        ├── BONUS_AVAILABLE
+        │   └── StrategyAgent.next_follow_up(topic, parent_question_id, target, answer_excerpt)
+        │
+        ├── MISCONCEPTION
+        │   └── StrategyAgent.next_challenge(topic, parent_question_id, target, answer_excerpt)
+        │
+        ├── CONFIRM_POSITIVE
+        │   └── StrategyAgent.next_confirm_positive(topic, parent_question_id, target, answer_excerpt)
+        │
+        ├── CONFIRM_NEGATIVE
+        │   └── StrategyAgent.next_confirm_negative(topic, parent_question_id, target, answer_excerpt)
+        │
+        └── TRAP_AVAILABLE
+            └── StrategyAgent.next_trap(topic, parent_question_id, target, answer_excerpt)
+
+    SilenceDetected 또는 사용자가 막힘
+        │
+        └── StrategyAgent.next_hint(question, target, answer_excerpt)
+
+Strategy는 라우팅 판단을 직접 하지 않는다.
+Interviewer가 어떤 next_*를 호출할지 결정하고, Strategy는 해당 종류의 Question을 만든다.
+
+========================================================================
+
+## 4. 메인 질문 생성 흐름
+
+현재 next_question은 메인 질문을 생성하는 핵심 진입점이다.
+
+    StrategyAgent.next_question(last_signal)
+        │
+        ├── difficulty.next_difficulty(self.state, last_signal)
+        │       │
+        │       ├── last_signal is None -> EASY
+        │       ├── SUFFICIENT -> MEDIUM
+        │       └── 그 외 -> EASY
+        │
+        ├── self._pick_topic()
+        │       │
+        │       ├── CoverageMap 기반 주제 후보 선택
+        │       ├── weak topic 제외
+        │       ├── 미출제 주제 우선
+        │       └── 직전 주제 연속 회피
+        │
+        ├── question_gen.generate_question(
+        │       topic,
+        │       diff,
+        │       asked_question_texts=self.state.asked_question_texts,
+        │   )
+        │
+        ├── last_signal이 있으면
+        │       └── self.state.topic_last_quality[topic] = last_signal.quality
+        │
+        ├── self._record(question)
+        │
+        └── Question(kind=MAIN) 반환
+
+question_gen.generate_question 내부:
+
+    generate_question(topic, difficulty, asked_question_texts)
+        │
+        ├── search_evidence(query=topic, topic=topic)
+        │
+        ├── confidence >= 0.4인 reliable_chunks만 사용
+        │
+        ├── 근거가 있으면 근거 텍스트를 context로 구성
+        ├── 근거가 없으면 일반 개념 질문 지시문 사용
+        │
+        ├── 이미 출제한 질문 목록을 asked_block으로 구성
+        │
+        ├── get_llm(temperature=0.6)
+        │
+        ├── with_structured_output(GeneratedQuestion)
+        │
+        ├── 성공
+        │   └── LLM 결과 text/category로 Question 생성
+        │
+        └── 실패
+            └── _fallback_question(topic, difficulty, evidence_ids)
+
+GeneratedQuestion:
+
+    GeneratedQuestion
+        ├── text
+        └── category
+
+========================================================================
+
+## 5. 파생 질문 생성 흐름
+
+파생 질문은 메인 질문에서 이어지는 꼬리/압박/확인/함정/힌트 질문이다.
+
+공통 입력:
+
+    topic
+        └── 현재 질문 세트의 주제
+
+    parent_question_id
+        └── 이 질문이 파생된 원래 메인 질문 ID
+
+    target
+        └── Assessment가 next_probe_target으로 넘긴 다음 탐색 대상
+
+    answer_excerpt
+        └── Interviewer가 transcript에서 잘라 전달하는 직전 답변 일부
+
+현재 agent.py의 파생 질문 진입점:
+
+    next_follow_up()
+        └── question_gen.generate_follow_up()
+
+    next_challenge()
+        └── question_gen.generate_challenge()
+
+    next_confirm_positive()
+        └── question_gen.generate_confirm_positive()
+
+    next_confirm_negative()
+        └── question_gen.generate_confirm_negative()
+
+    next_trap()
+        └── question_gen.generate_trap()
+
+    next_hint()
+        └── question_gen.generate_hint()
+
+현재 question_gen.py의 파생 질문 구현:
+
+    generate_follow_up()
+        ├── probe = target or "추가로 설명할 수 있는 부분"
+        ├── search_evidence(query=probe, topic=topic)
+        └── 템플릿 문장으로 FOLLOW_UP Question 생성
+
+    generate_challenge()
+        ├── probe = target or "답변의 논리적 근거"
+        ├── search_evidence(query=probe, topic=topic)
+        └── 템플릿 문장으로 CHALLENGE Question 생성
+
+    generate_confirm_positive()
+        ├── probe = target or "답변의 적용 범위"
+        ├── search_evidence(query=probe, topic=topic)
+        └── 템플릿 문장으로 CONFIRM_POSITIVE Question 생성
+
+    generate_confirm_negative()
+        ├── probe = target or "답변과 근거가 다른 부분"
+        ├── search_evidence(query=probe, topic=topic)
+        └── 템플릿 문장으로 CONFIRM_NEGATIVE Question 생성
+
+    generate_trap()
+        ├── probe = target or "헷갈리기 쉬운 개념"
+        ├── search_evidence(query=probe, topic=topic)
+        └── 템플릿 문장으로 TRAP Question 생성
+
+    generate_hint()
+        ├── probe = target or "힌트 제공"
+        ├── search_evidence(query=probe, topic=question.topic)
+        └── 템플릿 문장으로 HINT Question 생성
+
+주의:
+- prompts.py에는 파생 질문용 시스템 프롬프트가 이미 있다.
+- 하지만 현재 파생 질문 함수들은 아직 LLM을 호출하지 않고 템플릿으로 만든다.
+- answer_excerpt 파라미터는 받아두고 있지만 현재 템플릿에서는 거의 쓰이지 않는다.
+- 추후 LLM 파생 질문 생성으로 전환할 때 answer_excerpt를 직접 인용하는 질문을 만들 수 있다.
+
+========================================================================
+
+## 6. 현재 Stub / 임시 경계
+
+Strategy는 일부 기능이 구현되어 있지만 아직 임시 경계가 남아 있다.
+
+    agent.py
+        │
+        ├── _dummy_questions
+        │   └── 과거 stub 흔적. 현재 next_question은 question_gen.generate_question을 호출한다.
+        │
+        ├── _topic_idx
+        │   └── stub 질문 ID 생성용 흔적. 현재 실질 사용은 거의 없다.
+        │
+        ├── _pick_topic()
+        │   └── CoverageMap 기반 주제 선택은 구현되어 있다.
+        │       다만 topic group, chunk_count 기준, 이전 면접 약점 반영은 아직 단순하다.
+        │
+        └── _record()
+            └── 메인/파생 질문을 구분하지 않고 question_count를 증가시킨다.
+
+    difficulty.py
+        └── next_difficulty()
+            ├── 첫 질문 EASY
+            ├── SUFFICIENT면 MEDIUM
+            └── 그 외 전부 EASY
+
+    question_gen.py
+        │
+        ├── generate_question()
+        │   ├── LLM 구조화 출력 사용
+        │   ├── 근거 부족 시 일반 개념 질문 지시
+        │   └── LLM 예외 시 fallback 질문
+        │
+        ├── generate_follow_up/challenge/confirm/trap/hint()
+        │   └── 현재 템플릿 기반. prompts.py의 파생 프롬프트는 아직 연결 전.
+        │
+        └── _EVIDENCE_CONFIDENCE_THRESHOLD = 0.4
+
+    prompts.py
+        └── HINT_SYSTEM은 아직 없다.
+            hint는 현재 generate_hint 템플릿으로 처리된다.
+
+계약 주의:
+- question_gen.py는 Question 생성 시 evidence_ids를 넘기고 있다.
+- schemas/question.py에 evidence_ids 필드가 없다면 이 값은 Pydantic 설정에 따라 무시될 수 있다.
+- 질문과 근거 추적을 실제로 쓰려면 Question 스키마에 evidence_ids 계약이 필요하다.
+
+========================================================================
+
+## 7. 난이도 조정 구조
+
+난이도 결정은 difficulty.py의 순수 함수로 분리되어 있다.
+이 덕분에 LLM 없이 규칙 테스트가 가능하다.
+
+현재 규칙:
+
+    next_difficulty(state, last_signal)
+        │
+        ├── last_signal is None
+        │   └── Difficulty.EASY
+        │
+        ├── last_signal.quality == SUFFICIENT
+        │   └── Difficulty.MEDIUM
+        │
+        ├── last_signal.quality in (
+        │       BONUS_AVAILABLE,
+        │       MISCONCEPTION,
+        │       CONFIRM_POSITIVE,
+        │       CONFIRM_NEGATIVE,
+        │       TRAP_AVAILABLE,
+        │   )
+        │   └── Difficulty.EASY
+        │
+        └── fallback
+            └── Difficulty.EASY
+
+최종 목표 규칙:
+
+    충분한 답변이 연속됨
+        └── 난이도 한 단계 상승
+
+    오개념 또는 부정 확인 발생
+        └── 난이도 하강 또는 유지
+
+    EASY만 너무 많이 나옴
+        └── 중반 이후 MEDIUM/HARD 보정
+
+    HARD가 한 번도 안 나옴
+        └── 종반에 HARD 후보를 고려
+
+    파생 질문
+        └── 부모 난이도 상속 또는 EASY 고정 중 정책 결정 필요
+
+중요:
+- 난이도 조정은 question_gen.py에 넣지 않는다.
+- question_gen은 전달받은 difficulty를 따른다.
+- 난이도 분포 판단은 StrategyState.difficulty_counts()를 사용한다.
+
+========================================================================
+
+## 8. 8단계 이후 질문 생성 LangGraph 구조
+
+작업순서.md 기준으로, 최종적으로 메인 질문 생성은 Strategy 내부 LangGraph로 감쌀 수 있다.
+이 그래프는 "면접 전체 흐름" 그래프가 아니라 "메인 질문 1개 생성" 그래프다.
+
+예상 파일:
+
+    strategy/graph.py
+        ├── QuestionGenState
+        ├── pick_topic
+        ├── retrieve_evidence
+        ├── generate
+        ├── validate
+        └── get_compiled_graph()
+
+예상 흐름:
+
+    START
+      │
+      ▼
+    pick_topic
+      │
+      ├── CoverageMap 확인
+      ├── StrategyState 출제 이력 확인
+      └── 후보 topic 선택
+      │
+      ▼
+    retrieve_evidence
+      │
+      ├── search_evidence(topic)
+      └── 근거 충분 여부 판단
+      │
+      ▼
+    enough_evidence?
+      │
+      ├── yes
+      │   └── generate
+      │
+      └── no
+          ├── 대체 topic 선택
+          └── retrieve_evidence 재시도
+      │
+      ▼
+    generate
+      │
+      ├── QUESTION_GEN_SYSTEM
+      ├── evidence context
+      ├── asked_question_texts
+      └── LLM structured output
+      │
+      ▼
+    validate
+      │
+      ├── 질문이 1개인가
+      ├── 이미 한 질문과 너무 비슷하지 않은가
+      ├── 근거 없는 단정을 하지 않는가
+      └── 실패 시 최대 1회 재생성
+      │
+      ▼
+    END
+      └── Question 반환
+
+주의:
+- 파생 질문 5종은 분기/루프가 크지 않으므로 그래프 없이 단일 LLM 호출로 유지할 수 있다.
+- 그래프에는 재시도 상한이 필요하다.
+- 무한 루프를 막기 위해 topic 후보 소진 조건을 명확히 둬야 한다.
+
+========================================================================
+
+## 9. Interviewer와의 호출 계약
+
+Interviewer는 Strategy에게 "다음에 무엇을 만들지"를 명시적으로 호출한다.
+
+면접 시작 또는 새 메인 질문:
+
+    StrategyAgent.next_question(last_signal)
+        │
+        └── Question(kind=MAIN)
+
+답변이 충분하지만 추가로 더 캐물을 수 있음:
+
+    StrategyAgent.next_follow_up(
+        topic=current_question.topic,
+        parent_question_id=main_question_id,
+        target=last_signal.next_probe_target,
+        answer_excerpt=직전 답변 일부,
+    )
+
+오개념 또는 논리적 허점:
+
+    StrategyAgent.next_challenge(
+        topic=current_question.topic,
+        parent_question_id=main_question_id,
+        target=last_signal.next_probe_target,
+        answer_excerpt=직전 답변 일부,
+    )
+
+사실관계 부드러운 확인:
+
+    StrategyAgent.next_confirm_positive(...)
+
+근거 또는 이전 답변과 충돌 확인:
+
+    StrategyAgent.next_confirm_negative(...)
+
+혼동 개념 구분:
+
+    StrategyAgent.next_trap(...)
+
+침묵 또는 막힘:
+
+    StrategyAgent.next_hint(
+        question=current_question,
+        target=last_signal.next_probe_target 또는 None,
+        answer_excerpt=None,
+    )
+
+중요:
+- parent_question_id는 파생 질문이 어느 메인 질문 세트에 속하는지 추적하는 핵심 값이다.
+- answer_excerpt는 Strategy가 답변을 평가하기 위한 값이 아니라 질문 문장에 맥락을 넣기 위한 값이다.
+- Strategy는 세션 종료 여부를 결정하지 않는다.
+
+========================================================================
+
+## 10. Evidence와의 연결
+
+Strategy가 Evidence를 쓰는 지점은 2곳이다.
+
+### 10-1. CoverageMap으로 주제 선택
+
+    StrategyAgent.__init__(coverage)
+        │
+        └── self.coverage = coverage or CoverageMap()
+
+    _pick_topic()
+        │
+        ├── coverage.topic_coverage
+        ├── coverage.weak_topics()
+        └── confidence 기준 후보 정렬
+
+CoverageMap은 면접 시작 전에 Evidence build_index 결과로 만들어져야 한다.
+Interviewer 또는 API 세션 생성 경로에서 StrategyAgent에 주입한다.
+
+### 10-2. search_evidence로 질문 근거 검색
+
+    question_gen.generate_question()
+        │
+        └── search_evidence(query=topic, topic=topic)
+
+    question_gen.generate_follow_up()
+        │
+        └── search_evidence(query=probe, topic=topic)
+
+    question_gen.generate_challenge()
+        │
+        └── search_evidence(query=probe, topic=topic)
+
+    question_gen.generate_confirm_positive()
+        │
+        └── search_evidence(query=probe, topic=topic)
+
+    question_gen.generate_confirm_negative()
+        │
+        └── search_evidence(query=probe, topic=topic)
+
+    question_gen.generate_trap()
+        │
+        └── search_evidence(query=probe, topic=topic)
+
+    question_gen.generate_hint()
+        │
+        └── search_evidence(query=probe, topic=question.topic)
+
+주의:
+- Strategy는 store를 직접 열지 않고 retrieval.py를 통해 검색한다.
+- 사용자별 근거 분리가 완성되면 question_gen 함수에도 user_id 전달 경로가 필요할 수 있다.
+- 현재 generate_question 시그니처에는 user_id가 없다.
+
+========================================================================
+
+## 11. Assessment와의 연결
+
+Assessment는 Strategy에게 직접 질문을 만들라고 호출하지 않는다.
+Assessment는 AnswerQualitySignal을 만들고, Interviewer가 그 신호를 보고 Strategy를 호출한다.
+
+    Candidate Answer
+        │
+        ▼
+    AssessmentAgent.evaluate()
+        │
+        ▼
+    AnswerQualitySignal
+        │
+        ├── quality
+        ├── rationale
+        └── next_probe_target
+        │
+        ▼
+    Interviewer route_quality
+        │
+        ▼
+    StrategyAgent.next_*()
+
+next_probe_target 사용 예:
+
+    AnswerQualitySignal(
+        quality=BONUS_AVAILABLE,
+        next_probe_target="fetch join을 통한 N+1 해결 방법",
+    )
+        │
+        ▼
+    next_follow_up(topic="JPA N+1", target="fetch join을 통한 N+1 해결 방법")
+        │
+        ▼
+    "JPA N+1 답변에서 'fetch join을 통한 N+1 해결 방법' 부분을 조금 더 구체적으로 설명해 주세요."
+
+중요:
+- quality별 분기 책임은 Interviewer에 있다.
+- target을 질문 문장으로 자연스럽게 바꾸는 책임은 Strategy/question_gen에 있다.
+- target이 None일 때도 기본 probe로 질문이 만들어져야 한다.
+
+========================================================================
+
+## 12. 단계별로 어느 파일을 보면 되는지
+
+### 1단계. 외부 공개 API 확인
+
+    strategy/__init__.py
+        └── StrategyAgent export 확인
+
+### 2단계. 전체 호출 흐름 확인
+
+    strategy/agent.py
+        ├── StrategyAgent
+        ├── next_question()
+        ├── next_follow_up()
+        ├── next_challenge()
+        ├── next_confirm_positive()
+        ├── next_confirm_negative()
+        ├── next_trap()
+        ├── next_hint()
+        ├── _record()
+        └── _pick_topic()
+
+### 3단계. 상태 모델 확인
+
+    strategy/state.py
+        ├── StrategyState 필드
+        ├── topic_counts()
+        ├── difficulty_counts()
+        └── recent_topics()
+
+### 4단계. 난이도 규칙 확인
+
+    strategy/difficulty.py
+        └── next_difficulty()
+
+난이도 정책을 바꿀 때는 이 파일부터 본다.
+
+### 5단계. 질문 생성 방식 확인
+
+    strategy/question_gen.py
+        ├── GeneratedQuestion
+        ├── generate_question()
+        ├── generate_follow_up()
+        ├── generate_challenge()
+        ├── generate_confirm_positive()
+        ├── generate_confirm_negative()
+        ├── generate_trap()
+        ├── generate_hint()
+        └── _fallback_question()
+
+### 6단계. 프롬프트 확인
+
+    strategy/prompts.py
+        ├── QUESTION_GEN_SYSTEM
+        ├── FOLLOW_UP_SYSTEM
+        ├── CHALLENGE_SYSTEM
+        ├── CONFIRM_POSITIVE_SYSTEM
+        ├── CONFIRM_NEGATIVE_SYSTEM
+        └── TRAP_SYSTEM
+
+### 7단계. 계약 스키마 확인
+
+    schemas/question.py
+        ├── Question
+        ├── QuestionKind
+        ├── Difficulty
+        └── QuestionCategory
+
+    schemas/signals.py
+        ├── AnswerQuality
+        └── AnswerQualitySignal
+
+    schemas/evidence.py
+        ├── CoverageMap
+        └── EvidenceChunk
+
+### 8단계. 주변 연결 확인
+
+    evidence/retrieval.py
+        └── search_evidence()
+
+    interviewer/graph.py 또는 interviewer/agent.py
+        └── StrategyAgent.next_* 호출 위치 확인
+
+    assessment/agent.py
+        └── AnswerQualitySignal 생성 위치 확인
+
+========================================================================
+
+## 13. 작업할 때 기억할 규칙
+
+1. Strategy는 면접 흐름 관리자 자체가 아니다.
+   전체 흐름 제어는 Interviewer가 한다.
+
+2. Strategy는 답변 평가자가 아니다.
+   답변 평가는 Assessment가 하고, Strategy는 AnswerQualitySignal을 소비한다.
+
+3. Strategy는 근거 수집자가 아니다.
+   근거 수집/저장/검색은 Evidence가 한다.
+
+4. Strategy는 질문 전략과 질문 생성의 경계다.
+   전략 결정은 agent.py, 실제 문장 생성은 question_gen.py에 둔다.
+
+5. 메인 질문 주제는 CoverageMap과 StrategyState를 함께 보고 고른다.
+
+6. weak_topics는 조심해서 다룬다.
+   근거가 약한 주제는 프로젝트 기반 심화 질문보다 일반 개념 질문으로 돌리는 편이 안전하다.
+
+7. 같은 주제를 연속해서 묻지 않도록 recent_topics를 확인한다.
+
+8. 같은 질문 문장이 반복되지 않도록 asked_question_texts를 프롬프트에 넣는다.
+
+9. difficulty.py는 순수 함수로 유지한다.
+   LLM 호출이나 Evidence 검색을 넣지 않는다.
+
+10. question_gen.py는 전달받은 topic/difficulty/kind를 존중한다.
+    여기서 주제 선택 정책을 다시 만들지 않는다.
+
+11. 파생 질문의 parent_question_id는 반드시 유지한다.
+    그래야 Assessment와 리포트에서 질문 세트를 추적할 수 있다.
+
+12. answer_excerpt는 답변 평가용이 아니라 질문 문맥화용이다.
+    평가 판단은 Assessment의 rationale/quality/target을 기준으로 한다.
+
+13. HINT 질문은 정답을 알려주지 않고 접근 방향만 제시해야 한다.
+
+14. LLM 실패 시 fallback 질문이 있어야 한다.
+    질문 생성 실패 때문에 면접 전체가 멈추면 안 된다.
+
+15. search_evidence 결과가 비어도 질문은 생성되어야 한다.
+    다만 근거 없는 내용을 사용자 자료 기반 사실처럼 묻지 않는다.
+
+16. user_id별 Evidence 검색 경로가 들어오면 Strategy/question_gen 시그니처도 함께 맞춰야 한다.
+
+17. Question 스키마와 question_gen이 넘기는 필드는 항상 맞아야 한다.
+    특히 evidence_ids 같은 추적 필드는 스키마에 없으면 사라질 수 있다.
+
+18. 메인 질문 생성 LangGraph는 Strategy 내부 구현이다.
+    Interviewer가 그래프 내부 노드를 알 필요는 없다.
+
+========================================================================
+
+## 14. 최종 완성 후 목표 구조
+
+최종적으로 Strategy는 아래 모양이 된다.
+
+    Interviewer
+        │
+        ├── 첫 질문 요청
+        ├── 충분한 답변 후 다음 질문 요청
+        ├── bonus / misconception / confirm / trap 신호별 파생 질문 요청
+        └── silence 시 hint 요청
+        │
+        ▼
+    StrategyAgent
+        │
+        ├── StrategyState
+        │   ├── 출제 주제 이력
+        │   ├── 난이도 분포
+        │   ├── 질문 문장 이력
+        │   └── topic별 마지막 quality
+        │
+        ├── CoverageMap
+        │   ├── confidence
+        │   ├── chunk_count
+        │   ├── weak_topics()
+        │   └── strong_topics()
+        │
+        ├── difficulty.py
+        │   └── 다음 난이도 결정
+        │
+        ├── strategy/graph.py
+        │   └── 메인 질문 생성 그래프
+        │       ├── pick_topic
+        │       ├── retrieve_evidence
+        │       ├── generate
+        │       └── validate
+        │
+        └── question_gen.py
+            ├── QUESTION_GEN_SYSTEM
+            ├── 파생 질문 프롬프트
+            ├── search_evidence()
+            ├── LLM structured output
+            └── fallback 템플릿
+        │
+        ▼
+    Question
+        ├── question_id
+        ├── text
+        ├── topic
+        ├── difficulty
+        ├── kind
+        ├── category
+        ├── parent_question_id
+        └── evidence_ids
+            └── EvidenceChunk.chunk_id 목록
+
+면접 전체에서 보면:
+
+    Evidence
+        └── CoverageMap / search_evidence
+                │
+                ▼
+    Strategy
+        └── Question 생성
+                │
+                ▼
+    Interviewer
+        └── 질문 제시 / 이벤트 라우팅
+                │
+                ▼
+    Assessment
+        └── AnswerQualitySignal 생성
+                │
+                └── 다시 Strategy 입력으로 사용
+
+한 문장으로 정리:
+
+    Strategy는 "Evidence로부터 근거와 커버리지를 받고, Assessment의 신호를 참고해,
+    Interviewer가 다음에 제시할 가장 적절한 Question을 만들어 주는 계층"이다.
