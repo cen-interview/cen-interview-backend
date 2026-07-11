@@ -7,7 +7,7 @@ from interview.assessment import AssessmentAgent
 from interview.interviewer.agent import InterviewerAgent
 from interview.interviewer.contracts import AssessmentPort, StrategyPort
 from interview.interviewer.session import SessionState
-from interview.schemas.events import InterviewerEvent, Mode
+from interview.schemas.events import AnswerSubmitted, InterviewerEvent, Mode
 from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
 from interview.schemas.report import FinalReport
@@ -16,6 +16,10 @@ from interview.strategy import StrategyAgent
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
+from pydantic import TypeAdapter, ValidationError
+
+
+_EVENT_ADAPTER = TypeAdapter(InterviewerEvent)
 
 
 @dataclass
@@ -230,6 +234,56 @@ def wait_event(state: SessionState, runtime: Any) -> dict[str, Any]:
     return {
         "pending_event": payload["event"],
         "pending_delivery_metrics": payload.get("delivery_metrics"),
+    }
+
+
+def validate_event(state: SessionState | dict[str, Any]) -> dict[str, Any]:
+    """대기 중인 이벤트를 복원하고 현재 세션에서 처리할 수 있는지 검증한다.
+
+    체크포인터에 dict로 저장된 pending_event를 InterviewerEvent 타입으로
+    복원하여 지원하는 이벤트인지 확인한다. 이어서 세션 ID를 검증하고, 답변
+    제출 이벤트라면 현재 질문 ID와 빈 답변 여부도 확인한다.
+
+    검증 실패는 예외로 그래프를 중단하지 않고 error에 사용자가 이해할 수 있는
+    메시지를 저장한다. 성공한 이벤트도 Pydantic 객체 자체를 상태에 넣지 않고
+    JSON 직렬화가 가능한 dict로 다시 변환한다.
+
+    Args:
+        state:
+            pending_event와 현재 세션 정보를 가진 SessionState 또는 같은 필드를
+            가진 dict.
+
+    Returns:
+        검증에 성공하면 정규화된 pending_event와 error=None을 담은 부분 상태.
+        실패하면 원인을 설명하는 error를 담은 부분 상태.
+    """
+    pending_event = _state_get(state, "pending_event")
+    if pending_event is None:
+        return {"error": "처리할 이벤트가 없습니다."}
+
+    try:
+        event = _EVENT_ADAPTER.validate_python(pending_event)
+    except ValidationError:
+        return {"error": "지원하지 않거나 형식이 올바르지 않은 이벤트입니다."}
+
+    session_id = _state_get(state, "session_id")
+    if event.session_id != session_id:
+        return {"error": "현재 면접 세션과 일치하지 않는 이벤트입니다."}
+
+    if isinstance(event, AnswerSubmitted):
+        current_question = _state_get(state, "current_question")
+        if current_question is None:
+            return {"error": "답변을 연결할 현재 질문이 없습니다."}
+
+        if event.question_id != current_question.question_id:
+            return {"error": "현재 질문과 일치하지 않는 답변입니다."}
+
+        if not event.text.strip():
+            return {"error": "답변 내용을 입력해 주세요."}
+
+    return {
+        "pending_event": event.model_dump(mode="json"),
+        "error": None,
     }
 
 
