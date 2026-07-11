@@ -11,7 +11,7 @@ from interview.schemas.events import AnswerSubmitted, InterviewerEvent, Mode
 from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
 from interview.schemas.report import FinalReport
-from interview.schemas.signals import AnswerQualitySignal
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.strategy import StrategyAgent
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -595,6 +595,56 @@ def ask_trap(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, An
         "turn_type": "question",
         "error": None,
     }
+
+
+def route_quality(state: SessionState | dict[str, Any]) -> str:
+    """답변 품질과 질문 세트 제한을 읽어 다음 처리 노드를 선택한다.
+
+    파생 질문이 반복되어 면접이 끝나지 않는 것을 방지하기 위해 일반적인
+    quality 분기보다 제한 규칙을 먼저 검사한다. 현재 질문 세트의 파생 질문
+    수가 최대값에 도달했거나 이미 challenge를 사용한 뒤 다시 misconception이
+    나오면 추가 질문을 만들지 않고 complete_set으로 이동한다.
+
+    이 함수는 상태를 읽기만 하며 값을 변경하거나 Strategy와 Assessment를
+    호출하지 않는다.
+
+    Args:
+        state:
+            last_signal과 현재 질문 세트의 제한 상태를 가진 SessionState 또는
+            같은 필드를 가진 dict.
+
+    Returns:
+        답변 품질에 대응하는 다음 그래프 노드 이름. 평가 신호가 없거나 형식이
+        올바르지 않은 경우에는 안전하게 complete_set을 반환한다.
+    """
+    derived_turn_count = _state_get(state, "derived_turn_count", 0)
+    max_derived_turns = _state_get(state, "max_derived_turns_per_set", 2)
+    if derived_turn_count >= max_derived_turns:
+        return "complete_set"
+
+    try:
+        last_signal = _restore_signal(_state_get(state, "last_signal"))
+    except ValidationError:
+        return "complete_set"
+
+    if last_signal is None:
+        return "complete_set"
+
+    if (
+        last_signal.quality == AnswerQuality.MISCONCEPTION
+        and _state_get(state, "challenge_used_in_set", False)
+    ):
+        return "complete_set"
+
+    routes = {
+        AnswerQuality.SUFFICIENT: "complete_set",
+        AnswerQuality.BONUS_AVAILABLE: "ask_follow_up",
+        AnswerQuality.MISCONCEPTION: "ask_challenge",
+        AnswerQuality.CONFIRM_POSITIVE: "ask_confirm_positive",
+        AnswerQuality.CONFIRM_NEGATIVE: "ask_confirm_negative",
+        AnswerQuality.TRAP_AVAILABLE: "ask_trap",
+    }
+    return routes.get(last_signal.quality, "complete_set")
 
 
 def ask_main(state: SessionState, runtime: Any) -> dict[str, Any]:
