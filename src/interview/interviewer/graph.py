@@ -4,12 +4,13 @@ from functools import lru_cache
 from typing import Any
 
 from interview.assessment import AssessmentAgent
+from interview.interviewer import utterance as utterance_templates
 from interview.interviewer.agent import InterviewerAgent
 from interview.interviewer.contracts import AssessmentPort, StrategyPort
 from interview.interviewer.session import SessionState, Turn
 from interview.schemas.events import AnswerSubmitted, InterviewerEvent, Mode
 from interview.schemas.evidence import CoverageMap
-from interview.schemas.question import Question
+from interview.schemas.question import Question, QuestionKind
 from interview.schemas.report import FinalReport
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.strategy import StrategyAgent
@@ -217,7 +218,7 @@ def greet(state: SessionState, runtime: Any) -> dict[str, Any]:
         "asked_count": 1,
         "main_question_id": question.question_id,
         "main_topic": question.topic,
-        "turn_type": "question",
+        "turn_type": "greeting",
         "finished": False,
         "error": None,
     }
@@ -835,6 +836,109 @@ def ask_main(state: SessionState, runtime: Any) -> dict[str, Any]:
     }
 
 
+def _select_utterance_preamble(turn_type: str, question_kind: QuestionKind | None) -> str:
+    """현재 상황과 질문 종류에 맞는 기본 안내 문장을 선택한다.
+
+    상황을 나타내는 turn_type을 질문 종류보다 먼저 확인한다. 같은 질문을
+    사용하더라도 첫 제시, 재제시, 종료 상황의 안내 문장은 달라야 하기
+    때문이다. 일반 질문 상황에서는 Question.kind를 사용해 메인 질문,
+    꼬리 질문, 압박 질문, 힌트 질문의 안내 문장을 구분한다.
+
+    Args:
+        turn_type:
+            현재 면접관 턴의 상황. greeting, question, replay,
+            pause_prompt, closing 등을 사용한다.
+
+        question_kind:
+            현재 질문의 종류. 질문이 없는 종료나 일시 정지 안내에서는
+            None일 수 있다.
+
+    Returns:
+        현재 발화 앞에 붙일 템플릿 기반 안내 문장.
+    """
+    if turn_type == "greeting":
+        return utterance_templates.greeting()
+    if turn_type == "replay":
+        return utterance_templates.replay()
+    if turn_type == "pause_prompt":
+        return utterance_templates.pause_prompt()
+    if turn_type == "closing":
+        return utterance_templates.closing()
+
+    question_templates = {
+        QuestionKind.FOLLOW_UP: utterance_templates.follow_up,
+        QuestionKind.CHALLENGE: utterance_templates.challenge,
+        QuestionKind.CONFIRM_POSITIVE: utterance_templates.follow_up,
+        QuestionKind.CONFIRM_NEGATIVE: utterance_templates.challenge,
+        QuestionKind.HINT: utterance_templates.hint,
+    }
+    template = question_templates.get(question_kind, utterance_templates.question)
+    return template()
+
+
+def compose_utterance(state: SessionState | dict[str, Any]) -> dict[str, Any]:
+    """현재 상황의 안내 문장과 질문 본문을 면접관 발화로 조립한다.
+
+    Strategy가 만든 Question.text는 수정하지 않고 템플릿이 반환한 짧은
+    preamble 앞에 그대로 붙인다. 조립한 문장은 last_utterance에 저장하고,
+    동일한 내용을 interviewer Turn으로 transcript에 추가한다. closing과
+    pause_prompt는 문장 자체가 완성된 발화이므로 현재 질문을 덧붙이지 않는다.
+
+    Args:
+        state:
+            현재 질문, 턴 상황, 기존 transcript를 가진 세션 상태.
+
+    Returns:
+        조립된 last_utterance와 면접관 Turn이 추가된 transcript를 담은 부분
+        상태. 질문이 필요한 상황인데 현재 질문이 없으면 error를 반환한다.
+    """
+    turn_type = _state_get(state, "turn_type", "question")
+    current_question = _state_get(state, "current_question")
+    if isinstance(current_question, dict):
+        current_question = Question.model_validate(current_question)
+
+    includes_question = turn_type not in {"closing", "pause_prompt"}
+    if includes_question and current_question is None:
+        return {"error": "면접관 발화를 만들 현재 질문이 없습니다."}
+
+    question_kind = current_question.kind if current_question is not None else None
+    preamble = _select_utterance_preamble(turn_type, question_kind)
+    last_utterance = preamble
+    if includes_question and current_question is not None:
+        last_utterance = f"{preamble}\n\n{current_question.text}"
+
+    interviewer_turn = Turn(
+        role="interviewer",
+        text=last_utterance,
+        question_id=current_question.question_id if includes_question else None,
+        kind=current_question.kind.value if includes_question else None,
+    )
+    transcript = _state_get(state, "transcript", []) or []
+
+    return {
+        "last_utterance": last_utterance,
+        "transcript": [*transcript, interviewer_turn],
+        "error": None,
+    }
+
+
+def after_compose_utterance(state: SessionState | dict[str, Any]) -> str:
+    """발화 조립 후 사용자 입력을 기다릴지 세션을 끝낼지 결정한다.
+
+    일반 질문과 재제시 발화 뒤에는 wait_event로 이동한다. finalize를 거쳐
+    finished=True가 된 종료 발화 뒤에는 더 이상 사용자 입력을 기다리지 않고
+    그래프를 종료한다. 이 함수는 상태를 읽기만 하고 변경하지 않는다.
+
+    Args:
+        state:
+            finished 종료 여부를 가진 현재 세션 상태.
+
+    Returns:
+        계속 입력을 기다리면 "wait_event", 종료하면 "end".
+    """
+    return "end" if _state_get(state, "finished", False) else "wait_event"
+
+
 def _build_graph() -> StateGraph:
     """면접 세션의 LangGraph builder를 조립한다.
 
@@ -844,7 +948,8 @@ def _build_graph() -> StateGraph:
         graph를 만들 때마다 같은 구조를 명확하게 재사용할 수 있다.
 
     그래프 흐름:
-        START → greet → wait_event → validate_event → route_event
+        START → greet → compose_utterance → wait_event
+        → validate_event → route_event
 
         답변 이벤트는 transcript 기록과 평가를 거친 뒤 route_quality에서
         파생 질문 또는 complete_set으로 분기한다. 질문 세트가 끝나면 다음
@@ -855,6 +960,7 @@ def _build_graph() -> StateGraph:
     """
     builder = StateGraph(SessionState, context_schema=InterviewDeps)
     builder.add_node("greet", greet)
+    builder.add_node("compose_utterance", compose_utterance)
     builder.add_node("wait_event", wait_event)
     builder.add_node("validate_event", validate_event)
     builder.add_node("record_candidate_answer", record_candidate_answer)
@@ -873,7 +979,15 @@ def _build_graph() -> StateGraph:
     builder.add_node("handle_timeout", handle_timeout)
 
     builder.add_edge(START, "greet")
-    builder.add_edge("greet", "wait_event")
+    builder.add_edge("greet", "compose_utterance")
+    builder.add_conditional_edges(
+        "compose_utterance",
+        after_compose_utterance,
+        {
+            "wait_event": "wait_event",
+            "end": END,
+        },
+    )
     builder.add_edge("wait_event", "validate_event")
     builder.add_conditional_edges(
         "validate_event",
@@ -907,17 +1021,17 @@ def _build_graph() -> StateGraph:
             "ask_main": "ask_main",
         },
     )
-    builder.add_edge("ask_main", "wait_event")
-    builder.add_edge("ask_follow_up", "wait_event")
-    builder.add_edge("ask_challenge", "wait_event")
-    builder.add_edge("ask_confirm_positive", "wait_event")
-    builder.add_edge("ask_confirm_negative", "wait_event")
-    builder.add_edge("ask_trap", "wait_event")
-    builder.add_edge("handle_replay", "wait_event")
-    builder.add_edge("handle_silence", "wait_event")
+    builder.add_edge("ask_main", "compose_utterance")
+    builder.add_edge("ask_follow_up", "compose_utterance")
+    builder.add_edge("ask_challenge", "compose_utterance")
+    builder.add_edge("ask_confirm_positive", "compose_utterance")
+    builder.add_edge("ask_confirm_negative", "compose_utterance")
+    builder.add_edge("ask_trap", "compose_utterance")
+    builder.add_edge("handle_replay", "compose_utterance")
+    builder.add_edge("handle_silence", "compose_utterance")
     builder.add_edge("handle_timeout", "final_report")
     builder.add_edge("final_report", "finalize")
-    builder.add_edge("finalize", END)
+    builder.add_edge("finalize", "compose_utterance")
     return builder
 
 
