@@ -99,7 +99,7 @@ graph TD;
 
 ## 개인화 (personalization.py)
 
-`get_weak_topics(user_id)`는 Assessment(D) 담당의 실제 구현 제공 전까지 항상 빈 리스트를 반환하는 stub이다. 이전 면접 이력이 없을 때와 동일하게 동작하므로, 별도 분기 없이 자연스럽게 "커버리지 기반 선택만" 동작한다.
+`get_weak_topics(user_id)`는 Assessment 담당의 실제 구현 제공 전까지 항상 빈 리스트를 반환하는 stub이다. 이전 면접 이력이 없을 때와 동일하게 동작하므로, 별도 분기 없이 자연스럽게 "커버리지 기반 선택만" 동작한다.
 
 ## 개발용 스크립트
 
