@@ -11,6 +11,8 @@ from interview.strategy import difficulty, question_gen  # noqa: F401 (TODO 담�
 from interview.strategy.graph import QuestionGenState, get_compiled_graph
 from interview.strategy.state import StrategyState
 
+from interview.strategy.personalization import get_weak_topics # stub
+
 
 class StrategyAgent:
     """면접 질문의 방향·순서·난이도를 결정하는 전략 담당 에이전트.
@@ -65,6 +67,7 @@ class StrategyAgent:
             strategy_state=self.state,
             difficulty=diff,
             user_id=self.user_id,
+            weak_history_topics=get_weak_topics(self.user_id),
         )
         result_state = self._graph.invoke(initial_state)
         question = result_state["result"]
