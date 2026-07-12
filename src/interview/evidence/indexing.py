@@ -16,15 +16,15 @@ from interview.schemas.evidence import CoverageMap
 
 
 def build_index(
-    notion_link: str,
+    notion_links: list[str],
     github_links: list[str],
     user_id: int | str | None = None,
 ) -> CoverageMap:
     """면접용 지식 베이스를 구축하고 커버리지 맵을 반환한다.
 
     Args:
-        notion_link: 사용자가 등록한 Notion 루트 링크.
-        github_links: GitHub 프로젝트 링크 (최대 3개).
+        notion_links: 사용자가 등록한 Notion 학습 기록 링크 목록.
+        github_links: 사용자가 등록한 GitHub 프로젝트 링크 목록.
         user_id: Evidence store에서 사용자별 청크를 분리하기 위한 사용자 ID.
             기존 호출처럼 None이면 store의 기본 namespace에 저장한다.
 
@@ -32,7 +32,7 @@ def build_index(
         주제별 커버리지 맵 (Strategy 가 약한 주제 파악에 사용).
     """
     raw_docs = []
-    raw_docs += NotionSource().fetch_pages(notion_link)
+    raw_docs += NotionSource().fetch_pages(notion_links)
     raw_docs += GitHubSource().fetch_repos(github_links)
 
     all_chunks = []

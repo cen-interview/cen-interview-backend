@@ -140,6 +140,11 @@ class SessionState(BaseModel):
         last_utterance:
             면접관이 마지막으로 생성한 발화 문장.
 
+        utterance_queue:
+            화면 표시나 TTS가 순서대로 처리할 면접관 발화 목록. 현재는 완성된
+            발화 하나를 담고, 이후 reaction과 question을 분리하면 두 문장을
+            재생 순서대로 담는다.
+
         turn_type:
             현재 턴의 성격.
             예: question, hint, represent, feedback 등.
@@ -155,6 +160,13 @@ class SessionState(BaseModel):
 
         challenge_used_in_set:
             현재 메인 질문 세트에서 challenge 질문을 이미 사용했는지 여부.
+
+        derived_turn_count:
+            현재 메인 질문 세트에서 생성한 파생 질문 수.
+
+        max_derived_turns_per_set:
+            하나의 메인 질문 세트에서 허용하는 최대 파생 질문 수.
+            반복적인 꼬리 질문으로 면접이 끝나지 않는 상황을 방지한다.
 
         error:
             세션 처리 중 발생한 오류 메시지.
@@ -181,6 +193,8 @@ class SessionState(BaseModel):
     main_question_id: str | None = None
     main_topic: str | None = None
     challenge_used_in_set: bool = False
+    derived_turn_count: int = 0
+    max_derived_turns_per_set: int = 2
 
     # 대화 기록 및 입력 이벤트
     transcript: list[Turn] = Field(default_factory=list)
@@ -194,6 +208,7 @@ class SessionState(BaseModel):
 
     # 마지막 출력 및 턴 상태
     last_utterance: str = ""
+    utterance_queue: list[str] = Field(default_factory=list)
     turn_type: str = "question"
 
     # 침묵/타임아웃 처리 정책

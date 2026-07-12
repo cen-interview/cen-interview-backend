@@ -15,6 +15,7 @@ from interview.schemas.report import (
     AnswerEvaluation,
     CompetencyModel,
     FinalReport,
+    QualityTrace,
 )
 from interview.schemas.signals import AnswerQualitySignal
 from interview.assessment.graph import AssessmentState, get_compiled_graph
@@ -169,6 +170,7 @@ class AssessmentAgent:
             score=score.score,
             comment=score.comment,
             delivery_note=self._build_delivery_note(),
+            quality_trace=self._build_quality_trace(),
         )
 
         self.evaluations.append(evaluation)
@@ -206,6 +208,17 @@ class AssessmentAgent:
 
         # 기존 데이터와의 임시 호환을 위해 첫 답변을 사용한다.
         return self.current_attempts[0]
+    
+    def _build_quality_trace(self) -> list[QualityTrace]:
+        return [
+            QualityTrace(
+                question_kind=attempt.question_kind.value,
+                quality=attempt.signal.quality.value,
+                target=attempt.signal.next_probe_target,
+                rationale=attempt.signal.rationale,
+            )
+            for attempt in self.current_attempts
+        ]
     
     def _build_delivery_note(self) -> str | None:
         notes = [
