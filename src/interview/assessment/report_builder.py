@@ -160,12 +160,41 @@ def _build_content_with_llm(
     except Exception:
         return _temporary_report_content(evaluations)
 
+def _select_topics_to_improve(
+    competency: CompetencyModel,
+    evaluations: list[AnswerEvaluation],
+) -> list[str]:
+    misconception_topics = []
+    low_score_topics = []
+
+    for evaluation in evaluations:
+        if any(
+            trace.quality == "misconception"
+            for trace in evaluation.quality_trace
+        ):
+            misconception_topics.append(evaluation.topic)
+
+    for topic, score in sorted(
+        competency.topic_scores.items(),
+        key=lambda item: item[1],
+    ):
+        low_score_topics.append(topic)
+
+    return _collect_unique_items(
+        misconception_topics + low_score_topics
+    )
+    
 
 def _build_report_user_prompt(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
     overall_score: float,
 ) -> str:
+    topics_to_improve = _select_topics_to_improve(
+        competency=competency,
+        evaluations=evaluations,
+    )
+    
     evaluation_lines = []
 
     for index, evaluation in enumerate(evaluations, start=1):
@@ -190,6 +219,7 @@ def _build_report_user_prompt(
 
     return (
         f"overall_score: {overall_score}\n"
+        f"topics_to_improve: {topics_to_improve}\n"
         f"competency.average_score: {competency.average_score}\n"
         f"competency.topic_scores: {competency.topic_scores}\n"
         f"competency.strengths: {competency.strengths}\n"
