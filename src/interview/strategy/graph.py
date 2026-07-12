@@ -30,8 +30,6 @@ from interview.strategy.prompts import QUESTION_GEN_SYSTEM
 from interview.strategy.question_gen import GeneratedQuestion
 from interview.strategy.state import StrategyState
 
-from interview.strategy.personalization import get_weak_topics # stub
-
 # 주제 선택 시 confidence 상위 몇 개를 후보 풀로 삼을지 (agent.py에서 그대로 가져옴)
 _TOP_N_POOL = 3
 
@@ -168,22 +166,17 @@ def pick_topic(state: QuestionGenState) -> dict:
         filtered = [t for t in pool if t != last_topic[0]]
         pool = filtered or pool
 
-    is_early = state.strategy_state.question_count < _EARLY_QUESTION_THRESHOLD
-    if is_early:
-        weak_pool = [t for t in pool if t in state.weak_history_topics]
-        if weak_pool:
-            pool = weak_pool
+    if len(pool) > _TOP_N_POOL:
+        pool_sorted = sorted(
+            pool,
+            key=lambda t: state.coverage.topic_coverage.get(
+                t, TopicCoverage(confidence=0, chunk_count=0)
+            ).confidence,
+            reverse=True,
+        )
+        pool = pool_sorted[:_TOP_N_POOL]
 
-    pool_sorted = sorted(
-        pool,
-        key=lambda t: state.coverage.topic_coverage.get(
-            t, TopicCoverage(confidence=0, chunk_count=0)
-        ).confidence,
-        reverse=True,
-    )
-    top_pool = pool_sorted[:_TOP_N_POOL]
-
-    updates["topic"] = random.choice(top_pool)
+    updates["topic"] = random.choice(pool)
     return updates
 
 def retrieve_evidence(state: QuestionGenState) -> dict:
