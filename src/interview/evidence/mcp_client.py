@@ -1,5 +1,7 @@
 import anyio
 import httpx
+import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -11,7 +13,7 @@ from interview.config import settings
 
 
 class EvidenceMcpClient:
-    """Evidence 수집 단계에서 Notion/GitHub MCP tool call을 실행하는 얇은 래퍼.
+    """Evidence 수집 과정에서 Notion/GitHub MCP tool call을 실행하는 얇은 래퍼.
 
     이 클래스는 MCP 연결과 tool 호출만 담당한다. 응답을 RawDoc으로 바꾸는 일은
     sources.py의 NotionSource/GitHubSource가 담당한다.
@@ -20,6 +22,8 @@ class EvidenceMcpClient:
           self,
           notion_mcp_url: str | None = None,
           notion_access_token: str | None = None,
+          github_mcp_url: str | None = None,
+          github_access_token: str | None = None,
           timeout_seconds: float = 30.0,
       ) -> None:
           """MCP 호출에 필요한 endpoint와 인증 정보를 초기화한다.
@@ -29,11 +33,21 @@ class EvidenceMcpClient:
                   None이면 settings.notion_mcp_url을 사용한다.
               notion_access_token: Notion OAuth access token.
                   None이면 settings.notion_mcp_access_token을 사용한다.
-                  실제 서비스에서는 사용자별 token을 주입하는 방식으로 전환한다.
+                  서비스 요청에서는 저장된 사용자별 MCP token을 호출부에서 주입한다.
+              github_mcp_url: GitHub MCP Streamable HTTP endpoint.
+                  None이면 settings.github_mcp_url을 사용한다.
+              github_access_token: GitHub MCP access token.
+                  None이면 settings.github_mcp_access_token 또는 settings.github_token을 사용한다.
               timeout_seconds: MCP 연결과 tool call에 사용할 timeout 초 단위 값.
           """
           self.notion_mcp_url = notion_mcp_url or settings.notion_mcp_url
           self.notion_access_token = notion_access_token or settings.notion_mcp_access_token
+          self.github_mcp_url = github_mcp_url or settings.github_mcp_url
+          self.github_access_token = (
+              github_access_token
+              or settings.github_mcp_access_token
+              or settings.github_token
+          )
           self.timeout_seconds = timeout_seconds
 
     def list_notion_tools(self) -> list[dict]:
@@ -70,7 +84,7 @@ class EvidenceMcpClient:
         if not self.notion_access_token:
             raise ValueError("Notion MCP 토큰이 필요합니다.")
 
-        tool_arguments = arguments or {"url": root_link}
+        tool_arguments = arguments or {"id": root_link}
         return anyio.run(self._call_notion_tool_async, tool_name, tool_arguments)
 
     @asynccontextmanager
@@ -110,12 +124,429 @@ class EvidenceMcpClient:
             result = await session.call_tool(tool_name, arguments=arguments)
             return result.model_dump(mode="json")
 
-    def call_github_tool(self, repo_link: str) -> dict:
-        """GitHub MCP tool을 호출하고 원본 응답을 반환한다.
+    def list_github_tools(self) -> list[dict]:
+        """GitHub MCP 서버가 제공하는 tool 목록과 입력 schema를 조회한다."""
+        if not self.github_mcp_url:
+            raise ValueError("GitHub MCP URL이 필요합니다.")
+        if not self.github_access_token:
+            raise ValueError("GitHub MCP 토큰이 필요합니다.")
 
-        TODO(담당 A):
-            - MCP client/session 연결
-            - repo contents/tree 조회 tool 호출
-            - timeout/retry/error 처리
+        return anyio.run(self._list_github_tools_async)
+
+    def call_github_tool(
+        self,
+        repo_link: str,
+        owner: str | None = None,
+        repo: str | None = None,
+        github_login: str | None = None,
+    ) -> dict:
+        """GitHub MCP로 repository metadata, README, tree, commit 원본 응답을 모은다.
+
+        공식 GitHub MCP에는 get_repository tool이 없으므로 repository
+        metadata는 search_repositories로 조회한다. github_login이 있으면
+        해당 사용자의 commit 목록도 함께 조회해 코드 RawDoc 메타에 반영한다.
         """
-        raise NotImplementedError
+        if not self.github_mcp_url:
+            raise ValueError("GitHub MCP URL이 필요합니다.")
+        if not self.github_access_token:
+            raise ValueError("GitHub MCP 토큰이 필요합니다.")
+        if owner is None or repo is None:
+            raise ValueError("GitHub owner/repo가 필요합니다.")
+
+        return anyio.run(self._call_github_repo_async, repo_link, owner, repo, github_login)
+
+    @asynccontextmanager
+    async def _github_session(self) -> AsyncIterator[ClientSession]:
+        """GitHub MCP Streamable HTTP session을 열고 초기화한다."""
+        headers = {"Authorization": f"Bearer {self.github_access_token}"}
+        async with httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(self.timeout_seconds),
+        ) as http_client:
+            async with streamable_http_client(
+                self.github_mcp_url,
+                http_client=http_client,
+            ) as (read_stream, write_stream, _):
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(seconds=self.timeout_seconds),
+                ) as session:
+                    await session.initialize()
+                    yield session
+
+    async def _list_github_tools_async(self) -> list[dict]:
+        """초기화된 GitHub MCP session으로 tool 목록을 비동기 조회한다."""
+        async with self._github_session() as session:
+            tools = await session.list_tools()
+            return [tool.model_dump(mode="json") for tool in tools.tools]
+
+    async def _call_github_tool_async(self, tool_name: str, arguments: dict) -> dict:
+        """초기화된 GitHub MCP session으로 지정 tool을 비동기 호출한다."""
+        async with self._github_session() as session:
+            result = await session.call_tool(tool_name, arguments=arguments)
+            return result.model_dump(mode="json")
+
+    async def _call_github_repo_async(
+        self,
+        repo_link: str,
+        owner: str,
+        repo: str,
+        github_login: str | None,
+    ) -> dict:
+        """GitHub repository, README, tree, commit MCP 응답을 한 번에 모은다."""
+        async with self._github_session() as session:
+            repository = await self._safe_call_github_tool(
+                session,
+                settings.github_mcp_repository_tool,
+                {"query": f"repo:{owner}/{repo}", "perPage": 1},
+            )
+            readme = await self._safe_call_github_tool(
+                session,
+                settings.github_mcp_contents_tool,
+                {"owner": owner, "repo": repo, "path": "README.md"},
+            )
+            tree = await self._fetch_github_directory_tree(
+                session,
+                owner,
+                repo,
+            )
+            commit_arguments = {
+                "owner": owner,
+                "repo": repo,
+                "perPage": 30,
+            }
+            if github_login:
+                commit_arguments["author"] = github_login
+
+            commits = await self._safe_call_github_tool(
+                session,
+                settings.github_mcp_commits_tool,
+                commit_arguments,
+            )
+            commit_details = await self._fetch_github_commit_details(
+                session,
+                owner,
+                repo,
+                commits,
+            )
+
+        return {
+            "repo_url": repo_link,
+            "owner": owner,
+            "repo": repo,
+            "repository": repository,
+            "readme": readme,
+            "tree": tree,
+            "commits": commits,
+            "commit_details": commit_details,
+        }
+
+    def fetch_github_file_contents(self, owner: str, repo: str, paths: list[str]) -> dict[str, dict]:
+        """GitHub MCP로 지정 파일들의 원본 contents 응답을 가져온다."""
+        if not self.github_mcp_url:
+            raise ValueError("GitHub MCP URL이 필요합니다.")
+        if not self.github_access_token:
+            raise ValueError("GitHub MCP 토큰이 필요합니다.")
+
+        return anyio.run(self._fetch_github_file_contents_async, owner, repo, paths)
+
+    async def _fetch_github_file_contents_async(
+        self,
+        owner: str,
+        repo: str,
+        paths: list[str],
+    ) -> dict[str, dict]:
+        """초기화된 GitHub MCP session으로 지정 파일 내용을 비동기 조회한다."""
+        async with self._github_session() as session:
+            results: dict[str, dict] = {}
+            for path in paths:
+                results[path] = await self._safe_call_github_tool(
+                    session,
+                    settings.github_mcp_contents_tool,
+                    {"owner": owner, "repo": repo, "path": path},
+                )
+            return results
+
+    async def _fetch_github_commit_details(
+        self,
+        session: ClientSession,
+        owner: str,
+        repo: str,
+        commits: dict,
+    ) -> list[dict]:
+        """list_commits 응답의 sha들을 get_commit detail 응답 목록으로 확장한다."""
+        commit_shas = _extract_github_commit_shas(commits)
+        details: list[dict] = []
+        for sha in commit_shas:
+            details.append(
+                await self._safe_call_github_tool(
+                    session,
+                    settings.github_mcp_commit_tool,
+                    {
+                        "owner": owner,
+                        "repo": repo,
+                        "sha": sha,
+                        "detail": "stats",
+                    },
+                )
+            )
+        return details
+
+    async def _fetch_github_directory_tree(
+        self,
+        session: ClientSession,
+        owner: str,
+        repo: str,
+        max_dirs: int = 30,
+        max_depth: int = 4,
+    ) -> dict:
+        """get_file_contents directory 응답을 제한적으로 재귀 조회해 tree 텍스트를 만든다."""
+        root = await self._safe_call_github_tool(
+            session,
+            settings.github_mcp_contents_tool,
+            {"owner": owner, "repo": repo, "path": "/"},
+        )
+        directory_responses: dict[str, dict] = {}
+        queue = _extract_github_directory_paths(root, parent_path="")
+        visited: set[str] = set()
+
+        while queue and len(visited) < max_dirs:
+            path = queue.pop(0)
+            if path in visited or path.count("/") >= max_depth:
+                continue
+
+            visited.add(path)
+            response = await self._safe_call_github_tool(
+                session,
+                settings.github_mcp_contents_tool,
+                {"owner": owner, "repo": repo, "path": path},
+            )
+            directory_responses[path] = response
+
+            for child_path in _extract_github_directory_paths(response, parent_path=path):
+                if child_path not in visited and child_path not in queue:
+                    queue.append(child_path)
+
+        return _combine_github_tree_response(root, directory_responses)
+
+    async def _safe_call_github_tool(
+        self,
+        session: ClientSession,
+        tool_name: str,
+        arguments: dict,
+    ) -> dict:
+        """GitHub MCP tool 1건을 호출하고 실패를 isError 응답으로 정규화한다."""
+        try:
+            result = await session.call_tool(tool_name, arguments=arguments)
+        except Exception as exc:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": str(exc)}],
+            }
+        return result.model_dump(mode="json")
+
+
+def _extract_github_commit_shas(commits: dict) -> list[str]:
+    """GitHub MCP list_commits 응답에서 commit sha 목록을 추출한다."""
+    if commits.get("isError"):
+        return []
+
+    candidates: list[object] = []
+    structured = commits.get("structuredContent")
+    if isinstance(structured, dict):
+        candidates.extend(_walk_github_values(structured))
+
+    for item in commits.get("content", []):
+        if isinstance(item, dict):
+            text = item.get("text")
+            if isinstance(text, str):
+                candidates.append(text)
+
+    shas: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        for sha in _extract_sha_strings(candidate):
+            if sha not in seen:
+                seen.add(sha)
+                shas.append(sha)
+    return shas[:30]
+
+
+def _walk_github_values(value: object) -> list[object]:
+    """중첩 dict/list에서 leaf 값을 순회한다."""
+    if isinstance(value, dict):
+        values: list[object] = []
+        for child in value.values():
+            values.extend(_walk_github_values(child))
+        return values
+    if isinstance(value, list):
+        values = []
+        for child in value:
+            values.extend(_walk_github_values(child))
+        return values
+    return [value]
+
+
+def _extract_sha_strings(value: object) -> list[str]:
+    """문자열 또는 dict leaf에서 SHA 후보를 추출한다."""
+    if not isinstance(value, str):
+        return []
+
+    return re.findall(r"\b[0-9a-f]{40}\b", value, re.IGNORECASE)
+
+
+def _combine_github_tree_response(root: dict, directory_responses: dict[str, dict]) -> dict:
+    """루트와 하위 디렉터리 응답을 하나의 MCP text 응답 형태로 합친다."""
+    parts = [_extract_github_response_text(root)]
+    for path, response in directory_responses.items():
+        text = _extract_github_response_text(response)
+        if text:
+            parts.append(f"\n# {path}\n{text}")
+
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": "\n".join(part for part in parts if part),
+            }
+        ],
+        "root": root,
+        "directories": directory_responses,
+    }
+
+
+def _extract_github_response_text(response: object) -> str:
+    """GitHub MCP 응답을 directory/path 추출용 텍스트로 직렬화한다."""
+    if not isinstance(response, dict):
+        return json.dumps(response, ensure_ascii=False)
+    if response.get("isError"):
+        return ""
+
+    texts: list[str] = []
+    for item in response.get("content", []):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+    if texts:
+        return "\n".join(texts)
+
+    structured = response.get("structuredContent")
+    if structured is not None:
+        return json.dumps(structured, ensure_ascii=False)
+
+    return json.dumps(response, ensure_ascii=False)
+
+
+def _extract_github_directory_paths(response: object, parent_path: str) -> list[str]:
+    """GitHub MCP directory 응답에서 하위 directory path 후보를 추출한다."""
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    if isinstance(response, dict):
+        structured = response.get("structuredContent")
+        if structured is not None:
+            for path in _extract_directory_paths_from_node(structured, parent_path):
+                if _is_allowed_github_directory(path) and path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+
+    text = _extract_github_response_text(response)
+    for path in _extract_directory_paths_from_text(text, parent_path):
+        if _is_allowed_github_directory(path) and path not in seen:
+            seen.add(path)
+            paths.append(path)
+
+    return paths
+
+
+def _extract_directory_paths_from_node(value: object, parent_path: str) -> list[str]:
+    """structuredContent의 dict/list에서 directory path를 찾는다."""
+    if isinstance(value, list):
+        paths: list[str] = []
+        for item in value:
+            paths.extend(_extract_directory_paths_from_node(item, parent_path))
+        return paths
+
+    if not isinstance(value, dict):
+        return []
+
+    paths = []
+    item_type = str(value.get("type") or "").lower()
+    path_value = value.get("path")
+    name_value = value.get("name")
+    if item_type in {"dir", "directory", "tree"}:
+        if isinstance(path_value, str) and path_value:
+            paths.append(path_value.strip("/"))
+        elif isinstance(name_value, str) and name_value:
+            paths.append(_join_github_path(parent_path, name_value))
+
+    for child in value.values():
+        paths.extend(_extract_directory_paths_from_node(child, parent_path))
+    return paths
+
+
+def _extract_directory_paths_from_text(text: str, parent_path: str) -> list[str]:
+    """MCP text 응답에서 directory로 보이는 path 후보를 찾는다."""
+    paths: list[str] = []
+
+    for match in re.finditer(
+        r'"path"\s*:\s*"([^"]+)"[^{}]{0,160}"type"\s*:\s*"(?:dir|directory|tree)"',
+        text,
+        re.IGNORECASE,
+    ):
+        paths.append(match.group(1).strip("/"))
+    for match in re.finditer(
+        r'"type"\s*:\s*"(?:dir|directory|tree)"[^{}]{0,160}"path"\s*:\s*"([^"]+)"',
+        text,
+        re.IGNORECASE,
+    ):
+        paths.append(match.group(1).strip("/"))
+
+    for line in text.splitlines():
+        stripped = line.strip().strip("-* ")
+        if not stripped:
+            continue
+        if re.search(r"\.[A-Za-z0-9]+$", stripped):
+            continue
+        if re.search(r"\b(dir|directory|folder)\b", stripped, re.IGNORECASE):
+            candidate = stripped.split()[-1].strip("/\"'")
+            paths.append(_join_github_path(parent_path, candidate))
+        elif stripped.endswith("/"):
+            paths.append(_join_github_path(parent_path, stripped.strip("/")))
+
+    return paths
+
+
+def _join_github_path(parent_path: str, child_path: str) -> str:
+    """GitHub repository 내부 path를 slash 기준으로 합친다."""
+    child_path = child_path.strip("/")
+    if not parent_path:
+        return child_path
+    if child_path.startswith(f"{parent_path}/"):
+        return child_path
+    return f"{parent_path.strip('/')}/{child_path}"
+
+
+def _is_allowed_github_directory(path: str) -> bool:
+    """재귀 조회 대상 directory인지 판단한다."""
+    if not path or path.startswith(("http://", "https://", "github.com")):
+        return False
+    parts = {part.lower() for part in path.split("/")}
+    excluded = {
+        ".git",
+        ".github",
+        ".idea",
+        ".vscode",
+        "__pycache__",
+        "build",
+        "dist",
+        "generated",
+        "node_modules",
+        "target",
+        "test",
+        "tests",
+    }
+    return not bool(parts & excluded)
