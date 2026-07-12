@@ -30,9 +30,14 @@ class StrategyAgent:
             [임시] stub 질문 텍스트 매핑. 제거 예정.
     """
 
-    def __init__(self, coverage: CoverageMap | None=None) -> None:
+    def __init__(
+        self,
+        coverage: CoverageMap | None=None,
+        user_id: str | None=None,
+    ) -> None:
         self.state = StrategyState()
         self.coverage = coverage or CoverageMap()
+        self.user_id = user_id
         self._graph = get_compiled_graph()
 
     def next_question(self, last_signal: AnswerQualitySignal | None) -> Question:
@@ -59,6 +64,7 @@ class StrategyAgent:
             coverage=self.coverage,
             strategy_state=self.state,
             difficulty=diff,
+            user_id=self.user_id,
         )
         result_state = self._graph.invoke(initial_state)
         question = result_state["result"]
@@ -93,7 +99,7 @@ class StrategyAgent:
             더 정확히 문제 지점을 겨냥한 질문을 만든다.
         """
 
-        question = question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt, rationale)
+        question = question_gen.generate_follow_up(topic, parent_question_id, target, answer_excerpt, rationale, self.user_id)
         self._record(question)
         return question
     
@@ -118,7 +124,7 @@ class StrategyAgent:
             (AnswerQualitySignal.rationale). 제공되면 프롬프트에 반영해
             더 정확히 문제 지점을 겨냥한 질문을 만든다.
         """
-        question = question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt, rationale)
+        question = question_gen.generate_challenge(topic, parent_question_id, target, answer_excerpt, rationale, self.user_id)
         self._record(question)
         return question
 
@@ -131,7 +137,7 @@ class StrategyAgent:
             rationale: list[str] | None = None,
             ) -> Question:
         """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
-        question = question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt, rationale)
+        question = question_gen.generate_confirm_positive(topic, parent_question_id, target, answer_excerpt, rationale, self.user_id)
         self._record(question)
         return question
 
@@ -144,7 +150,7 @@ class StrategyAgent:
         rationale: list[str] | None = None,
         ) -> Question:
         """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
-        question = question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt, rationale)
+        question = question_gen.generate_confirm_negative(topic, parent_question_id, target, answer_excerpt, rationale, self.user_id)
         self._record(question)
         return question
     
@@ -157,7 +163,7 @@ class StrategyAgent:
         rationale: list[str] | None = None,
         ) -> Question:
         """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
-        question = question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt, rationale)
+        question = question_gen.generate_trap(topic, parent_question_id, target, answer_excerpt, rationale, self.user_id)
         self._record(question)
         return question
 
@@ -180,7 +186,7 @@ class StrategyAgent:
         Returns:
             kind=HINT인 Question. parent_question_id는 원래 question의 ID.
         """
-        return question_gen.generate_hint(question, target, answer_excerpt)
+        return question_gen.generate_hint(question, target, answer_excerpt, self.user_id)
 
     def _record(self, question: Question) -> None:
         """질문 생성 후 state를 한 곳에서 갱신한다 (hint 제외 모든 next_*가 호출)."""

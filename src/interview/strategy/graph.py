@@ -56,6 +56,10 @@ class QuestionGenState(BaseModel):
 
         difficulty:
             생성할 질문의 목표 난이도. 그래프 진입 시 확정되어 있다.
+        
+        user_id:
+            면접 응시자 식별자. 아직 API 계층에서 실제 값이
+            흘러들어오지 않아 현재는 None으로 동작.
 
         topic:
             현재 시도 중인 주제. pick_topic 노드에서 채워진다.
@@ -95,6 +99,7 @@ class QuestionGenState(BaseModel):
     coverage: CoverageMap = Field(default_factory=CoverageMap)
     strategy_state: StrategyState = Field(default_factory=StrategyState)
     difficulty: Difficulty = Difficulty.EASY
+    user_id: str | None = None
 
     topic: str | None = None
     tried_topics: list[str] = Field(default_factory=list)
@@ -167,7 +172,7 @@ def pick_topic(state: QuestionGenState) -> dict:
 
 def retrieve_evidence(state: QuestionGenState) -> dict:
     """현재 topic으로 근거를 검색한다."""
-    chunks = search_evidence(query=state.topic, topic=state.topic, k=5)
+    chunks = search_evidence(query=state.topic, topic=state.topic, k=5, user_id=state.user_id)
     reliable = [c for c in chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
     return {"evidence_chunks": reliable}
 

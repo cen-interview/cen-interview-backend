@@ -63,10 +63,11 @@ def _generate_derived_question(
     target: str | None,
     answer_excerpt: str | None,
     rationale: list[str] | None = None,
+    user_id: str | None = None,
 ) -> Question:
     """파생 질문(follow_up/challenge/confirm_positive/confirm_negative/trap) 공통 생성 로직."""
     probe = target or "답변에서 더 확인이 필요한 부분"
-    evidence_chunks = search_evidence(query=probe, topic=topic, k=5)
+    evidence_chunks = search_evidence(query=probe, topic=topic, k=5, user_id=user_id)
     reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
 
     context = (
@@ -128,7 +129,9 @@ def _generate_derived_question(
 def generate_question(
     topic: str,
     difficulty: Difficulty,
-    asked_question_texts: list[str] | None = None,) -> Question:
+    asked_question_texts: list[str] | None = None,
+    user_id: str | None = None,
+) -> Question:
     """주제 + 난이도로 일반 질문 생성.
 
     근거를 조회해 QUESTION_GEN_SYSTEM 프롬프트와 함께 LLM에 전달하고,
@@ -139,6 +142,8 @@ def generate_question(
         difficulty: 질문 난이도.
         asked_question_texts: 이미 출제된 질문 문장들 (중복 방지용).
             LLM에게 "이런 질문은 이미 했으니 겹치지 않게 하라"고 전달한다.
+        user_id: 사용자 id. 현재는 None 가능.
+
 
     Returns:
         kind=MAIN인 Question. evidence_ids에 실제 조회된 근거 chunk_id가 담긴다.
@@ -147,7 +152,7 @@ def generate_question(
       - prompts.QUESTION_GEN_SYSTEM + 근거로 LLM 호출
       - linked_evidence 에 사용한 chunk_id 기록
     """
-    evidence_chunks = search_evidence(query=topic, topic=topic)
+    evidence_chunks = search_evidence(query=topic, topic=topic, user_id=user_id)
 
     reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
 
@@ -205,10 +210,11 @@ def generate_follow_up(
         target: str | None = None,
         answer_excerpt: str | None = None,
         rationale: list[str] | None = None,
+        user_id: str | None = None,
     ) -> Question:
     """추가 확인 가능한 요소에 대한 꼬리 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.FOLLOW_UP, topic, parent_question_id, target, answer_excerpt, rationale
+        QuestionKind.FOLLOW_UP, topic, parent_question_id, target, answer_excerpt, rationale, user_id
     )
 
 
@@ -218,10 +224,11 @@ def generate_challenge(
         target: str | None = None,
         answer_excerpt: str | None = None,
         rationale: list[str] | None = None,
+        user_id: str | None = None,
     )-> Question:
     """오개념이나 논리적 허점을 검증하는 압박 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.CHALLENGE, topic, parent_question_id, target, answer_excerpt, rationale
+        QuestionKind.CHALLENGE, topic, parent_question_id, target, answer_excerpt, rationale, user_id
     )
 
 
@@ -231,11 +238,12 @@ def generate_confirm_positive(
         target: str | None = None,
         answer_excerpt: str | None = None,
         rationale: list[str] | None = None,
+        user_id: str | None = None,
 
     ) -> Question:
     """답변이 대체로 맞지만 범위나 사실관계를 확인하는 긍정 확인 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.CONFIRM_POSITIVE, topic, parent_question_id, target, answer_excerpt, rationale
+        QuestionKind.CONFIRM_POSITIVE, topic, parent_question_id, target, answer_excerpt, rationale, user_id
     )
 
 def generate_confirm_negative(
@@ -244,10 +252,11 @@ def generate_confirm_negative(
         target: str | None = None,
         answer_excerpt: str | None = None,
         rationale: list[str] | None = None,
+        user_id: str | None = None,
     ) -> Question:
     """Evidence 또는 이전 답변과 충돌하는 내용을 확인하는 부정 확인 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.CONFIRM_NEGATIVE, topic, parent_question_id, target, answer_excerpt, rationale
+        QuestionKind.CONFIRM_NEGATIVE, topic, parent_question_id, target, answer_excerpt, rationale, user_id
     )
 
 
@@ -257,16 +266,18 @@ def generate_trap(
     target: str | None = None,
     answer_excerpt: str | None = None,
     rationale: list[str] | None = None,
+    user_id: str | None = None,
     ) -> Question:
     """헷갈리기 쉬운 개념 구분을 확인하는 함정 질문 생성."""
     return _generate_derived_question(
-        QuestionKind.TRAP, topic, parent_question_id, target, answer_excerpt, rationale
+        QuestionKind.TRAP, topic, parent_question_id, target, answer_excerpt, rationale, user_id
     )
 
 def generate_hint(
     question: Question,
     target: str | None = None,
-    answer_excerpt: str | None = None
+    answer_excerpt: str | None = None,
+    user_id: str | None = None,
     ) -> Question:
     """침묵 등으로 사용자가 답변을 못 할 때 호출하는 힌트 생성.
 
@@ -282,7 +293,7 @@ def generate_hint(
     """
 
     probe = target or "질문의 핵심 개념"
-    evidence_chunks = search_evidence(query=probe, topic=question.topic)
+    evidence_chunks = search_evidence(query=probe, topic=question.topic, k=5, user_id=user_id)
     reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
 
     context = (
