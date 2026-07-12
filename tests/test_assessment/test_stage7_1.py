@@ -197,6 +197,7 @@ def test_stage7_1_real_llm_from_questions_and_answers_only(monkeypatch):
         user_prompt,
         "topics_to_improve:",
     )
+    
 
     _print_section("7-3 개선 우선순위")
     print(topics_to_improve_line)

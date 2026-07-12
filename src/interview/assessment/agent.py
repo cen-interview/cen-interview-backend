@@ -175,8 +175,25 @@ class AssessmentAgent:
 
         self.evaluations.append(evaluation)
         self.competency.topic_scores[main_attempt.question_topic] = score.score
-
+        self._update_competency_model()
+        
         self.current_attempts.clear()
+        
+    def _update_competency_model(self) -> None:
+        """누적 문항 평가를 바탕으로 역량 모델의 평균 점수를 갱신한다."""
+
+        if not self.evaluations:
+            self.competency.average_score = 0
+            return
+
+        self.competency.average_score = round(
+            sum(
+                evaluation.score
+                for evaluation in self.evaluations
+            )
+            / len(self.evaluations),
+            0,
+        )
 
     def _find_main_attempt(
         self,
