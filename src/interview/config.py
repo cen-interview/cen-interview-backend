@@ -27,6 +27,16 @@ class Settings(BaseSettings):
 
     # github
     github_token: str = ""
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_redirect_uri: str = "http://localhost:8000/api/auth/github/callback"
+    github_oauth_scope: str = "read:user repo"
+    github_mcp_url: str = ""
+    github_mcp_access_token: str = ""
+    github_mcp_repository_tool: str = "search_repositories"
+    github_mcp_contents_tool: str = "get_file_contents"
+    github_mcp_commits_tool: str = "list_commits"
+    github_mcp_commit_tool: str = "get_commit"
 
     # Vector DB (Postgres + pgvector)
     database_url: str = "postgresql://postgres:postgres@localhost:5432/interview"

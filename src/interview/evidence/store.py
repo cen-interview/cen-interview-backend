@@ -1,7 +1,8 @@
-"""evidence_store: 벡터 DB 래퍼.
+"""evidence_store: Evidence 청크 저장소 경계.
 
-청크를 임베딩해 적재하고, 쿼리로 유사 청크를 검색한다. Postgres + pgvector 를
-쓰되 이 파일 안에만 DB 의존성을 가둬서 나중에 교체하기 쉽게 한다.
+최종 목표는 청크를 임베딩해 Postgres + pgvector 에 적재하고, 쿼리로 유사
+청크를 검색하는 것이다. 현재 구현은 호출부 계약을 먼저 고정하기 위한
+user_id namespace별 인메모리 저장소다.
 
   - 적재(add_chunks): 인덱싱 파이프라인이 면접 전 1회 호출
   - 검색(query): Retrieval Tool(retrieval.py)이 런타임에 호출
@@ -15,7 +16,7 @@ DEFAULT_TOP_K = 5
 class EvidenceStore:
     """Evidence 청크 저장/검색을 담당하는 저장소 경계.
 
-    현재는 Postgres + pgvector 전환 전 POC 단계라 user_id namespace별
+    현재는 Postgres + pgvector 전환 전 임시 구현으로 user_id namespace별
     인메모리 저장소를 사용한다. 호출부는 이 클래스의 메서드 계약만 의존하게
     해서 실제 DB 구현으로 바뀌어도 Strategy/Assessment 영향을 줄인다.
     """
@@ -23,7 +24,7 @@ class EvidenceStore:
     DEFAULT_NAMESPACE = "default"
 
     def __init__(self, database_url: str | None = None) -> None:
-        """EvidenceStore를 초기화하고 POC용 인메모리 저장소를 준비한다.
+        """EvidenceStore를 초기화하고 현재 구현용 인메모리 저장소를 준비한다.
 
         Args:
             database_url: pgvector 저장소로 전환할 때 사용할 DB URL.
@@ -39,7 +40,7 @@ class EvidenceStore:
         self.embedding_dimensions = settings.embedding_dimensions
         self._conn = None
 
-        # [Stub 전용] 벡터 DB 대신 인메모리 리스트로 흉내낸다. -> 사용자별 chunk를 dict 형태로 저장하도록 수정
+        # 현재 구현: 벡터 DB 대신 사용자별 인메모리 리스트에 청크를 보관한다.
         self._chunks_by_user: dict[str, list[EvidenceChunk]] = {}
 
     def add_chunks(
@@ -47,7 +48,10 @@ class EvidenceStore:
         chunks: list[EvidenceChunk],
         user_id: int | str | None = None,
     ) -> None:
-        """청크를 임베딩해 저장. 메타데이터도 함께 저장해 검색 후 복원한다.
+        """청크를 저장한다.
+
+        현재 구현은 임베딩 없이 메모리에 보관한다. 실제 DB 구현에서는 여기서
+        chunk.text 임베딩을 만들고 메타데이터와 함께 upsert한다.
 
         Args:
             chunks: 저장할 EvidenceChunk 목록.
@@ -59,7 +63,7 @@ class EvidenceStore:
             - embedding_dimensions 와 DB vector 컬럼 차원 일치 검증
             - INSERT ... ON CONFLICT (chunk_id) DO UPDATE
         """
-        # [현재 Stub 작동] 임베딩 없이 그대로 적재 -> namespace 기반 chunks 적재할 수 있도록 수정
+        # 현재 구현: 임베딩 없이 namespace별 chunks 목록에 그대로 적재한다.
         namespace = self._namespace(user_id)
         self._chunks_by_user.setdefault(namespace, []).extend(chunks)
 
@@ -89,7 +93,7 @@ class EvidenceStore:
         namespace = self._namespace(user_id)
         chunks = self._chunks_by_user.get(namespace, [])
 
-        # [현재 Stub 작동] 유사도 검색 대신 topic 일치 필터 + 앞에서부터 k개
+        # 현재 구현: 유사도 검색 대신 topic 일치 필터 + 앞에서부터 k개 반환.
         if topic is not None:
             chunks = [chunk for chunk in chunks if chunk.topic == topic]
 
@@ -111,7 +115,7 @@ class EvidenceStore:
 
         namespace = self._namespace(user_id)
         chunks = self._chunks_by_user.get(namespace, [])
-        # [현재 Stub 작동] topic 별 confidence 단순 평균
+        # 현재 구현: topic 별 confidence 단순 평균.
         by_topic: dict[str, list[float]] = {}
         for c in chunks:
             by_topic.setdefault(c.topic, []).append(c.confidence)
@@ -139,8 +143,8 @@ def get_store() -> EvidenceStore:
     """런타임 공용 EvidenceStore 싱글톤을 반환한다.
 
     Retrieval Tool과 indexing 파이프라인이 같은 저장소 경계를 사용하도록 한다.
-    POC 단계에서는 프로세스 메모리에 유지되고, 실제 DB 구현 이후에도 호출부는
-    이 함수로 store 인스턴스를 얻는다.
+    현재는 프로세스 메모리에 유지되고, 실제 DB 구현 이후에도 호출부는 이
+    함수로 store 인스턴스를 얻는다.
     """
     global _store
     if _store is None:
