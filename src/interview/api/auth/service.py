@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from interview.config import settings
 from urllib.parse import urlencode
 
-from interview.api.auth.model import NotionCredential, RefreshToken
+from interview.api.auth.model import GitHubCredential, NotionCredential, RefreshToken
 from interview.api.auth.schema import LoginRequest, RefreshRequest, TokenResponse
 from interview.api.core.security import (
     create_access_token,
@@ -296,6 +296,136 @@ def exchange_notion_mcp_code(
           "workspace_name": credential.workspace_name,
           "bot_id": credential.bot_id,
       }
+
+
+def build_github_oauth_authorize_url(*, user: User) -> dict:
+    """현재 사용자를 GitHub OAuth 승인 화면으로 보내기 위한 URL을 만든다."""
+
+    if not settings.github_oauth_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="GitHub OAuth client_id가 설정되지 않았습니다.",
+        )
+
+    state = create_access_token(
+        {
+            "sub": user.email,
+            "user_id": user.id,
+            "purpose": "github_oauth",
+        }
+    )
+
+    query = urlencode(
+        {
+            "client_id": settings.github_oauth_client_id,
+            "redirect_uri": settings.github_oauth_redirect_uri,
+            "scope": settings.github_oauth_scope,
+            "state": state,
+        }
+    )
+
+    return {
+        "authorize_url": f"https://github.com/login/oauth/authorize?{query}",
+        "state": state,
+    }
+
+
+def exchange_github_oauth_code(
+    *,
+    db: Session,
+    user_id: int,
+    code: str,
+) -> dict:
+    """GitHub OAuth code를 access token으로 교환하고 사용자 credential로 저장한다."""
+
+    if not settings.github_oauth_client_id or not settings.github_oauth_client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="GitHub OAuth client 설정이 없습니다.",
+        )
+
+    token_response = httpx.post(
+        "https://github.com/login/oauth/access_token",
+        headers={
+            "Accept": "application/json",
+        },
+        data={
+            "client_id": settings.github_oauth_client_id,
+            "client_secret": settings.github_oauth_client_secret,
+            "code": code,
+            "redirect_uri": settings.github_oauth_redirect_uri,
+        },
+        timeout=10.0,
+    )
+
+    if token_response.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "GitHub OAuth token exchange에 실패했습니다.",
+                "github_response": token_response.json(),
+            },
+        )
+
+    token_data = token_response.json()
+    access_token = token_data.get("access_token")
+
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "GitHub OAuth token 응답에 access_token이 없습니다.",
+                "github_response": token_data,
+            },
+        )
+
+    user_response = httpx.get(
+        "https://api.github.com/user",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {access_token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=10.0,
+    )
+
+    if user_response.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "GitHub 사용자 정보 조회에 실패했습니다.",
+                "github_response": user_response.json(),
+            },
+        )
+
+    github_user = user_response.json()
+    credential = (
+        db.query(GitHubCredential)
+        .filter(GitHubCredential.user_id == user_id)
+        .first()
+    )
+
+    if credential is None:
+        credential = GitHubCredential(user_id=user_id)
+        db.add(credential)
+
+    credential.access_token = access_token
+    credential.token_type = token_data.get("token_type")
+    credential.scope = token_data.get("scope")
+    credential.github_user_id = str(github_user.get("id")) if github_user.get("id") else None
+    credential.github_login = github_user.get("login")
+
+    db.commit()
+    db.refresh(credential)
+
+    return {
+        "connected": True,
+        "credential_id": credential.id,
+        "user_id": credential.user_id,
+        "github_user_id": credential.github_user_id,
+        "github_login": credential.github_login,
+        "scope": credential.scope,
+    }
 
 
 def logout_user(db: Session, req: RefreshRequest) -> dict[str, str]:

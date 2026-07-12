@@ -75,3 +75,41 @@ class NotionCredential(Base):
     )
 
     user = relationship("User")
+
+
+class GitHubCredential(Base):
+    """사용자별 GitHub OAuth credential을 저장하는 테이블 모델."""
+
+    __tablename__ = "github_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    user_id: Mapped[int] = mapped_column(
+          Integer,
+          ForeignKey("users.id"),
+          nullable=False,
+          unique=True,
+          index=True,
+    )
+
+    access_token: Mapped[str] = mapped_column(String, nullable=False)
+    token_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    scope: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    github_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    github_login: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+          DateTime,
+          default=datetime.utcnow,
+          nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("User")
