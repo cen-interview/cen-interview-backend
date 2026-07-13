@@ -4,11 +4,12 @@
     uv run uvicorn interview.api.main:app --reload
 """
 
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel
@@ -21,11 +22,13 @@ from interview.api.users.model import User
 from interview.api.users.router import router as users_router
 from interview.interviewer.adapters import from_chat, from_voice
 from interview.interviewer.facade import (
+    InterviewSession,
     create_session as create_interview_session,
     get_session,
 )
 from interview.interviewer.session import SessionState
 from interview.schemas.events import Mode
+from interview.schemas.question import Question
 
 
 @asynccontextmanager
@@ -82,13 +85,35 @@ class StartRequest(BaseModel):
     mode: str
 
 
+SessionFactory = Callable[[Mode], tuple[InterviewSession, Question]]
+
+
+def get_interview_session_factory() -> SessionFactory:
+    """운영 환경에서 사용할 면접 세션 생성 함수를 반환한다.
+
+    FastAPI dependency로 분리했기 때문에 테스트에서는 이 함수만 override하여
+    실제 Strategy와 FakeAssessment가 담긴 세션 factory를 주입할 수 있다.
+
+    Returns:
+        실제 StrategyAgent와 AssessmentAgent를 사용하는 세션 생성 함수.
+    """
+    return create_interview_session
+
+
 @app.post("/api/sessions")
-def start_session(req: StartRequest):
+def start_session(
+    req: StartRequest,
+    session_factory: SessionFactory = Depends(get_interview_session_factory),
+):
     """면접 세션을 생성하고 compiled graph가 만든 첫 질문을 반환한다.
 
     Args:
         req:
             면접 시작 요청. mode는 ``chat`` 또는 ``voice``여야 한다.
+
+        session_factory:
+            세션을 생성할 함수. 운영에서는 실제 의존성을 사용하고 테스트에서는
+            FastAPI dependency override로 FakeAssessment를 주입할 수 있다.
 
     Returns:
         생성된 세션 ID와 첫 질문, 면접관 발화 큐, 종료 여부.
@@ -102,7 +127,7 @@ def start_session(req: StartRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail=f"unknown mode: {req.mode}")
 
-    session, _ = create_interview_session(mode=mode)
+    session, _ = session_factory(mode)
     return _session_response(session.get_state())
 
 
@@ -187,6 +212,9 @@ def _session_response(state: SessionState) -> dict:
             else None
         ),
         "utterance_queue": state.utterance_queue,
+        "last_utterance": state.last_utterance,
+        "transcript": [turn.model_dump(mode="json") for turn in state.transcript],
+        "turn_type": state.turn_type,
         "error": state.error,
         "report": state.report if state.finished else None,
     }

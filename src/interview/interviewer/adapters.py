@@ -66,6 +66,7 @@ def from_chat(
 
             지원하는 action:
                 - "submit": 답변 제출
+                - "replay": 현재 질문 다시 보기 요청
                 - "end": 면접 종료 요청
 
             예시:
@@ -99,6 +100,14 @@ def from_chat(
     if action == "end":
         event = EndRequested(
             session_id=session_id,
+        )
+
+        return AdaptedInput(event=event)
+
+    if action == "replay":
+        event = ReplayRequested(
+            session_id=session_id,
+            question_id=question_id,
         )
 
         return AdaptedInput(event=event)

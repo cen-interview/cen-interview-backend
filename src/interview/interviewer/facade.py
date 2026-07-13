@@ -343,6 +343,7 @@ def create_session(
     mode: Mode,
     coverage: CoverageMap | None = None,
     max_questions: int = 10,
+    deps: InterviewDeps | None = None,
 ) -> tuple[InterviewSession, Question]:
     """세션을 만들고 compiled graph가 생성한 첫 질문을 반환한다.
 
@@ -360,11 +361,15 @@ def create_session(
         max_questions:
             세션에서 물어볼 최대 메인 질문 수.
 
+        deps:
+            테스트나 통합 환경에서 주입할 Strategy/Assessment 의존성. 없으면
+            실제 StrategyAgent와 AssessmentAgent를 세션별로 생성한다.
+
     Returns:
         생성된 InterviewSession과 첫 질문.
     """
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
-    deps = InterviewDeps(
+    session_deps = deps or InterviewDeps(
         strategy=StrategyAgent(coverage or CoverageMap()),
         assessment=AssessmentAgent(),
     )
@@ -374,14 +379,14 @@ def create_session(
         mode=mode,
         coverage=coverage or CoverageMap(),
         max_questions=max_questions,
-        deps=deps,
+        deps=session_deps,
         lock=session_lock,
     )
     first_question = session.start()
     _registry.register(
         SessionRegistryEntry(
             session_id=session_id,
-            deps=deps,
+            deps=session_deps,
             lock=session_lock,
             mode=mode,
             session=session,
