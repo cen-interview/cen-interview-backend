@@ -24,6 +24,7 @@ class AssessmentState(BaseModel):
     answer_text: str = ""
     delivery_metrics: dict | None = None
     history: list[AnswerAttempt] = Field(default_factory=list)
+    user_id: str | None = None
 
     evidence_chunks: list[EvidenceChunk] = Field(default_factory=list)
     history_summary: str = ""
@@ -82,6 +83,7 @@ def retrieve_evidence(state: AssessmentState) -> AssessmentState:
     state.evidence_chunks = search_evidence(
         query=f"{question.text}\n{state.answer_text}",
         topic=question.topic,
+        user_id=state.user_id,
     )
     return state
 

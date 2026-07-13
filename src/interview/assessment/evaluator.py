@@ -120,6 +120,7 @@ def judge_answer(
     answer_text: str,
     delivery_metrics: dict | None = None,
     history: list | None = None,
+    user_id: str | None = None,
 ) -> AnswerQualitySignal:
     
     """사용자 답변 하나를 평가하여 Interviewer용 평가 신호를 생성한다.
@@ -141,12 +142,19 @@ def judge_answer(
             지금까지의 전체 답변 이력.
             이전 답변과 현재 답변의 모순 여부를 판단할 때 사용한다.
 
+        user_id:
+            Evidence store에서 사용자별 namespace를 선택하기 위한 사용자 ID.
+
     Returns:
         AnswerQualitySignal:
             Interviewer가 다음 질문 흐름을 결정하기 위한 평가 신호.
     """
     
-    evidence_chunks = _collect_evidence_for_question(question,answer_text)
+    evidence_chunks = _collect_evidence_for_question(
+        question,
+        answer_text,
+        user_id=user_id,
+    )
     
     judge_result = _judge_with_llm(
     question=question,
@@ -440,13 +448,18 @@ def _run_conflict_check(
 
 
 
-def _collect_evidence_for_question(question: Question,answer_text:str) -> list[EvidenceChunk]:
+def _collect_evidence_for_question(
+    question: Question,
+    answer_text: str,
+    user_id: str | None = None,
+) -> list[EvidenceChunk]:
     if question.category != QuestionCategory.PROJECT:
         return []
 
     return search_evidence(
         query=f"{question.text}\n{answer_text}",
         topic=question.topic,
+        user_id=user_id,
     )
 
 
