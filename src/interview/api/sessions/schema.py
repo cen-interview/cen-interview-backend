@@ -25,6 +25,60 @@ class StartRequest(BaseModel):
     mode: str
 
 
+class VoiceDeliveryMetricsPayload(BaseModel):
+    """음성 답변의 전달 방식을 나타내는 선택적 측정값.
+
+    답변의 기술적 내용과 분리해 말하기 속도, 필러 표현 횟수, 실제 발화
+    시간을 전달한다. metrics 영역을 보낸 경우 세 값 중 하나 이상은 존재해야
+    한다.
+
+    Attributes:
+        speech_rate_wpm:
+            분당 발화 단어 수. 음수가 아닌 유한한 값이어야 한다.
+
+        filler_count:
+            답변 중 감지된 필러 표현 횟수. 음수가 아니어야 한다.
+
+        duration_seconds:
+            답변의 실제 발화 시간. 자동 제출을 기다린 종료 침묵 시간은
+            제외하며, 값이 있으면 0보다 커야 한다.
+    """
+
+    speech_rate_wpm: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    filler_count: int | None = Field(default=None, ge=0)
+    duration_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def validate_metric_presence(self) -> "VoiceDeliveryMetricsPayload":
+        """metrics 영역에 실제 측정값이 하나 이상 있는지 확인한다.
+
+        Returns:
+            하나 이상의 측정값을 가진 현재 metrics payload.
+
+        Raises:
+            ValueError:
+                모든 측정값이 None인 경우.
+        """
+        if all(
+            value is None
+            for value in (
+                self.speech_rate_wpm,
+                self.filler_count,
+                self.duration_seconds,
+            )
+        ):
+            raise ValueError("metrics에는 하나 이상의 전달 지표가 필요합니다.")
+        return self
+
+
 class SubmitEventPayload(BaseModel):
     """사용자가 명시적으로 제출한 답변 이벤트 payload.
 
@@ -45,6 +99,10 @@ class SubmitEventPayload(BaseModel):
 
         silence_duration_seconds:
             자동 제출을 발생시킨 연속 침묵 시간. 수동 제출에서는 생략한다.
+
+        metrics:
+            음성 답변에서만 사용하는 선택적 전달 지표. 채팅 답변에서는
+            생략할 수 있다.
     """
 
     action: Literal["submit"]
@@ -55,6 +113,7 @@ class SubmitEventPayload(BaseModel):
         ge=0,
         allow_inf_nan=False,
     )
+    metrics: VoiceDeliveryMetricsPayload | None = None
 
     @field_validator("text")
     @classmethod
@@ -178,6 +237,20 @@ class EventRequest(BaseModel):
         action = normalized_payload.get("action")
 
         if action == "submit":
+            metric_keys = (
+                "speech_rate_wpm",
+                "filler_count",
+                "duration_seconds",
+            )
+            if "metrics" not in normalized_payload and any(
+                key in normalized_payload for key in metric_keys
+            ):
+                normalized_payload["metrics"] = {
+                    key: normalized_payload.get(key)
+                    for key in metric_keys
+                    if key in normalized_payload
+                }
+
             try:
                 submitted = SubmitEventPayload.model_validate(normalized_payload)
             except ValidationError as exc:
@@ -190,6 +263,13 @@ class EventRequest(BaseModel):
                 normalized_payload["silence_duration_seconds"] = (
                     submitted.silence_duration_seconds
                 )
+            if submitted.metrics is not None:
+                normalized_payload["metrics"] = submitted.metrics.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+            for key in metric_keys:
+                normalized_payload.pop(key, None)
             return normalized_payload
 
         if action == "silence":

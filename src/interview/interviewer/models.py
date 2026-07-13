@@ -22,9 +22,17 @@ class DeliveryMetrics(BaseModel):
             답변을 완료하는 데 걸린 전체 시간(초).
     """
 
-    speech_rate_wpm: float | None = None
-    filler_count: int | None = None
-    duration_seconds: float | None = None
+    speech_rate_wpm: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    filler_count: int | None = Field(default=None, ge=0)
+    duration_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    )
 
 
 class AdaptedInput(BaseModel):
