@@ -39,7 +39,9 @@ __all__ = [
 ]
 
 
-def _build_graph() -> StateGraph:
+def _build_graph(
+    context_schema: type[InterviewDeps] = InterviewDeps,
+) -> StateGraph:
     """면접 세션의 LangGraph builder를 조립한다.
 
     왜 필요한가:
@@ -55,10 +57,16 @@ def _build_graph() -> StateGraph:
         파생 질문 또는 complete_set으로 분기한다. 질문 세트가 끝나면 다음
         메인 질문을 만들거나 final_report와 finalize를 거쳐 END로 이동한다.
 
+    Args:
+        context_schema:
+            노드에 Strategy와 Assessment 의존성을 전달할 runtime context 스키마.
+            운영 환경에서는 InterviewDeps를 사용하고, Studio에서는 기본
+            의존성을 생성하는 전용 스키마로 교체할 수 있다.
+
     Returns:
         아직 compile되지 않은 StateGraph builder.
     """
-    builder = StateGraph(SessionState, context_schema=InterviewDeps)
+    builder = StateGraph(SessionState, context_schema=context_schema)
     builder.add_node("greet", greet)
     builder.add_node("compose_utterance", compose_utterance)
     builder.add_node("wait_event", wait_event)
