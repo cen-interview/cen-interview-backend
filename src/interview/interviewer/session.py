@@ -158,6 +158,10 @@ class SessionState(BaseModel):
         silence_count:
             현재 질문 또는 세션 흐름에서 누적된 침묵 이벤트 횟수.
 
+        silence_action:
+            마지막 침묵 이벤트를 처리한 결과. 그래프가 입력 대기, 힌트,
+            질문 재제시 또는 타임아웃 중 다음 경로를 선택할 때 사용한다.
+
         challenge_used_in_set:
             현재 메인 질문 세트에서 challenge 질문을 이미 사용했는지 여부.
 
@@ -215,6 +219,7 @@ class SessionState(BaseModel):
     silence_policy: SilencePolicy = Field(default_factory=SilencePolicy)
     timeout_policy: TimeoutPolicy = Field(default_factory=TimeoutPolicy)
     silence_count: int = 0
+    silence_action: Literal["wait", "hint", "replay", "timeout"] | None = None
 
     # 오류 및 결과 상태
     error: str | None = None

@@ -165,6 +165,29 @@ class StrategyPort(Protocol):
         """
         ...
 
+    def next_hint(
+        self,
+        question: Question,
+        target: str | None = None,
+        answer_excerpt: str | None = None,
+    ) -> Question:
+        """지원자가 답변을 이어가기 어려울 때 사용할 힌트 질문을 반환한다.
+
+        Args:
+            question:
+                힌트를 제공할 현재 질문.
+
+            target:
+                힌트가 집중할 선택적 확인 대상.
+
+            answer_excerpt:
+                힌트 생성에 참고할 선택적 답변 일부. 완전한 침묵에서는 None.
+
+        Returns:
+            현재 질문에서 파생된 힌트 성격의 질문.
+        """
+        ...
+
 
 class AssessmentPort(Protocol):
     """Interviewer가 답변 평가와 세션 마무리에 사용하는 Assessment 계약."""

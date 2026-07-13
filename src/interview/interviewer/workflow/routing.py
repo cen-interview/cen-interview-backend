@@ -94,6 +94,31 @@ def route_quality(state: SessionState | dict[str, Any]) -> str:
     return routes.get(last_signal.quality, "complete_set")
 
 
+def after_handle_silence(state: SessionState | dict[str, Any]) -> str:
+    """침묵 정책의 처리 결과에 따라 다음 그래프 노드를 선택한다.
+
+    짧은 침묵은 새 발화를 만들지 않고 곧바로 입력 대기로 돌아간다. 유효한
+    첫 침묵의 힌트와 두 번째 침묵의 질문 재제시는 발화 조립으로 보내고,
+    허용 횟수에 도달한 침묵은 타임아웃 처리 노드로 보낸다. 이 함수는 상태를
+    읽기만 하며 변경하지 않는다.
+
+    Args:
+        state:
+            handle_silence가 결정한 silence_action을 가진 세션 상태.
+
+    Returns:
+        다음에 실행할 ``wait_event``, ``compose_utterance`` 또는
+        ``handle_timeout`` 노드 이름.
+    """
+    routes = {
+        "wait": "wait_event",
+        "hint": "compose_utterance",
+        "replay": "compose_utterance",
+        "timeout": "handle_timeout",
+    }
+    return routes.get(_state_get(state, "silence_action"), "wait_event")
+
+
 def after_complete_set(state: SessionState | dict[str, Any]) -> str:
     """질문 세트 완료 후 다음 메인 질문 또는 최종 리포트 경로를 선택한다.
 

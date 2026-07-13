@@ -23,7 +23,12 @@ from interview.interviewer.workflow.nodes import (
     wait_event,
 )
 from interview.interviewer.session import SessionState
-from interview.interviewer.workflow.routing import after_complete_set, route_event, route_quality
+from interview.interviewer.workflow.routing import (
+    after_complete_set,
+    after_handle_silence,
+    route_event,
+    route_quality,
+)
 from interview.interviewer.workflow.runtime import InterviewDeps
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -122,7 +127,15 @@ def _build_graph() -> StateGraph:
     builder.add_edge("ask_confirm_negative", "compose_utterance")
     builder.add_edge("ask_trap", "compose_utterance")
     builder.add_edge("handle_replay", "compose_utterance")
-    builder.add_edge("handle_silence", "compose_utterance")
+    builder.add_conditional_edges(
+        "handle_silence",
+        after_handle_silence,
+        {
+            "wait_event": "wait_event",
+            "compose_utterance": "compose_utterance",
+            "handle_timeout": "handle_timeout",
+        },
+    )
     builder.add_edge("handle_timeout", "final_report")
     builder.add_edge("final_report", "finalize")
     builder.add_edge("finalize", "compose_utterance")

@@ -9,13 +9,15 @@ from interview.interviewer.workflow.runtime import (
     _serialize_signal,
     _state_get,
 )
-from interview.interviewer.session import SessionState, Turn
+from interview.interviewer.session import SessionState, SilencePolicy, Turn
 from interview.schemas.events import (
     AnswerSubmitted,
     EndRequested,
     InterviewerEvent,
     ReplayRequested,
+    SilenceDetected,
 )
+from interview.schemas.question import Question
 from langgraph.types import interrupt
 from pydantic import TypeAdapter, ValidationError
 
@@ -165,6 +167,8 @@ def record_candidate_answer(
 
     return {
         "transcript": [*transcript, candidate_turn],
+        "silence_count": 0,
+        "silence_action": None,
         "error": None,
     }
 
@@ -425,6 +429,7 @@ def complete_set(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         "challenge_used_in_set": False,
         "derived_turn_count": 0,
         "silence_count": 0,
+        "silence_action": None,
         "pending_event": None,
         "pending_delivery_metrics": None,
         "error": None,
@@ -493,26 +498,140 @@ def handle_replay(state: SessionState | dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def handle_silence(state: SessionState | dict[str, Any]) -> dict[str, Any]:
-    """침묵 횟수를 증가시키고 현재 질문을 다시 제시하도록 준비한다.
+def handle_silence(
+    state: SessionState | dict[str, Any],
+    runtime: Any,
+) -> dict[str, Any]:
+    """침묵 지속 시간과 누적 횟수에 따라 다음 대응을 준비한다.
 
-    상세한 힌트 및 반복 정책은 이후 침묵 처리 단계에서 확장한다.
+    임계값보다 짧은 침묵은 횟수에 포함하지 않고 입력 대기로 돌아간다. 유효한
+    침묵은 횟수를 증가시킨 뒤 SilencePolicy의 첫 번째/두 번째 행동을 적용한다.
+    기본 정책에서는 첫 번째 침묵에 Strategy 힌트를 만들고, 두 번째 침묵에는
+    현재 질문을 다시 제시한다. 증가한 횟수가 최대 허용값에 도달하면 개별
+    행동보다 타임아웃을 우선한다.
 
     Args:
         state:
-            현재 침묵 횟수와 질문을 가진 세션 상태.
+            검증된 SilenceDetected 이벤트, 현재 질문, 침묵 정책과 누적 횟수를
+            가진 세션 상태.
+
+        runtime:
+            힌트 생성에 사용할 StrategyPort가 담긴 LangGraph runtime.
 
     Returns:
-        증가한 침묵 횟수, replay 턴, 정리된 pending 입력을 담은 부분 상태.
+        침묵 횟수, 다음 침묵 행동, 필요한 경우 생성된 힌트 질문과 정리된
+        pending 입력을 담은 부분 상태.
     """
+    pending_event = _state_get(state, "pending_event")
+    try:
+        event = _EVENT_ADAPTER.validate_python(pending_event)
+    except ValidationError:
+        return {
+            "silence_action": "wait",
+            "pending_event": None,
+            "pending_delivery_metrics": None,
+            "error": "침묵 이벤트의 형식이 올바르지 않습니다.",
+        }
+
+    if not isinstance(event, SilenceDetected):
+        return {
+            "silence_action": "wait",
+            "pending_event": None,
+            "pending_delivery_metrics": None,
+            "error": "침묵 감지 이벤트만 침묵 정책으로 처리할 수 있습니다.",
+        }
+
+    raw_policy = _state_get(state, "silence_policy")
+    policy = (
+        raw_policy
+        if isinstance(raw_policy, SilencePolicy)
+        else SilencePolicy.model_validate(raw_policy or {})
+    )
+    if event.silence_duration_seconds < policy.hint_threshold_seconds:
+        return {
+            "silence_action": "wait",
+            "pending_event": None,
+            "pending_delivery_metrics": None,
+            "error": None,
+        }
+
+    previous_count = _state_get(state, "silence_count", 0)
+    silence_count = previous_count + 1
+    if silence_count >= policy.max_events_before_timeout:
+        return {
+            "silence_count": silence_count,
+            "silence_action": "timeout",
+            "pending_event": None,
+            "pending_delivery_metrics": None,
+            "error": None,
+        }
+
+    policy_action = policy.first_action if previous_count == 0 else policy.second_action
+    if policy_action == "represent":
+        return {
+            "silence_count": silence_count,
+            "silence_action": "replay",
+            "turn_type": "replay",
+            "pending_event": None,
+            "pending_delivery_metrics": None,
+            "error": None,
+        }
+
+    hint_question = _make_silence_hint(state, runtime)
     return {
-        "silence_count": _state_get(state, "silence_count", 0) + 1,
-        "turn_type": "replay",
+        "current_question": hint_question,
+        "silence_count": silence_count,
+        "silence_action": "hint",
+        "turn_type": "hint",
         "pending_event": None,
         "pending_delivery_metrics": None,
         "error": None,
-
     }
+
+
+def _make_silence_hint(
+    state: SessionState | dict[str, Any],
+    runtime: Any,
+) -> Question:
+    """현재 질문과 마지막 평가 신호를 사용해 침묵 힌트를 생성한다.
+
+    Strategy의 힌트 생성 계약을 한 곳에서 호출해, 계약이나 폴백 방식이 바뀔
+    경우 handle_silence의 정책 판단을 수정하지 않고 이 helper만 교체할 수
+    있게 한다. 완전한 침묵에는 답변 일부가 없으므로 answer_excerpt는 None을
+    전달한다.
+
+    Args:
+        state:
+            현재 질문과 선택적인 마지막 평가 신호를 가진 세션 상태.
+
+        runtime:
+            StrategyPort가 담긴 LangGraph runtime.
+
+    Returns:
+        Strategy가 생성한 힌트 Question.
+
+    Raises:
+        ValueError:
+            힌트를 연결할 현재 질문이 없는 경우.
+    """
+    current_question = _state_get(state, "current_question")
+    if current_question is None:
+        raise ValueError("힌트를 연결할 현재 질문이 없습니다.")
+
+    target = None
+    try:
+        last_signal = _restore_signal(_state_get(state, "last_signal"))
+    except ValidationError:
+        last_signal = None
+    if last_signal is not None:
+        target = last_signal.next_probe_target
+
+    deps = _runtime_deps(runtime)
+    return deps.strategy.next_hint(
+        question=current_question,
+        target=target,
+        answer_excerpt=None,
+    )
 
 
 def handle_timeout(state: SessionState | dict[str, Any]) -> dict[str, Any]:
