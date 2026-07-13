@@ -1,6 +1,10 @@
 """Interviewer LangGraph를 감싸는 세션 단위 파사드와 인메모리 레지스트리."""
 
+from __future__ import annotations
+
 import uuid
+from dataclasses import dataclass
+from threading import Lock
 
 from langgraph.types import Command
 
@@ -41,6 +45,7 @@ class InterviewSession:
         coverage: CoverageMap,
         max_questions: int = 10,
         deps: InterviewDeps | None = None,
+        lock: Lock | None = None,
     ) -> None:
         """면접 세션의 초기 상태와 그래프 실행 컨텍스트를 준비한다.
 
@@ -63,6 +68,10 @@ class InterviewSession:
             deps:
                 테스트나 외부 조립 코드가 주입할 런타임 의존성. 없으면 실제
                 StrategyAgent와 AssessmentAgent를 세션 전용으로 생성한다.
+
+            lock:
+                같은 세션의 그래프 실행을 직렬화할 전용 lock. 레지스트리가
+                전달하지 않으면 이 세션에서 새 threading.Lock을 생성한다.
         """
         self.deps = deps or InterviewDeps(
             strategy=StrategyAgent(coverage),
@@ -77,6 +86,7 @@ class InterviewSession:
         )
         self._graph = get_compiled_graph()
         self._config = {"configurable": {"thread_id": session_id}}
+        self._lock = lock or Lock()
         self._started = False
 
     @property
@@ -96,16 +106,17 @@ class InterviewSession:
         Returns:
             첫 질문과 면접관 발화가 채워진 현재 SessionState.
         """
-        if self._started:
-            return self.get_state()
+        with self._lock:
+            if self._started:
+                return self._get_state_unlocked()
 
-        self._graph.invoke(
-            self._initial_state,
-            config=self._config,
-            context=self.deps,
-        )
-        self._started = True
-        return self.get_state()
+            self._graph.invoke(
+                self._initial_state,
+                config=self._config,
+                context=self.deps,
+            )
+            self._started = True
+            return self._get_state_unlocked()
 
     def submit_event(
         self,
@@ -133,38 +144,57 @@ class InterviewSession:
             RuntimeError:
                 세션을 시작하기 전에 이벤트를 제출한 경우.
         """
-        if not self._started:
-            raise RuntimeError("session must be started before submitting an event")
+        with self._lock:
+            if not self._started:
+                raise RuntimeError("session must be started before submitting an event")
 
-        current_state = self.get_state()
-        if current_state.finished:
-            return current_state
+            current_state = self._get_state_unlocked()
+            if current_state.finished:
+                return current_state
 
-        if isinstance(adapted_input, AdaptedInput):
-            event = adapted_input.event
-            metrics = adapted_input.delivery_metrics
-        else:
-            event = adapted_input
-            metrics = delivery_metrics
+            if isinstance(adapted_input, AdaptedInput):
+                event = adapted_input.event
+                metrics = adapted_input.delivery_metrics
+            else:
+                event = adapted_input
+                metrics = delivery_metrics
 
-        resume_payload = {
-            "event": event.model_dump(mode="json"),
-            "delivery_metrics": (
-                metrics.model_dump(mode="json") if metrics is not None else None
-            ),
-        }
-        self._graph.invoke(
-            Command(resume=resume_payload),
-            config=self._config,
-            context=self.deps,
-        )
-        return self.get_state()
+            resume_payload = {
+                "event": event.model_dump(mode="json"),
+                "delivery_metrics": (
+                    metrics.model_dump(mode="json") if metrics is not None else None
+                ),
+            }
+            self._graph.invoke(
+                Command(resume=resume_payload),
+                config=self._config,
+                context=self.deps,
+            )
+            return self._get_state_unlocked()
 
     def get_state(self) -> SessionState:
         """compiled graph의 최신 체크포인트를 SessionState로 복원한다.
 
         Returns:
             현재 thread_id에 저장된 최신 면접 세션 상태.
+
+        Raises:
+            RuntimeError:
+                아직 그래프를 시작하지 않아 체크포인트가 없는 경우.
+        """
+        with self._lock:
+            return self._get_state_unlocked()
+
+    def _get_state_unlocked(self) -> SessionState:
+        """세션 lock을 이미 확보한 호출부에서 최신 그래프 상태를 읽는다.
+
+        ``threading.Lock``은 재진입 lock이 아니므로 ``submit_event()``처럼 이미
+        lock 안에 있는 메서드가 공개 ``get_state()``를 다시 호출하면 교착 상태가
+        발생한다. 내부 호출은 이 메서드를 사용하고, 외부 상태 조회만
+        ``get_state()``를 통해 lock을 획득한다.
+
+        Returns:
+            현재 thread_id의 체크포인트를 복원한 SessionState.
 
         Raises:
             RuntimeError:
@@ -226,9 +256,87 @@ class InterviewSession:
         return FinalReport.model_validate(state.report)
 
 
-# 개발 단계용 인메모리 레지스트리. 프로세스 재시작과 멀티 프로세스 공유는
-# 지원하지 않으며, 영속 레지스트리는 후속 단계에서 교체한다.
-_sessions: dict[str, InterviewSession] = {}
+@dataclass(slots=True)
+class SessionRegistryEntry:
+    """인메모리 레지스트리가 세션별로 보관하는 실행 정보.
+
+    Attributes:
+        session_id:
+            세션과 LangGraph thread를 식별하는 고유 ID.
+
+        deps:
+            해당 세션만 사용하는 Strategy와 Assessment 인스턴스.
+
+        lock:
+            같은 세션에 들어오는 요청을 하나씩 처리하기 위한 전용 lock.
+
+        mode:
+            세션 생성 시 확정된 입력 모드. 이후 이벤트 요청의 외부 mode 값보다
+            이 값을 기준으로 어댑터를 선택할 수 있다.
+
+        session:
+            compiled graph 호출을 감싸는 InterviewSession 파사드.
+    """
+
+    session_id: str
+    deps: InterviewDeps
+    lock: Lock
+    mode: Mode
+    session: InterviewSession
+
+
+class SessionRegistry:
+    """프로세스 메모리에서 세션별 실행 정보의 등록과 조회를 담당한다.
+
+    레지스트리 자체의 lock은 항목 dict의 등록과 조회만 보호한다. 실제 그래프
+    실행은 각 SessionRegistryEntry가 가진 별도 lock으로 보호하므로 서로 다른
+    세션은 동시에 진행할 수 있고, 같은 세션의 요청만 순서대로 처리된다.
+
+    이 구현과 LangGraph의 InMemorySaver는 모두 프로세스 메모리에 의존한다.
+    서버 재시작 시 세션이 사라지고 여러 서버 프로세스 사이에 공유되지 않으므로,
+    운영 환경에서는 DB/Redis 레지스트리와 영속 checkpointer로 교체해야 한다.
+    """
+
+    def __init__(self) -> None:
+        """빈 세션 항목 저장소와 저장소 보호용 lock을 생성한다."""
+        self._entries: dict[str, SessionRegistryEntry] = {}
+        self._lock = Lock()
+
+    def register(self, entry: SessionRegistryEntry) -> None:
+        """새 세션 항목을 레지스트리에 등록한다.
+
+        Args:
+            entry:
+                세션 ID, 의존성, mode, lock, 파사드를 묶은 등록 항목.
+
+        Raises:
+            ValueError:
+                같은 session_id가 이미 등록되어 있는 경우.
+        """
+        with self._lock:
+            if entry.session_id in self._entries:
+                raise ValueError(f"session already registered: {entry.session_id}")
+            self._entries[entry.session_id] = entry
+
+    def get(self, session_id: str) -> SessionRegistryEntry:
+        """세션 ID에 해당하는 레지스트리 항목을 반환한다.
+
+        Args:
+            session_id:
+                조회할 면접 세션 ID.
+
+        Returns:
+            세션별 의존성과 lock을 포함한 SessionRegistryEntry.
+
+        Raises:
+            KeyError:
+                등록되지 않은 session_id인 경우.
+        """
+        with self._lock:
+            return self._entries[session_id]
+
+
+_registry = SessionRegistry()
 
 
 def create_session(
@@ -256,14 +364,29 @@ def create_session(
         생성된 InterviewSession과 첫 질문.
     """
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
+    deps = InterviewDeps(
+        strategy=StrategyAgent(coverage or CoverageMap()),
+        assessment=AssessmentAgent(),
+    )
+    session_lock = Lock()
     session = InterviewSession(
         session_id=session_id,
         mode=mode,
         coverage=coverage or CoverageMap(),
         max_questions=max_questions,
+        deps=deps,
+        lock=session_lock,
     )
     first_question = session.start()
-    _sessions[session_id] = session
+    _registry.register(
+        SessionRegistryEntry(
+            session_id=session_id,
+            deps=deps,
+            lock=session_lock,
+            mode=mode,
+            session=session,
+        )
+    )
     return session, first_question
 
 
@@ -281,4 +404,4 @@ def get_session(session_id: str) -> InterviewSession:
         KeyError:
             등록되지 않은 session_id인 경우.
     """
-    return _sessions[session_id]
+    return _registry.get(session_id).session
