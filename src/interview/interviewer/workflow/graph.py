@@ -26,6 +26,7 @@ from interview.interviewer.session import SessionState
 from interview.interviewer.workflow.routing import (
     after_complete_set,
     after_handle_silence,
+    after_handle_timeout,
     route_event,
     route_quality,
 )
@@ -136,7 +137,14 @@ def _build_graph() -> StateGraph:
             "handle_timeout": "handle_timeout",
         },
     )
-    builder.add_edge("handle_timeout", "final_report")
+    builder.add_conditional_edges(
+        "handle_timeout",
+        after_handle_timeout,
+        {
+            "compose_utterance": "compose_utterance",
+            "final_report": "final_report",
+        },
+    )
     builder.add_edge("final_report", "finalize")
     builder.add_edge("finalize", "compose_utterance")
     return builder

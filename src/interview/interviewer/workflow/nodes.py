@@ -9,7 +9,7 @@ from interview.interviewer.workflow.runtime import (
     _serialize_signal,
     _state_get,
 )
-from interview.interviewer.session import SessionState, SilencePolicy, Turn
+from interview.interviewer.session import SessionState, SilencePolicy, TimeoutPolicy, Turn
 from interview.schemas.events import (
     AnswerSubmitted,
     EndRequested,
@@ -169,6 +169,7 @@ def record_candidate_answer(
         "transcript": [*transcript, candidate_turn],
         "silence_count": 0,
         "silence_action": None,
+        "timeout_action": None,
         "error": None,
     }
 
@@ -430,6 +431,7 @@ def complete_set(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         "derived_turn_count": 0,
         "silence_count": 0,
         "silence_action": None,
+        "timeout_action": None,
         "pending_event": None,
         "pending_delivery_metrics": None,
         "error": None,
@@ -635,19 +637,40 @@ def _make_silence_hint(
 
 
 def handle_timeout(state: SessionState | dict[str, Any]) -> dict[str, Any]:
-    """무응답 타임아웃 이벤트를 종료 준비 상태로 전환한다.
+    """무응답 타임아웃을 세션 정책에 따라 일시 정지 또는 종료로 변환한다.
 
-    상세한 end/pause 정책 분기는 이후 타임아웃 처리 단계에서 확장한다.
+    TimeoutPolicy.action이 pause이면 세션을 종료하지 않고 pause_prompt 발화를
+    준비한다. end이면 최종 리포트 생성으로 이동할 수 있도록 종료 행동을
+    기록한다. 직접 전달된 NoResponseTimeout과 누적 침묵에서 승격된 타임아웃이
+    같은 정책을 사용하도록 pending 이벤트 종류에는 의존하지 않는다.
 
     Args:
         state:
-            타임아웃 이벤트가 검증된 현재 세션 상태.
+            타임아웃 정책과 현재 세션 종료 상태를 가진 세션 상태.
 
     Returns:
-        closing 턴과 정리된 pending 입력을 담은 부분 상태.
+        timeout 행동, 해당 행동의 발화 종류, 정리된 pending 입력을 담은 부분
+        상태. pause에서는 finished를 False로 유지한다.
     """
+    raw_policy = _state_get(state, "timeout_policy")
+    policy = (
+        raw_policy
+        if isinstance(raw_policy, TimeoutPolicy)
+        else TimeoutPolicy.model_validate(raw_policy or {})
+    )
+
+    if policy.action == "pause":
+        return {
+            "timeout_action": "pause",
+            "turn_type": "pause_prompt",
+            "finished": False,
+            "pending_event": None,
+            "pending_delivery_metrics": None,
+            "error": None,
+        }
+
     return {
-        "turn_type": "closing",
+        "timeout_action": "end",
         "pending_event": None,
         "pending_delivery_metrics": None,
         "error": None,

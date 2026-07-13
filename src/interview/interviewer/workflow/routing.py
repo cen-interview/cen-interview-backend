@@ -119,6 +119,27 @@ def after_handle_silence(state: SessionState | dict[str, Any]) -> str:
     return routes.get(_state_get(state, "silence_action"), "wait_event")
 
 
+def after_handle_timeout(state: SessionState | dict[str, Any]) -> str:
+    """타임아웃 정책의 처리 결과에 따라 일시 정지 또는 종료 경로를 선택한다.
+
+    pause는 면접을 종료하지 않고 안내 문장을 조립한 뒤 다시 입력을 기다리는
+    경로다. end는 Assessment 최종 리포트를 생성하는 경로다. 알 수 없는 값은
+    면접 세션이 무기한 남는 것을 방지하기 위해 안전하게 종료 경로로 보낸다.
+    이 함수는 상태를 읽기만 하며 변경하지 않는다.
+
+    Args:
+        state:
+            handle_timeout이 결정한 timeout_action을 가진 세션 상태.
+
+    Returns:
+        일시 정지 안내를 만들면 ``compose_utterance``, 종료 처리를 시작하면
+        ``final_report`` 노드 이름.
+    """
+    if _state_get(state, "timeout_action") == "pause":
+        return "compose_utterance"
+    return "final_report"
+
+
 def after_complete_set(state: SessionState | dict[str, Any]) -> str:
     """질문 세트 완료 후 다음 메인 질문 또는 최종 리포트 경로를 선택한다.
 

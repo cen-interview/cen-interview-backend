@@ -155,6 +155,10 @@ class SessionState(BaseModel):
         timeout_policy:
             무응답 타임아웃 발생 시 어떤 방식으로 처리할지 정하는 정책.
 
+        timeout_action:
+            마지막 타임아웃 이벤트를 처리한 결과. 그래프가 일시 정지 안내를
+            제공할지 최종 리포트 생성으로 이동할지 결정할 때 사용한다.
+
         silence_count:
             현재 질문 또는 세션 흐름에서 누적된 침묵 이벤트 횟수.
 
@@ -220,6 +224,7 @@ class SessionState(BaseModel):
     timeout_policy: TimeoutPolicy = Field(default_factory=TimeoutPolicy)
     silence_count: int = 0
     silence_action: Literal["wait", "hint", "replay", "timeout"] | None = None
+    timeout_action: Literal["pause", "end"] | None = None
 
     # 오류 및 결과 상태
     error: str | None = None
