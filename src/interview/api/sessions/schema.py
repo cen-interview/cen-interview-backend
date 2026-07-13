@@ -2,7 +2,16 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
+
+_AUTO_SUBMIT_MIN_SILENCE_SECONDS = 2.0
 
 
 class StartRequest(BaseModel):
@@ -29,10 +38,23 @@ class SubmitEventPayload(BaseModel):
 
         text:
             사용자가 제출한 답변 또는 STT 최종 전사문.
+
+        submission_type:
+            사용자가 버튼으로 제출한 ``manual`` 또는 종료 침묵을 감지해
+            제출한 ``auto``.
+
+        silence_duration_seconds:
+            자동 제출을 발생시킨 연속 침묵 시간. 수동 제출에서는 생략한다.
     """
 
     action: Literal["submit"]
     text: str
+    submission_type: Literal["manual", "auto"] = "manual"
+    silence_duration_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
 
     @field_validator("text")
     @classmethod
@@ -54,6 +76,27 @@ class SubmitEventPayload(BaseModel):
         if not normalized_text:
             raise ValueError("답변 내용을 입력해 주세요.")
         return normalized_text
+
+    @model_validator(mode="after")
+    def validate_auto_submission(self) -> "SubmitEventPayload":
+        """자동 제출에 충분한 종료 침묵 시간이 포함됐는지 확인한다.
+
+        Returns:
+            자동 제출 조건이 검증된 현재 payload.
+
+        Raises:
+            ValueError:
+                자동 제출인데 침묵 시간이 없거나 2초보다 짧은 경우.
+        """
+        if self.submission_type != "auto":
+            return self
+
+        if (
+            self.silence_duration_seconds is None
+            or self.silence_duration_seconds < _AUTO_SUBMIT_MIN_SILENCE_SECONDS
+        ):
+            raise ValueError("자동 제출에는 2초 이상의 종료 침묵이 필요합니다.")
+        return self
 
 
 class SilenceEventPayload(BaseModel):
@@ -81,9 +124,37 @@ class EventRequest(BaseModel):
         payload:
             입력 어댑터가 해석할 action과 관련 데이터를 담은 dict. session_id는
             URL 경로에서 받고 mode는 서버에 저장된 세션 상태를 사용한다.
+
+        client_event_id:
+            프론트가 한 번의 사용자 행동에 부여하는 멱등성 ID. 같은 ID가
+            재전송되면 백엔드는 그래프를 다시 실행하지 않고 첫 결과를 반환한다.
     """
 
     payload: dict
+    client_event_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("client_event_id")
+    @classmethod
+    def normalize_client_event_id(cls, value: str | None) -> str | None:
+        """선택적인 클라이언트 이벤트 ID의 앞뒤 공백을 제거한다.
+
+        Args:
+            value:
+                프론트가 생성한 이벤트 ID 또는 None.
+
+        Returns:
+            공백이 제거된 이벤트 ID 또는 None.
+
+        Raises:
+            ValueError:
+                이벤트 ID가 공백으로만 구성된 경우.
+        """
+        if value is None:
+            return None
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("client_event_id는 빈 문자열일 수 없습니다.")
+        return normalized_value
 
     def to_adapter_payload(self) -> dict:
         """입력 어댑터에 전달할 이벤트 payload를 반환한다.
@@ -114,6 +185,11 @@ class EventRequest(BaseModel):
 
             normalized_payload["action"] = submitted.action
             normalized_payload["text"] = submitted.text
+            normalized_payload["submission_type"] = submitted.submission_type
+            if submitted.silence_duration_seconds is not None:
+                normalized_payload["silence_duration_seconds"] = (
+                    submitted.silence_duration_seconds
+                )
             return normalized_payload
 
         if action == "silence":

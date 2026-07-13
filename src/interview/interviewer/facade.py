@@ -88,6 +88,7 @@ class InterviewSession:
         self._config = {"configurable": {"thread_id": session_id}}
         self._lock = lock or Lock()
         self._started = False
+        self._processed_client_events: dict[str, SessionState] = {}
 
     @property
     def state(self) -> SessionState:
@@ -122,6 +123,7 @@ class InterviewSession:
         self,
         adapted_input: AdaptedInput | InterviewerEvent,
         delivery_metrics: DeliveryMetrics | None = None,
+        client_event_id: str | None = None,
     ) -> SessionState:
         """정규화된 이벤트로 중단된 그래프를 재개한다.
 
@@ -137,6 +139,10 @@ class InterviewSession:
             delivery_metrics:
                 InterviewerEvent를 직접 전달할 때 사용할 선택적 음성 전달 지표.
 
+            client_event_id:
+                프론트가 한 번의 사용자 행동에 부여한 선택적 멱등성 ID. 이미
+                처리한 ID이면 그래프를 다시 실행하지 않고 당시 결과를 반환한다.
+
         Returns:
             이벤트 처리가 끝나고 다음 interrupt 또는 END에 도달한 SessionState.
 
@@ -147,6 +153,12 @@ class InterviewSession:
         with self._lock:
             if not self._started:
                 raise RuntimeError("session must be started before submitting an event")
+
+            if (
+                client_event_id is not None
+                and client_event_id in self._processed_client_events
+            ):
+                return self._processed_client_events[client_event_id]
 
             current_state = self._get_state_unlocked()
             if current_state.finished:
@@ -170,7 +182,10 @@ class InterviewSession:
                 config=self._config,
                 context=self.deps,
             )
-            return self._get_state_unlocked()
+            result_state = self._get_state_unlocked()
+            if client_event_id is not None:
+                self._processed_client_events[client_event_id] = result_state
+            return result_state
 
     def get_state(self) -> SessionState:
         """compiled graph의 최신 체크포인트를 SessionState로 복원한다.
