@@ -10,6 +10,7 @@ evidence 인덱싱 파이프라인(면접 전 1회)이 만들어 evidence_store(
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
@@ -72,6 +73,30 @@ class RetrievalResult(BaseModel):
     """
     chunk: EvidenceChunk
     score: float  # 쿼리와의 관련도 (재랭킹 점수). 높을수록 관련 큼.
+
+
+class IndexFailure(BaseModel):
+    """인덱싱 중 실패한 단일 source 또는 문서 처리 단계."""
+
+    source_type: str
+    source_url: str | None = None
+    stage: str
+    message: str
+
+
+class IndexBuildResult(BaseModel):
+    """면접 전 Evidence 인덱싱 작업의 실행 결과.
+
+    CoverageMap은 Strategy가 소비하는 주제 요약이고, 이 모델은 API/status가
+    사용자에게 보여줄 인덱싱 작업 결과를 함께 담는다.
+    """
+
+    status: Literal["success", "partial_failed", "failed"]
+    coverage_map: "CoverageMap"
+    raw_doc_count: int = Field(ge=0)
+    chunk_count: int = Field(ge=0)
+    failures: list[IndexFailure] = Field(default_factory=list)
+
 
 class CoverageMap(BaseModel):
     """Strategy 가 소비하는 주제별 evidence 커버리지 맵.

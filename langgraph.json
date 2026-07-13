@@ -1,0 +1,10 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "interviewer": "./src/interview/interviewer/studio.py:graph",
+    "strategy": "./src/interview/strategy/studio.py:graph",
+    "assessment": "./src/interview/assessment/studio.py:graph"
+  },
+  "env": ".env"
+}

@@ -141,9 +141,9 @@ class SessionState(BaseModel):
             면접관이 마지막으로 생성한 발화 문장.
 
         utterance_queue:
-            화면 표시나 TTS가 순서대로 처리할 면접관 발화 목록. 현재는 완성된
-            발화 하나를 담고, 이후 reaction과 question을 분리하면 두 문장을
-            재생 순서대로 담는다.
+            TTS가 순서대로 처리할 면접관 발화 목록. 질문이 있는 턴은 안내 또는
+            리액션 문장과 질문 원문을 별도 항목으로 담고, 종료·일시정지처럼
+            질문이 없는 턴은 안내 문장 하나만 담는다.
 
         turn_type:
             현재 턴의 성격.
@@ -155,8 +155,16 @@ class SessionState(BaseModel):
         timeout_policy:
             무응답 타임아웃 발생 시 어떤 방식으로 처리할지 정하는 정책.
 
+        timeout_action:
+            마지막 타임아웃 이벤트를 처리한 결과. 그래프가 일시 정지 안내를
+            제공할지 최종 리포트 생성으로 이동할지 결정할 때 사용한다.
+
         silence_count:
             현재 질문 또는 세션 흐름에서 누적된 침묵 이벤트 횟수.
+
+        silence_action:
+            마지막 침묵 이벤트를 처리한 결과. 그래프가 입력 대기, 힌트,
+            질문 재제시 또는 타임아웃 중 다음 경로를 선택할 때 사용한다.
 
         challenge_used_in_set:
             현재 메인 질문 세트에서 challenge 질문을 이미 사용했는지 여부.
@@ -215,6 +223,8 @@ class SessionState(BaseModel):
     silence_policy: SilencePolicy = Field(default_factory=SilencePolicy)
     timeout_policy: TimeoutPolicy = Field(default_factory=TimeoutPolicy)
     silence_count: int = 0
+    silence_action: Literal["wait", "hint", "replay", "timeout"] | None = None
+    timeout_action: Literal["pause", "end"] | None = None
 
     # 오류 및 결과 상태
     error: str | None = None

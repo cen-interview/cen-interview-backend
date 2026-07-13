@@ -67,6 +67,16 @@ class EvidenceStore:
         namespace = self._namespace(user_id)
         self._chunks_by_user.setdefault(namespace, []).extend(chunks)
 
+    def clear_user(self, user_id: int | str | None = None) -> None:
+        """사용자 namespace에 저장된 기존 청크를 삭제한다.
+
+        같은 사용자가 Notion/GitHub 링크를 다시 등록하면 이전 인덱싱 결과가
+        새 결과와 섞이지 않아야 한다. 실제 DB 구현에서는 이 메서드가
+        user_id 조건 delete 또는 collection drop 역할을 한다.
+        """
+        namespace = self._namespace(user_id)
+        self._chunks_by_user[namespace] = []
+
     def query(
         self,
         query: str,

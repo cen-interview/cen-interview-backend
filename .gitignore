@@ -17,6 +17,9 @@ __pycache__/
 # uv.lock 은 커밋합니다 (환경 재현). 아래만 무시.
 .uv/
 
+# LangGraph Studio 로컬 실행 데이터
+.langgraph_api/
+
 # IDE / OS
 .idea/
 .vscode/
