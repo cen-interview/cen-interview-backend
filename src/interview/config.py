@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     
     # Evidence
     use_stub_evidence: bool = False
+    evidence_llm_extract_enabled: bool = False
+    evidence_store_backend: str = "memory"
+    evidence_chroma_path: str = ".chroma/evidence"
 
 
 @lru_cache

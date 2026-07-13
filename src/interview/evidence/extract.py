@@ -5,13 +5,41 @@
 """
 
 import re
+from dataclasses import dataclass
 from hashlib import sha1
+from typing import Protocol
 
+from interview.llm.client import get_llm
 from interview.evidence.sources import RawDoc
-from interview.schemas.evidence import EvidenceChunk
+from interview.schemas.evidence import (
+    EvidenceChunk,
+    EvidenceExtractionDecision,
+    EvidenceSectionCandidate,
+)
 
 
-def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:
+@dataclass(frozen=True)
+class _Section:
+    """원문에서 잘라낸 면접 근거 후보 섹션."""
+
+    section_id: str
+    text: str
+    heading: str | None = None
+
+
+class StructuredEvidenceExtractor(Protocol):
+    """EvidenceExtractionDecision을 반환하는 structured LLM 인터페이스."""
+
+    def invoke(self, messages: list[tuple[str, str]]) -> EvidenceExtractionDecision:
+        """LLM 메시지를 실행해 문서 단위 추출 결정을 반환한다."""
+
+
+def extract_evidence(
+    doc: RawDoc,
+    *,
+    use_llm: bool = False,
+    structured_llm: StructuredEvidenceExtractor | None = None,
+) -> list[EvidenceChunk]:
     """RawDoc 한 건에서 근거 후보들을 추출한다.
 
     여기서는 아직 임베딩하지 않는다. 텍스트 + 메타데이터까지만 만들고
@@ -22,6 +50,19 @@ def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:
     if not _has_interview_value(text, doc):
         return []
 
+    if use_llm:
+        try:
+            chunks = _extract_with_llm(doc, text, structured_llm=structured_llm)
+            if chunks:
+                return chunks
+        except Exception:
+            pass
+
+    return _extract_rule_based(doc, text)
+
+
+def _extract_rule_based(doc: RawDoc, text: str) -> list[EvidenceChunk]:
+    """규칙 기반으로 문서 전체를 하나의 근거 후보로 만든다."""
     topic = _infer_topic(doc, text)
     confidence = _score_confidence(doc, text)
 
@@ -40,19 +81,235 @@ def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:
     ]
 
 
+def _extract_with_llm(
+    doc: RawDoc,
+    text: str,
+    *,
+    structured_llm: StructuredEvidenceExtractor | None = None,
+) -> list[EvidenceChunk]:
+    """문서 1건당 LLM 1회로 면접 가치가 있는 섹션을 고른다.
+
+    LLM에는 section preview만 전달하고, 반환된 section_id에 해당하는 원문
+    섹션 전체를 EvidenceChunk.text로 사용한다.
+    """
+    sections = _split_sections(text)
+    if not sections:
+        return []
+
+    decision = _decide_sections_with_llm(
+        doc=doc,
+        sections=[
+            EvidenceSectionCandidate(
+                section_id=section.section_id,
+                heading=section.heading,
+                preview=_preview(section.text),
+            )
+            for section in sections
+        ],
+        structured_llm=structured_llm,
+    )
+
+    selected_ids = set(decision.valuable_section_ids)
+    selected_sections = [
+        section
+        for section in sections
+        if section.section_id in selected_ids and _has_interview_value(section.text, doc)
+    ]
+    if not selected_sections:
+        return []
+
+    topic = _normalize_topic(decision.topic) or _infer_topic(doc, text)
+    doc_type = decision.doc_type or doc.meta.get("doc_type")
+    confidence = _clamp(decision.confidence)
+
+    return [
+        EvidenceChunk(
+            chunk_id=_section_chunk_id(doc, section.section_id),
+            text=section.text,
+            source_type=doc.source_type,
+            source_url=doc.source_url,
+            topic=topic,
+            doc_type=doc_type,
+            week=doc.meta.get("week"),
+            date=doc.meta.get("date"),
+            confidence=confidence,
+        )
+        for section in selected_sections
+    ]
+
+
+def _decide_sections_with_llm(
+    *,
+    doc: RawDoc,
+    sections: list[EvidenceSectionCandidate],
+    structured_llm: StructuredEvidenceExtractor | None = None,
+) -> EvidenceExtractionDecision:
+    """문서 1건을 LLM에 한 번만 보내 면접 가치 있는 섹션을 선택한다."""
+    if structured_llm is None:
+        structured_llm = get_llm(temperature=0.0).with_structured_output(
+            EvidenceExtractionDecision
+        )
+
+    section_payload = "\n\n".join(
+        (
+            f"[{section.section_id}]"
+            f"\nheading: {section.heading or ''}"
+            f"\npreview:\n{section.preview}"
+        )
+        for section in sections
+    )
+    messages = [
+        (
+            "system",
+            "\n".join(
+                [
+                    "당신은 개발자 면접용 근거 문서를 선별하는 도우미입니다.",
+                    "RawDoc 한 건에서 면접 질문 생성에 가치 있는 섹션만 고릅니다.",
+                    "목차, 빈 템플릿, 단순 체크리스트, 잡담은 제외합니다.",
+                    "topic은 검색 필터에 쓰기 좋게 짧은 기술 주제로 작성합니다.",
+                    "doc_type은 code, README, troubleshooting, retrospective, weekly_note, repository_meta 중 가장 가까운 값을 사용합니다.",
+                    "반드시 제공된 section_id만 valuable_section_ids에 넣습니다.",
+                ]
+            ),
+        ),
+        (
+            "human",
+            "\n".join(
+                [
+                    f"title: {doc.title}",
+                    f"source_type: {doc.source_type}",
+                    f"source_url: {doc.source_url}",
+                    f"meta: {doc.meta}",
+                    "",
+                    "sections:",
+                    section_payload,
+                ]
+            ),
+        ),
+    ]
+    return structured_llm.invoke(messages)
+
+
+def _split_sections(text: str) -> list[_Section]:
+    """Markdown heading/details/fenced code 경계를 우선해 원문 섹션 후보를 만든다."""
+    blocks = _split_blocks_preserving_fences(text)
+    sections: list[_Section] = []
+    current: list[str] = []
+    heading: str | None = None
+
+    for block in blocks:
+        stripped = block.strip()
+        starts_new_section = bool(
+            re.match(r"^#{1,6}\s+\S+", stripped)
+            or re.match(r"^<summary>.*</summary>$", stripped, re.IGNORECASE | re.DOTALL)
+        )
+
+        if starts_new_section and current:
+            sections.append(_make_section(len(sections), current, heading))
+            current = []
+
+        if starts_new_section:
+            heading = _strip_heading(stripped)
+        current.append(block)
+
+    if current:
+        sections.append(_make_section(len(sections), current, heading))
+
+    if len(sections) == 1 and len(sections[0].text) > 2500:
+        return _split_long_section(sections[0])
+    return sections
+
+
+def _split_blocks_preserving_fences(text: str) -> list[str]:
+    """빈 줄로 나누되 fenced code block 내부는 하나의 block으로 유지한다."""
+    blocks: list[str] = []
+    current: list[str] = []
+    in_fence = False
+
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            current.append(line)
+            continue
+
+        if not in_fence and not line.strip():
+            if current:
+                blocks.append("\n".join(current).strip())
+                current = []
+            continue
+
+        current.append(line)
+
+    if current:
+        blocks.append("\n".join(current).strip())
+    return blocks
+
+
+def _make_section(index: int, blocks: list[str], heading: str | None) -> _Section:
+    return _Section(
+        section_id=f"s{index + 1}",
+        heading=heading,
+        text="\n\n".join(block.strip() for block in blocks if block.strip()).strip(),
+    )
+
+
+def _split_long_section(section: _Section) -> list[_Section]:
+    """heading이 없는 긴 문서는 문단 묶음 단위로 LLM 선택 후보를 나눈다."""
+    paragraphs = section.text.split("\n\n")
+    sections: list[_Section] = []
+    current: list[str] = []
+    current_len = 0
+
+    for paragraph in paragraphs:
+        paragraph_len = len(paragraph)
+        if current and current_len + paragraph_len > 1800:
+            sections.append(_make_section(len(sections), current, section.heading))
+            current = []
+            current_len = 0
+
+        current.append(paragraph)
+        current_len += paragraph_len
+
+    if current:
+        sections.append(_make_section(len(sections), current, section.heading))
+    return sections
+
+
+def _strip_heading(value: str) -> str:
+    value = re.sub(r"^#{1,6}\s+", "", value).strip()
+    value = re.sub(r"^<summary>|</summary>$", "", value, flags=re.IGNORECASE).strip()
+    value = re.sub(r"\*\*", "", value).strip()
+    return value
+
+
+def _preview(text: str, max_chars: int = 900) -> str:
+    """LLM 판단용 preview를 만든다. 실제 저장 텍스트는 원문 section 전체를 쓴다."""
+    compact = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars].rsplit("\n", 1)[0].strip() or compact[:max_chars]
+
+
 MIN_TEXT_CHARS = 50
 MIN_CODE_CHARS = 40
+EXCLUDED_DOC_TYPES = {
+    "directory_tree",
+}
 
 NOISE_LINE_PATTERNS = [
     re.compile(r"^\s*$"),
     re.compile(r"^<empty-block\s*/?>$", re.IGNORECASE),
     re.compile(r"^</?(ancestor-path|properties|content|page|database|data-sources)[^>]*>$", re.IGNORECASE),
+    re.compile(r"^<parent-data-source\s+[^>]+/?>$", re.IGNORECASE),
+    re.compile(r"^<ancestor-\d+-database\s+[^>]+/?>$", re.IGNORECASE),
+    re.compile(r'^\{"date:[^"]+".*"url":"https://app\.notion\.com/p/[^"]+".*\}$'),
     re.compile(r"^here is the result of .+ as of .+:?$", re.IGNORECASE),
     re.compile(r"^the title of this .+ is:", re.IGNORECASE),
     re.compile(r"^you can use the .+ tool .+", re.IGNORECASE),
     re.compile(r"^목차$"),
     re.compile(r"^table of contents$", re.IGNORECASE),
     re.compile(r"^- \[[ xX]?\]\s*(완료)?$"),
+    re.compile(r"^-?\s*실행 결과\s*:?\s*$"),
 ]
 
 TECH_KEYWORDS = [
@@ -89,6 +346,7 @@ def _clean_evidence_text(raw_text: str) -> str:
     previous_blank = False
 
     for line in raw_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = _remove_image_references(line)
         stripped = line.strip()
         if _is_noise_line(stripped):
             if cleaned_lines and not previous_blank:
@@ -107,6 +365,13 @@ def _clean_evidence_text(raw_text: str) -> str:
     return text
 
 
+def _remove_image_references(line: str) -> str:
+    """이미지는 면접 근거로 쓰지 않으므로 Markdown/S3 이미지 참조를 제거한다."""
+    line = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", line)
+    line = re.sub(r"https://prod-files-secure\.s3[^\s)<>]+", "", line)
+    return line.rstrip()
+
+
 def _is_noise_line(line: str) -> bool:
     return any(pattern.search(line) for pattern in NOISE_LINE_PATTERNS)
 
@@ -117,12 +382,36 @@ def _is_markdown_toc_link(line: str) -> bool:
 
 def _has_interview_value(text: str, doc: RawDoc) -> bool:
     """너무 짧거나 템플릿만 남은 문서를 제외한다."""
+    if doc.meta.get("doc_type") in EXCLUDED_DOC_TYPES:
+        return False
+
+    if _is_github_download_status_text(text):
+        return False
+
+    if _is_image_only_result(text):
+        return False
+
     min_chars = MIN_CODE_CHARS if doc.meta.get("doc_type") == "code" else MIN_TEXT_CHARS
     if len(text.strip()) < min_chars:
         return False
 
     alpha_or_korean = re.findall(r"[A-Za-z가-힣0-9]", text)
     return len(alpha_or_korean) >= min_chars // 2
+
+
+def _is_github_download_status_text(text: str) -> bool:
+    return text.strip().lower().startswith("successfully downloaded text file")
+
+
+def _is_image_only_result(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", text).strip().lower()
+    if not compact:
+        return True
+    image_markers = ("x-amz-", "prod-files-secure.s3", "image.png", "image.jpg")
+    return compact in {"- 실행 결과", "실행 결과"} or (
+        any(marker in compact for marker in image_markers)
+        and len(re.findall(r"[A-Za-z가-힣0-9]", compact)) < 80
+    )
 
 
 def _infer_topic(doc: RawDoc, text: str) -> str:
@@ -241,7 +530,14 @@ def _score_confidence(doc: RawDoc, text: str) -> float:
 
 def _looks_like_template(text: str) -> bool:
     lower_text = text.lower()
-    template_markers = ("todo", "작성 예정", "내용 없음", "입력", "placeholder")
+    template_markers = (
+        "todo",
+        "작성 예정",
+        "내용 없음",
+        "입력",
+        "placeholder",
+        "successfully downloaded text file",
+    )
     return any(marker in lower_text for marker in template_markers)
 
 
@@ -252,4 +548,12 @@ def _clamp(value: float) -> float:
 def _chunk_id(doc: RawDoc) -> str:
     """원본 문서의 출처 정보를 바탕으로 안정적인 기본 chunk id 를 만든다."""
     digest = sha1(f"{doc.source_type}:{doc.source_url}:{doc.title}".encode()).hexdigest()
+    return digest[:12]
+
+
+def _section_chunk_id(doc: RawDoc, section_id: str) -> str:
+    """원본 문서와 LLM 선택 섹션 ID를 바탕으로 안정적인 chunk id 를 만든다."""
+    digest = sha1(
+        f"{doc.source_type}:{doc.source_url}:{doc.title}:{section_id}".encode()
+    ).hexdigest()
     return digest[:12]
