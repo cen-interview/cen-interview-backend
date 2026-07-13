@@ -45,6 +45,7 @@ class InterviewSession:
         coverage: CoverageMap,
         max_questions: int = 10,
         deps: InterviewDeps | None = None,
+        user_id: str | None = None,
         lock: Lock | None = None,
     ) -> None:
         """면접 세션의 초기 상태와 그래프 실행 컨텍스트를 준비한다.
@@ -69,13 +70,17 @@ class InterviewSession:
                 테스트나 외부 조립 코드가 주입할 런타임 의존성. 없으면 실제
                 StrategyAgent와 AssessmentAgent를 세션 전용으로 생성한다.
 
+            user_id:
+                Evidence store에서 사용자별 namespace를 선택하기 위한 사용자 ID.
+                deps를 직접 주입하지 않는 운영 경로에서 Strategy/Assessment에 전달한다.
+
             lock:
                 같은 세션의 그래프 실행을 직렬화할 전용 lock. 레지스트리가
                 전달하지 않으면 이 세션에서 새 threading.Lock을 생성한다.
         """
         self.deps = deps or InterviewDeps(
-            strategy=StrategyAgent(coverage),
-            assessment=AssessmentAgent(),
+            strategy=StrategyAgent(coverage, user_id=user_id),
+            assessment=AssessmentAgent(user_id=user_id),
         )
         self.strategy = self.deps.strategy
         self.assessment = self.deps.assessment
@@ -88,6 +93,7 @@ class InterviewSession:
         self._config = {"configurable": {"thread_id": session_id}}
         self._lock = lock or Lock()
         self._started = False
+        self._processed_client_events: dict[str, SessionState] = {}
 
     @property
     def state(self) -> SessionState:
@@ -122,6 +128,7 @@ class InterviewSession:
         self,
         adapted_input: AdaptedInput | InterviewerEvent,
         delivery_metrics: DeliveryMetrics | None = None,
+        client_event_id: str | None = None,
     ) -> SessionState:
         """정규화된 이벤트로 중단된 그래프를 재개한다.
 
@@ -137,6 +144,10 @@ class InterviewSession:
             delivery_metrics:
                 InterviewerEvent를 직접 전달할 때 사용할 선택적 음성 전달 지표.
 
+            client_event_id:
+                프론트가 한 번의 사용자 행동에 부여한 선택적 멱등성 ID. 이미
+                처리한 ID이면 그래프를 다시 실행하지 않고 당시 결과를 반환한다.
+
         Returns:
             이벤트 처리가 끝나고 다음 interrupt 또는 END에 도달한 SessionState.
 
@@ -147,6 +158,12 @@ class InterviewSession:
         with self._lock:
             if not self._started:
                 raise RuntimeError("session must be started before submitting an event")
+
+            if (
+                client_event_id is not None
+                and client_event_id in self._processed_client_events
+            ):
+                return self._processed_client_events[client_event_id]
 
             current_state = self._get_state_unlocked()
             if current_state.finished:
@@ -170,7 +187,10 @@ class InterviewSession:
                 config=self._config,
                 context=self.deps,
             )
-            return self._get_state_unlocked()
+            result_state = self._get_state_unlocked()
+            if client_event_id is not None:
+                self._processed_client_events[client_event_id] = result_state
+            return result_state
 
     def get_state(self) -> SessionState:
         """compiled graph의 최신 체크포인트를 SessionState로 복원한다.
@@ -344,6 +364,7 @@ def create_session(
     coverage: CoverageMap | None = None,
     max_questions: int = 10,
     deps: InterviewDeps | None = None,
+    user_id: str | None = None,
 ) -> tuple[InterviewSession, Question]:
     """세션을 만들고 compiled graph가 생성한 첫 질문을 반환한다.
 
@@ -365,13 +386,16 @@ def create_session(
             테스트나 통합 환경에서 주입할 Strategy/Assessment 의존성. 없으면
             실제 StrategyAgent와 AssessmentAgent를 세션별로 생성한다.
 
+        user_id:
+            Evidence store에서 사용자별 namespace를 선택하기 위한 사용자 ID.
+
     Returns:
         생성된 InterviewSession과 첫 질문.
     """
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
     session_deps = deps or InterviewDeps(
-        strategy=StrategyAgent(coverage or CoverageMap()),
-        assessment=AssessmentAgent(),
+        strategy=StrategyAgent(coverage or CoverageMap(), user_id=user_id),
+        assessment=AssessmentAgent(user_id=user_id),
     )
     session_lock = Lock()
     session = InterviewSession(
@@ -380,6 +404,7 @@ def create_session(
         coverage=coverage or CoverageMap(),
         max_questions=max_questions,
         deps=session_deps,
+        user_id=user_id,
         lock=session_lock,
     )
     first_question = session.start()
