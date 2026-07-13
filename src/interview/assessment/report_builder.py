@@ -156,9 +156,10 @@ def _build_content_with_llm(
                 ),
             },
         ]
-    )
+)
     except Exception:
         return _temporary_report_content(evaluations)
+
 
 def _select_topics_to_improve(
     competency: CompetencyModel,
@@ -183,7 +184,7 @@ def _select_topics_to_improve(
     return _collect_unique_items(
         misconception_topics + low_score_topics
     )
-    
+
 
 def _build_report_user_prompt(
     competency: CompetencyModel,
@@ -194,7 +195,7 @@ def _build_report_user_prompt(
         competency=competency,
         evaluations=evaluations,
     )
-    
+
     evaluation_lines = []
 
     for index, evaluation in enumerate(evaluations, start=1):
@@ -228,8 +229,8 @@ def _build_report_user_prompt(
         "[문항별 evaluations]\n"
         + "\n\n".join(evaluation_lines)
     )
-    
-    
+
+
 def _temporary_report_content(
     evaluations: list[AnswerEvaluation],
 ) -> ReportContent:
