@@ -4,7 +4,10 @@ from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from interview.api.auth.dependency import get_current_user
 from interview.api.sessions.schema import EventRequest, StartRequest
+from interview.api.users.model import User
+from interview.evidence.store import get_store
 from interview.interviewer.adapters import from_chat, from_voice
 from interview.interviewer.facade import (
     InterviewSession,
@@ -18,7 +21,7 @@ from interview.schemas.question import Question
 
 router = APIRouter(prefix="/sessions", tags=["Interview Sessions"])
 
-SessionFactory = Callable[[Mode], tuple[InterviewSession, Question]]
+SessionFactory = Callable[..., tuple[InterviewSession, Question]]
 
 
 def get_interview_session_factory() -> SessionFactory:
@@ -36,6 +39,7 @@ def get_interview_session_factory() -> SessionFactory:
 @router.post("")
 def start_session(
     req: StartRequest,
+    current_user: User = Depends(get_current_user),
     session_factory: SessionFactory = Depends(get_interview_session_factory),
 ):
     """면접 세션을 생성하고 compiled graph가 만든 첫 질문을 반환한다.
@@ -60,7 +64,13 @@ def start_session(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"unknown mode: {req.mode}")
 
-    session, _ = session_factory(mode)
+    user_id = str(current_user.id)
+    coverage = get_store().build_coverage_map(user_id=user_id)
+    session, _ = session_factory(
+        mode,
+        coverage=coverage,
+        user_id=user_id,
+    )
     return _session_response(session.get_state())
 
 

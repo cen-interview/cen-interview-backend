@@ -45,8 +45,9 @@ class AssessmentAgent:
             이전 답변과 현재 답변의 모순 감지에 사용된다.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, user_id: str | None = None) -> None:
         """AssessmentAgent의 내부 상태를 초기화한다."""
+        self.user_id = user_id
         self.competency = CompetencyModel()
         self.evaluations: list[AnswerEvaluation] = []
 
@@ -92,6 +93,7 @@ class AssessmentAgent:
             answer_text=answer_text,
             delivery_metrics=delivery_metrics,
             history=self.all_attempts,
+            user_id=self.user_id,
         )
 
         result_state = get_compiled_graph().invoke(state)
