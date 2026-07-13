@@ -1,6 +1,8 @@
 """면접 세션 API의 요청 모델."""
 
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, ValidationError, field_validator
 
 
 class StartRequest(BaseModel):
@@ -14,6 +16,46 @@ class StartRequest(BaseModel):
     mode: str
 
 
+class SubmitEventPayload(BaseModel):
+    """사용자가 명시적으로 제출한 답변 이벤트 payload.
+
+    STT가 만든 전사문이나 채팅 입력을 면접 답변으로 확정할 때 사용한다.
+    API는 앞뒤 공백을 제거한 뒤 비어 있지 않은 답변만 Interviewer 그래프에
+    전달한다.
+
+    Attributes:
+        action:
+            답변 제출을 나타내는 고정 action 값.
+
+        text:
+            사용자가 제출한 답변 또는 STT 최종 전사문.
+    """
+
+    action: Literal["submit"]
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        """제출할 답변의 앞뒤 공백을 제거하고 빈 답변을 거절한다.
+
+        Args:
+            value:
+                채팅 입력 또는 STT가 만든 원본 전사문.
+
+        Returns:
+            앞뒤 공백이 제거된 답변 문자열.
+
+        Raises:
+            ValueError:
+                답변이 비어 있거나 공백으로만 구성된 경우.
+        """
+        normalized_text = value.strip()
+        if not normalized_text:
+            raise ValueError("답변 내용을 입력해 주세요.")
+        return normalized_text
+
+
 class EventRequest(BaseModel):
     """세션에 전달할 채팅 또는 음성 raw 이벤트 요청.
 
@@ -24,3 +66,32 @@ class EventRequest(BaseModel):
     """
 
     payload: dict
+
+    def to_adapter_payload(self) -> dict:
+        """입력 어댑터에 전달할 이벤트 payload를 반환한다.
+
+        submit 이벤트는 SubmitEventPayload로 검증하고 정규화한다. 그 외
+        action은 침묵·다시 듣기·종료 처리를 담당하는 기존 어댑터가 해석할 수
+        있도록 원본 형태를 유지한다. 전달 지표처럼 submit 모델에 아직
+        명시되지 않은 필드도 이후 단계에서 사용할 수 있도록 보존한다.
+
+        Returns:
+            submit 텍스트가 정규화된 이벤트 payload. submit이 아니면 원본
+            payload의 복사본.
+
+        Raises:
+            ValueError:
+                submit action의 text가 없거나 올바른 문자열이 아닌 경우.
+        """
+        normalized_payload = dict(self.payload)
+        if normalized_payload.get("action") != "submit":
+            return normalized_payload
+
+        try:
+            submitted = SubmitEventPayload.model_validate(normalized_payload)
+        except ValidationError as exc:
+            raise ValueError("제출할 답변 내용을 확인해 주세요.") from exc
+
+        normalized_payload["action"] = submitted.action
+        normalized_payload["text"] = submitted.text
+        return normalized_payload

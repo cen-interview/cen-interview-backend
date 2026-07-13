@@ -101,10 +101,11 @@ def post_event(session_id: str, req: EventRequest):
     )
 
     try:
+        payload = req.to_adapter_payload()
         adapted_input = (
-            from_voice(session_id, question_id, req.payload)
+            from_voice(session_id, question_id, payload)
             if state.mode == Mode.VOICE.value
-            else from_chat(session_id, question_id, req.payload)
+            else from_chat(session_id, question_id, payload)
         )
         state = session.submit_event(adapted_input)
     except ValueError as exc:
