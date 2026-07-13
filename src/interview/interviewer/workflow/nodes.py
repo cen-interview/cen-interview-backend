@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from interview.interviewer.intent import detect_voice_command
 from interview.interviewer.workflow.runtime import (
     _restore_signal,
     _runtime_deps,
@@ -9,7 +10,12 @@ from interview.interviewer.workflow.runtime import (
     _state_get,
 )
 from interview.interviewer.session import SessionState, Turn
-from interview.schemas.events import AnswerSubmitted, InterviewerEvent
+from interview.schemas.events import (
+    AnswerSubmitted,
+    EndRequested,
+    InterviewerEvent,
+    ReplayRequested,
+)
 from langgraph.types import interrupt
 from pydantic import TypeAdapter, ValidationError
 
@@ -53,8 +59,9 @@ def validate_event(state: SessionState | dict[str, Any]) -> dict[str, Any]:
     """대기 중인 이벤트를 복원하고 현재 세션에서 처리할 수 있는지 검증한다.
 
     체크포인터에 dict로 저장된 pending_event를 InterviewerEvent 타입으로
-    복원하여 지원하는 이벤트인지 확인한다. 이어서 세션 ID를 검증하고, 답변
-    제출 이벤트라면 현재 질문 ID와 빈 답변 여부도 확인한다.
+    복원하여 지원하는 이벤트인지 확인한다. 이어서 세션 ID를 검증하고, 음성
+    세션의 답변 제출 이벤트라면 짧은 종료/다시 듣기 명령을 해당 이벤트로
+    변환한다. 일반 답변은 현재 질문 ID와 빈 답변 여부도 확인한다.
 
     검증 실패는 예외로 그래프를 중단하지 않고 error에 사용자가 이해할 수 있는
     메시지를 저장한다. 성공한 이벤트도 Pydantic 객체 자체를 상태에 넣지 않고
@@ -81,6 +88,18 @@ def validate_event(state: SessionState | dict[str, Any]) -> dict[str, Any]:
     session_id = _state_get(state, "session_id")
     if event.session_id != session_id:
         return {"error": "현재 면접 세션과 일치하지 않는 이벤트입니다."}
+
+    if isinstance(event, AnswerSubmitted) and _state_get(state, "mode") == "voice":
+        command = detect_voice_command(event.text)
+        common_fields = {
+            "session_id": event.session_id,
+            "event_id": event.event_id,
+            "occurred_at": event.occurred_at,
+        }
+        if command == "end":
+            event = EndRequested(**common_fields)
+        elif command == "replay":
+            event = ReplayRequested(question_id=event.question_id, **common_fields)
 
     if isinstance(event, AnswerSubmitted):
         current_question = _state_get(state, "current_question")
