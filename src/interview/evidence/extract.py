@@ -14,7 +14,8 @@ def extract_evidence(doc: RawDoc) -> list[EvidenceChunk]:
     """RawDoc 한 건에서 근거 후보들을 추출한다.
 
     여기서는 아직 임베딩하지 않는다. 텍스트 + 메타데이터까지만 만들고
-    chunking 으로 넘긴다.
+    chunking 으로 넘긴다. 현재 구현은 RawDoc 전체를 EvidenceChunk 1건으로
+    넘기는 기본 추출기이며, 세부 선별/분류는 별도 추출 로직에서 확장한다.
 
     TODO(담당 A):
       - 면접에 쓸 만한 부분만 선별 (목차/잡담 제외)

@@ -6,6 +6,7 @@ chunking → store 순서를 배선만 한다.
     fetch(Notion/GitHub) → extract → chunk → store.add → coverage map
 
 이 함수가 끝나면 evidence_store 가 준비되고, 이후 면접 중에는 retrieval 만 쓴다.
+일부 source/chunk/store 구현은 외부 저장소 연동 전까지 단순 구현으로 유지한다.
 """
 
 from interview.evidence.chunking import chunk
@@ -26,7 +27,7 @@ def build_index(
         notion_links: 사용자가 등록한 Notion 학습 기록 링크 목록.
         github_links: 사용자가 등록한 GitHub 프로젝트 링크 목록.
         user_id: Evidence store에서 사용자별 청크를 분리하기 위한 사용자 ID.
-            기존 호출처럼 None이면 store의 기본 namespace에 저장한다.
+            None이면 store의 기본 namespace를 사용한다.
 
     Returns:
         주제별 커버리지 맵 (Strategy 가 약한 주제 파악에 사용).

@@ -30,7 +30,6 @@ from interview.strategy.prompts import QUESTION_GEN_SYSTEM
 from interview.strategy.question_gen import GeneratedQuestion
 from interview.strategy.state import StrategyState
 
-
 # 주제 선택 시 confidence 상위 몇 개를 후보 풀로 삼을지 (agent.py에서 그대로 가져옴)
 _TOP_N_POOL = 3
 
@@ -42,6 +41,9 @@ _MAX_RETRY = 3
 
 # validate 실패 시 generate를 다시 시도하는 최대 횟수
 _MAX_REGENERATE = 1
+
+# "면접 초반"으로 간주할 메인 질문 수
+_EARLY_QUESTION_THRESHOLD = 3  
 
 class QuestionGenState(BaseModel):
     """질문 생성 그래프의 상태. (StrategyState와는 다른 클래스 - 위 모듈 docstring 참고)
@@ -56,6 +58,10 @@ class QuestionGenState(BaseModel):
 
         difficulty:
             생성할 질문의 목표 난이도. 그래프 진입 시 확정되어 있다.
+        
+        user_id:
+            면접 응시자 식별자. 아직 API 계층에서 실제 값이
+            흘러들어오지 않아 현재는 None으로 동작.
 
         topic:
             현재 시도 중인 주제. pick_topic 노드에서 채워진다.
@@ -66,6 +72,11 @@ class QuestionGenState(BaseModel):
 
         evidence_chunks:
             retrieve_evidence 노드가 조회한 근거 청크 목록.
+        
+        weak_history_topics:
+            이전 면접 이력에서 약점으로 판단된 주제 목록 (get_weak_topics로 조회).
+            question_count가 _EARLY_QUESTION_THRESHOLD 미만인 초반 구간에서
+            pick_topic이 우선 배치 대상으로 사용한다. 이력이 없으면 빈 리스트.
 
         retry_count:
             대체 주제 재시도 횟수. 무한 루프 방지를 위한 상한 판단에 쓴다.
@@ -95,10 +106,12 @@ class QuestionGenState(BaseModel):
     coverage: CoverageMap = Field(default_factory=CoverageMap)
     strategy_state: StrategyState = Field(default_factory=StrategyState)
     difficulty: Difficulty = Difficulty.EASY
+    user_id: str | None = None
 
     topic: str | None = None
     tried_topics: list[str] = Field(default_factory=list)
     evidence_chunks: list[EvidenceChunk] = Field(default_factory=list)
+    weak_history_topics: list[str] = Field(default_factory=list)
     retry_count: int = 0
 
     generated_text: str | None = None
@@ -153,21 +166,22 @@ def pick_topic(state: QuestionGenState) -> dict:
         filtered = [t for t in pool if t != last_topic[0]]
         pool = filtered or pool
 
-    pool_sorted = sorted(
-        pool,
-        key=lambda t: state.coverage.topic_coverage.get(
-            t, TopicCoverage(confidence=0, chunk_count=0)
-        ).confidence,
-        reverse=True,
-    )
-    top_pool = pool_sorted[:_TOP_N_POOL]
+    if len(pool) > _TOP_N_POOL:
+        pool_sorted = sorted(
+            pool,
+            key=lambda t: state.coverage.topic_coverage.get(
+                t, TopicCoverage(confidence=0, chunk_count=0)
+            ).confidence,
+            reverse=True,
+        )
+        pool = pool_sorted[:_TOP_N_POOL]
 
-    updates["topic"] = random.choice(top_pool)
+    updates["topic"] = random.choice(pool)
     return updates
 
 def retrieve_evidence(state: QuestionGenState) -> dict:
     """현재 topic으로 근거를 검색한다."""
-    chunks = search_evidence(query=state.topic, topic=state.topic, k=5)
+    chunks = search_evidence(query=state.topic, topic=state.topic, k=5, user_id=state.user_id)
     reliable = [c for c in chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
     return {"evidence_chunks": reliable}
 

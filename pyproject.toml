@@ -44,6 +44,10 @@ packages = ["src/interview"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+markers = [
+    "golden: 실제 LLM을 호출하는 골든 시나리오 테스트 (평소 실행에서 제외, 수동 실행용)",
+]
+addopts = "-m 'not golden'"
 
 [tool.ruff]
 line-length = 100
