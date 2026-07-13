@@ -200,8 +200,9 @@ def _session_response(state: SessionState) -> dict:
             compiled graph의 최신 체크포인트에서 복원한 세션 상태.
 
     Returns:
-        세션 ID, 현재 질문, 면접관 발화 큐, 오류, 종료 여부와 최종 리포트를
-        JSON 직렬화 가능한 값으로 정리한 dict.
+        세션 ID, 현재 질문, TTS가 안내 문장과 질문을 순서대로 재생할 수 있는
+        면접관 발화 큐, 오류, 종료 여부와 최종 리포트를 JSON 직렬화 가능한
+        값으로 정리한 dict.
     """
     return {
         "session_id": state.session_id,

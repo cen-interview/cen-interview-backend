@@ -218,6 +218,33 @@ def _generate_llm_preamble(
     return preamble
 
 
+def _build_utterance_queue(
+    preamble: str,
+    question_text: str | None,
+) -> list[str]:
+    """TTS가 순서대로 재생할 발화 큐를 만든다.
+
+    안내 또는 리액션 문장과 질문 원문을 서로 다른 큐 항목으로 유지한다.
+    프론트는 큐를 앞에서부터 하나씩 재생하고, 마지막 항목의 재생 완료
+    콜백에서 마이크를 시작할 수 있다. 질문이 없는 종료·일시정지 턴에는
+    안내 문장만 담고, 비어 있는 문자열은 큐에서 제외한다.
+
+    Args:
+        preamble:
+            질문 앞에 붙는 안내 또는 리액션 문장.
+
+        question_text:
+            Strategy가 만든 질문 원문. 질문이 없는 턴이면 None.
+
+    Returns:
+        TTS가 재생할 순서대로 정리된 발화 문자열 목록.
+    """
+    utterance_queue = [preamble.strip()]
+    if question_text is not None:
+        utterance_queue.append(question_text.strip())
+    return [utterance for utterance in utterance_queue if utterance]
+
+
 def compose_utterance(
     state: SessionState | dict[str, Any],
     runtime: Any,
@@ -227,8 +254,9 @@ def compose_utterance(
     Strategy가 만든 Question.text는 수정하지 않고 짧은 preamble 앞에 그대로
     붙인다. InterviewDeps에 LLM이 있으면 구조화된 preamble 생성을 시도하고,
     LLM이 없거나 호출이 실패하거나 제한 시간을 넘기면 기본 템플릿을 사용한다.
-    조립한 문장은 last_utterance에 저장하고, 순차 재생 가능한 발화 목록인
-    utterance_queue에도 담는다. 동일한 내용을 interviewer Turn으로 transcript에
+    조립한 전체 문장은 last_utterance에 저장한다. TTS용 utterance_queue에는
+    안내 또는 리액션 문장과 질문 원문을 별도 항목으로 담아 프론트가 순서대로
+    재생할 수 있게 한다. 동일한 전체 문장을 interviewer Turn으로 transcript에
     추가한다. closing과 pause_prompt에는 질문을 덧붙이지 않는다.
 
     Args:
@@ -240,9 +268,9 @@ def compose_utterance(
             선택적 LLM이 담긴 InterviewDeps를 제공하는 LangGraph runtime.
 
     Returns:
-        조립된 last_utterance, 순차 재생할 utterance_queue, 면접관 Turn이
-        추가된 transcript를 담은 부분 상태. 질문이 필요한 상황인데 현재
-        질문이 없으면 error를 반환한다.
+        조립된 last_utterance, 안내 문장과 질문 원문이 분리된
+        utterance_queue, 면접관 Turn이 추가된 transcript를 담은 부분 상태.
+        질문이 필요한 상황인데 현재 질문이 없으면 error를 반환한다.
     """
     turn_type = _state_get(state, "turn_type", "question")
     current_question = _state_get(state, "current_question")
@@ -269,8 +297,10 @@ def compose_utterance(
             preamble = fallback_preamble
 
     last_utterance = preamble
+    question_text = None
     if includes_question and current_question is not None:
-        last_utterance = f"{preamble}\n\n{current_question.text}"
+        question_text = current_question.text
+        last_utterance = f"{preamble}\n\n{question_text}"
 
     interviewer_turn = Turn(
         role="interviewer",
@@ -282,7 +312,7 @@ def compose_utterance(
 
     return {
         "last_utterance": last_utterance,
-        "utterance_queue": [last_utterance],
+        "utterance_queue": _build_utterance_queue(preamble, question_text),
         "transcript": [*transcript, interviewer_turn],
         "error": None,
     }
