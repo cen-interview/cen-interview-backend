@@ -3,6 +3,7 @@
 from typing import Any
 
 from interview.interviewer.intent import detect_voice_command
+from interview.interviewer.models import DeliveryMetrics
 from interview.interviewer.workflow.runtime import (
     _restore_signal,
     _runtime_deps,
@@ -47,7 +48,9 @@ def wait_event(state: SessionState, runtime: Any) -> dict[str, Any]:
     """지원자 입력을 기다리고 resume payload를 pending 필드에 저장한다.
 
     interrupt가 있는 노드는 재개 시 처음부터 다시 실행되므로, 여기에는
-    다른 부작용을 두지 않는다.
+    다른 부작용을 두지 않는다. delivery_metrics는 이 단계에서 이벤트 안에
+    합치지 않고 별도 pending 필드에 보관하며, 다음 validate_event가 음성 답변
+    제출에만 사용할 수 있도록 정규화한다.
     """
     payload = interrupt({"waiting_for": "candidate"})
 
@@ -65,9 +68,13 @@ def validate_event(state: SessionState | dict[str, Any]) -> dict[str, Any]:
     세션의 답변 제출 이벤트라면 짧은 종료/다시 듣기 명령을 해당 이벤트로
     변환한다. 일반 답변은 현재 질문 ID와 빈 답변 여부도 확인한다.
 
+    delivery_metrics는 음성 AnswerSubmitted에만 허용한다. 채팅 답변이나 다시
+    듣기, 종료, 침묵, 타임아웃 이벤트에 함께 들어온 지표는 제거한다. 선택적인
+    전달 지표 형식이 잘못된 경우에도 답변 내용 평가를 막지 않고 지표만 버린다.
+
     검증 실패는 예외로 그래프를 중단하지 않고 error에 사용자가 이해할 수 있는
-    메시지를 저장한다. 성공한 이벤트도 Pydantic 객체 자체를 상태에 넣지 않고
-    JSON 직렬화가 가능한 dict로 다시 변환한다.
+    메시지를 저장한다. 성공한 이벤트와 전달 지표도 Pydantic 객체 자체를 상태에
+    넣지 않고 JSON 직렬화가 가능한 dict로 다시 변환한다.
 
     Args:
         state:
@@ -75,8 +82,9 @@ def validate_event(state: SessionState | dict[str, Any]) -> dict[str, Any]:
             가진 dict.
 
     Returns:
-        검증에 성공하면 정규화된 pending_event와 error=None을 담은 부분 상태.
-        실패하면 원인을 설명하는 error를 담은 부분 상태.
+        검증에 성공하면 정규화된 pending_event, 음성 답변에만 허용된
+        pending_delivery_metrics와 error=None을 담은 부분 상태. 실패하면 원인을
+        설명하는 error를 담은 부분 상태.
     """
     pending_event = _state_get(state, "pending_event")
     if pending_event is None:
@@ -114,10 +122,53 @@ def validate_event(state: SessionState | dict[str, Any]) -> dict[str, Any]:
         if not event.text.strip():
             return {"error": "답변 내용을 입력해 주세요."}
 
+    delivery_metrics = _validated_delivery_metrics(state, event)
     return {
         "pending_event": event.model_dump(mode="json"),
+        "pending_delivery_metrics": delivery_metrics,
         "error": None,
     }
+
+
+def _validated_delivery_metrics(
+    state: SessionState | dict[str, Any],
+    event: InterviewerEvent,
+) -> dict[str, Any] | None:
+    """현재 이벤트에서 Assessment로 전달할 수 있는 음성 지표를 정규화한다.
+
+    전달 지표는 음성 모드의 AnswerSubmitted에만 의미가 있다. 다른 모드나
+    이벤트에 지표가 포함되면 조용히 제거해 이벤트 계약과 전달 품질 데이터가
+    섞이지 않도록 한다. 지표는 답변 내용보다 부가적인 정보이므로 형식이 잘못된
+    경우 답변 전체를 실패시키지 않고 None으로 낮춘다.
+
+    Args:
+        state:
+            세션 mode와 pending_delivery_metrics를 가진 현재 상태.
+
+        event:
+            validate_event가 복원하고 음성 명령 해석까지 마친 이벤트.
+
+    Returns:
+        JSON 직렬화 가능한 DeliveryMetrics dict. 음성 답변 지표가 없거나 사용할
+        수 없으면 None.
+    """
+    if _state_get(state, "mode") != "voice" or not isinstance(event, AnswerSubmitted):
+        return None
+
+    raw_metrics = _state_get(state, "pending_delivery_metrics")
+    if raw_metrics is None:
+        return None
+
+    try:
+        metrics = (
+            raw_metrics
+            if isinstance(raw_metrics, DeliveryMetrics)
+            else DeliveryMetrics.model_validate(raw_metrics)
+        )
+    except ValidationError:
+        return None
+    normalized_metrics = metrics.model_dump(mode="json", exclude_none=True)
+    return normalized_metrics or None
 
 
 def record_candidate_answer(
@@ -175,17 +226,34 @@ def record_candidate_answer(
 
 
 def evaluate_answer(state: SessionState, runtime: Any) -> dict[str, Any]:
-    """현재 질문과 pending_event의 답변 텍스트를 평가한다.
+    """현재 답변 내용과 선택적인 음성 전달 지표를 Assessment에 전달한다.
 
-    3단계 skeleton에서는 이벤트 타입 검증과 분기를 아직 하지 않는다.
-    따라서 pending_event는 answer_submitted 형태라고 가정한다.
+    이 노드는 validate_event와 record_candidate_answer를 통과한
+    AnswerSubmitted 경로에서만 실행된다. pending_delivery_metrics는 검증 노드가
+    음성 답변에 대해서만 남긴 값이며, Assessment 호출에서 한 번 사용한 뒤
+    상태에서 즉시 제거한다. 전달 지표는 이벤트 모델 안에 다시 합치지 않는다.
+
+    Args:
+        state:
+            현재 질문, 검증된 답변 이벤트와 선택적인 음성 전달 지표를 가진
+            세션 상태.
+
+        runtime:
+            AssessmentPort가 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+
+    Returns:
+        직렬화된 평가 신호와 소비 완료된 전달 지표 상태를 담은 부분 상태.
     """
     deps = _runtime_deps(runtime)
     current_question = _state_get(state, "current_question")
     pending_event = _state_get(state, "pending_event") or {}
 
     if current_question is None:
-        return {"error": "current_question is missing", "finished": True}
+        return {
+            "pending_delivery_metrics": None,
+            "error": "current_question is missing",
+            "finished": True,
+        }
 
     signal = deps.assessment.evaluate(
 
@@ -196,6 +264,7 @@ def evaluate_answer(state: SessionState, runtime: Any) -> dict[str, Any]:
 
     return {
         "last_signal": _serialize_signal(signal),
+        "pending_delivery_metrics": None,
         "error": None,
     }
 
