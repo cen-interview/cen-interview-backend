@@ -9,6 +9,7 @@ chunking → store 순서를 배선만 한다.
 일부 source/chunk/store 구현은 외부 저장소 연동 전까지 단순 구현으로 유지한다.
 """
 
+from interview.config import settings
 from interview.evidence.chunking import chunk
 from interview.evidence.extract import extract_evidence
 from interview.evidence.sources import GitHubSource, NotionSource, RawDoc
@@ -75,7 +76,10 @@ def build_index(
     all_chunks = []
     for doc in raw_docs:
         try:
-            all_chunks += extract_evidence(doc)
+            all_chunks += extract_evidence(
+                doc,
+                use_llm=settings.evidence_llm_extract_enabled,
+            )
         except Exception as exc:
             failures.append(
                 _failure(
