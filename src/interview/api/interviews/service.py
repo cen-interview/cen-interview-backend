@@ -11,15 +11,34 @@ from interview.api.interviews.model import (
 )
 from interview.schemas.events import Mode
 
+def get_interview_session_by_runtime_id(
+    db: Session,
+    *,
+    runtime_session_id: str,
+    user_id: int,
+) -> InterviewSession | None:
+    return (
+        db.query(InterviewSession)
+        .filter(
+            InterviewSession.runtime_session_id
+            == runtime_session_id,
+            InterviewSession.user_id == user_id,
+        )
+        .first()
+    )
+
+
 def create_interview_session_record(
     db: Session,
     *,
+    runtime_session_id: str,
     user_id: int,
     mode: Mode,
 ) -> InterviewSession:
     """면접 시작 시 DB 세션을 생성하고 발급된 정수 ID를 반환한다."""
 
     session = InterviewSession(
+        runtime_session_id=runtime_session_id,
         user_id=user_id,
         mode=mode,
         status=InterviewSessionStatus.IN_PROGRESS,
@@ -40,7 +59,7 @@ def save_interview_result(
     db: Session,
     *,
     user_id: int,
-    session_id: int,
+    runtime_session_id: str,
     report: FinalReport,
     topic_scores: dict[str, float],
 ) -> InterviewResult:
@@ -49,7 +68,8 @@ def save_interview_result(
     interview_session = (
         db.query(InterviewSession)
         .filter(
-            InterviewSession.session_id == session_id,
+            InterviewSession.runtime_session_id
+            == runtime_session_id,
             InterviewSession.user_id == user_id,
         )
         .first()
@@ -60,7 +80,10 @@ def save_interview_result(
 
     existing = (
         db.query(InterviewResult)
-        .filter(InterviewResult.session_id == session_id)
+        .filter(
+            InterviewResult.session_id
+            == interview_session.session_id
+        )
         .first()
     )
 
@@ -68,7 +91,7 @@ def save_interview_result(
         return existing
 
     result = InterviewResult(
-        session_id=session_id,
+        session_id=interview_session.session_id,
         overall_score=report.overall_score,
         final_report_json=report.model_dump(mode="json"),
         topic_scores_json=topic_scores,

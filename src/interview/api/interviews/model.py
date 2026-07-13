@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    String,
 )
 
 # PostgreSQL의 JSONB 컬럼 타입
@@ -34,6 +35,13 @@ class InterviewSession(Base):
     session_id = Column(
         Integer,
         primary_key=True,
+        index=True,
+    )
+
+    runtime_session_id = Column(
+    String(50),
+        nullable=False,
+        unique=True,
         index=True,
     )
 
