@@ -14,7 +14,8 @@ from interview.schemas.report import (
     CompetencyModel,
     FinalReport,
 )
-
+from interview.assessment.prompts import REPORT_SYSTEM_PROMPT
+from interview.llm.client import get_llm
 
 class ReportContent(BaseModel):
     """LLM 또는 임시 로직이 생성하는 최종 리포트 본문 내용.
@@ -37,8 +38,7 @@ class ReportContent(BaseModel):
 
     strengths: list[str] = Field(default_factory=list)
     improvement_points: list[str] = Field(default_factory=list)
-    learning_recommendations: list[str] = Field(default_factory=list
-    )
+    learning_recommendations: list[str] = Field(default_factory=list)
 
 
 def build_report(
@@ -137,13 +137,99 @@ def _build_content_with_llm(
         추후 이 함수 내부만 실제 LLM 호출로 교체하면 된다.
     """
 
-    # 실제 LLM 연결 시 프롬프트에 전달할 값
-    _ = competency
-    _ = overall_score
+    if not evaluations:
+        return _temporary_report_content(evaluations)
 
-    return _temporary_report_content(evaluations)
+    try:
+        llm = get_llm(temperature=0.2)
+        structured_llm = llm.with_structured_output(ReportContent)
 
+        return structured_llm.invoke(
+        [
+            {"role": "system", "content": REPORT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": _build_report_user_prompt(
+                    competency=competency,
+                    evaluations=evaluations,
+                    overall_score=overall_score,
+                ),
+            },
+        ]
+    )
+    except Exception:
+        return _temporary_report_content(evaluations)
 
+def _select_topics_to_improve(
+    competency: CompetencyModel,
+    evaluations: list[AnswerEvaluation],
+) -> list[str]:
+    misconception_topics = []
+    low_score_topics = []
+
+    for evaluation in evaluations:
+        if any(
+            trace.quality == "misconception"
+            for trace in evaluation.quality_trace
+        ):
+            misconception_topics.append(evaluation.topic)
+
+    for topic, score in sorted(
+        competency.topic_scores.items(),
+        key=lambda item: item[1],
+    ):
+        low_score_topics.append(topic)
+
+    return _collect_unique_items(
+        misconception_topics + low_score_topics
+    )
+    
+
+def _build_report_user_prompt(
+    competency: CompetencyModel,
+    evaluations: list[AnswerEvaluation],
+    overall_score: float,
+) -> str:
+    topics_to_improve = _select_topics_to_improve(
+        competency=competency,
+        evaluations=evaluations,
+    )
+    
+    evaluation_lines = []
+
+    for index, evaluation in enumerate(evaluations, start=1):
+        quality_trace = [
+            trace.model_dump(mode="json")
+            for trace in evaluation.quality_trace
+        ]
+
+        evaluation_lines.append(
+            (
+                f"[문항 {index}]\n"
+                f"question_id: {evaluation.question_id}\n"
+                f"topic: {evaluation.topic}\n"
+                f"question: {evaluation.question}\n"
+                f"answer_summary: {evaluation.answer_summary}\n"
+                f"score: {evaluation.score}\n"
+                f"comment: {evaluation.comment}\n"
+                f"delivery_note: {evaluation.delivery_note or '(없음)'}\n"
+                f"quality_trace: {quality_trace}"
+            )
+        )
+
+    return (
+        f"overall_score: {overall_score}\n"
+        f"topics_to_improve: {topics_to_improve}\n"
+        f"competency.average_score: {competency.average_score}\n"
+        f"competency.topic_scores: {competency.topic_scores}\n"
+        f"competency.strengths: {competency.strengths}\n"
+        f"competency.improvement_points: {competency.improvement_points}\n"
+        f"competency.learning_recommendations: {competency.learning_recommendations}\n\n"
+        "[문항별 evaluations]\n"
+        + "\n\n".join(evaluation_lines)
+    )
+    
+    
 def _temporary_report_content(
     evaluations: list[AnswerEvaluation],
 ) -> ReportContent:

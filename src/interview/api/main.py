@@ -29,6 +29,13 @@ from interview.schemas.events import AnswerSubmitted, EndRequested
 from interview.schemas.question import Difficulty, Question, QuestionKind
 from interview.strategy.agent import StrategyAgent
 
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+from interview.api.auth.dependency import get_current_user
+from interview.api.database import Base, engine, get_db
+from interview.api.interviews.service import save_interview_result
+
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -36,7 +43,7 @@ from functools import lru_cache
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Base.metadata.create_all(bind=engine)
+    #Base.metadata.create_all(bind=engine)
     yield
 
 app = FastAPI(
@@ -90,7 +97,7 @@ def start_session(req: StartRequest):
 
 # ── 3. 면접 진행 (이벤트 수신) ────────────────────────────
 class EventRequest(BaseModel):
-    session_id: str
+    session_id: int
     mode: str            # "voice" | "chat"
     payload: dict        # raw 입력 (어댑터가 해석)
 
@@ -166,7 +173,7 @@ def create_session():
 
 
 @app.post("/api/sessions/{session_id}/answer")
-def submit_answer(session_id: str, request: AnswerRequest):
+def submit_answer(session_id: int, request: AnswerRequest):
     session = sessions.get(session_id)
     assessment = assessments.get(session_id)
 
@@ -205,12 +212,19 @@ def submit_answer(session_id: str, request: AnswerRequest):
 
 
 @app.post("/api/sessions/{session_id}/end")
-def end_session(session_id: str):
+def end_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     session = sessions.get(session_id)
     assessment = assessments.get(session_id)
 
     if session is None or assessment is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        raise HTTPException(
+            status_code=404,
+            detail="session not found",
+        )
 
     event = EndRequested(session_id=session_id)
 
@@ -222,9 +236,20 @@ def end_session(session_id: str):
 
     interviewer.handle(event)
 
+    # 최종 리포트 생성
     report = assessment.finalize()
 
+    # 최종 리포트 DB 저장
+    result = save_interview_result(
+        db=db,
+        user_id=current_user.id,
+        session_id=session_id,
+        report=report,
+        topic_scores=assessment.competency.topic_scores,
+    )
+
     return {
+        "result_id": result.id,
         "session_id": session_id,
         "finished": session.finished,
         "report": report,
