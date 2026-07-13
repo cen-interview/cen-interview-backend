@@ -18,6 +18,8 @@ from .events import (
 from .evidence import (
     CoverageMap,
     EvidenceChunk,
+    IndexBuildResult,
+    IndexFailure,
     RetrievalResult,
     SourceType,
     TopicCoverage,
@@ -38,6 +40,8 @@ __all__ = [
     # evidence
     "CoverageMap",
     "EvidenceChunk",
+    "IndexBuildResult",
+    "IndexFailure",
     "RetrievalResult",
     "SourceType",
     "TopicCoverage",
