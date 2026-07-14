@@ -213,7 +213,7 @@ class AssessmentAgent:
             # 메인 질문 원문.
             question=main_attempt.question_text,
             # 메인 질문에 대한 최초 답변.
-            answer_summary=self._build_answer_summary(),
+            answer_summary=self._build_answer_context(),
             score=score.score,
             comment=score.comment,
             delivery_note=self._build_delivery_note(),
@@ -300,7 +300,7 @@ class AssessmentAgent:
         return " ".join(dict.fromkeys(notes))
 
 # 현재 질문 세트에 포함된 답변 내용을 하나의 문자열로 합친다.
-    def _build_answer_summary(self) -> str:   
+    def _build_answer_context(self) -> str:   
         return "\n".join(
             attempt.answer_text
             for attempt in self.current_attempts
