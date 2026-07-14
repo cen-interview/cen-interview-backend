@@ -1,26 +1,15 @@
-import os
-
 # SQLAlchemy에서 DB 연결 엔진을 만들 때 사용하는 함수
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 # DB 세션을 만들기 위한 sessionmaker,
 # ORM 모델들의 부모 클래스 역할을 하는 declarative_base를 가져옴
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-from dotenv import load_dotenv # DB_URL 호출 필요
-
-load_dotenv()
-
-# PostgreSQL DB 접속 주소
-# 형식: postgresql+psycopg://사용자명:비밀번호@호스트:포트/DB이름
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg://interview:1234@localhost:5432/interviewdb",  # 로컬 개발 fallback
-)
+from interview.config import settings
 
 # 실제 DB와 연결하는 엔진 생성
 # SQLAlchemy가 이 엔진을 통해 PostgreSQL과 통신함
-engine = create_engine(DATABASE_URL)
+engine = create_engine(settings.database_url)
 
 
 # DB 작업을 할 때 사용할 세션 생성기
@@ -53,6 +42,8 @@ def create_missing_tables() -> None:
     from interview.api.users import model as users_model
 
     _ = (auth_model, evidence_model, interviews_model, users_model)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(bind=engine)
 
 # FastAPI에서 DB 세션을 의존성 주입으로 사용하기 위한 함수

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # Authentication
+    jwt_secret_key: str
+
     # LLM
     openai_api_key: str = ""
     llm_model: str = "gpt-4o-mini-2024-07-18" # "gpt-5.4-mini"
@@ -45,7 +48,7 @@ class Settings(BaseSettings):
     frontend_app_url: str = "http://localhost:5173"
 
     # Vector DB (Postgres + pgvector)
-    database_url: str = "postgresql://postgres:postgres@localhost:5432/interview"
+    database_url: str = "postgresql+psycopg://interview:1234@localhost:5432/interviewdb"
 
     # Embedding
     embedding_model: str = "text-embedding-3-small"
@@ -57,8 +60,7 @@ class Settings(BaseSettings):
     # Evidence
     use_stub_evidence: bool = False
     evidence_llm_extract_enabled: bool = False
-    evidence_store_backend: str = "memory"
-    evidence_chroma_path: str = ".chroma/evidence"
+    evidence_store_backend: str = "pgvector"
     evidence_github_max_commits: int = 200
     evidence_github_max_code_files: int = 50
     evidence_github_max_file_chars: int = 30000

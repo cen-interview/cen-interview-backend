@@ -5,14 +5,15 @@ from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
+from interview.config import settings
+
 
 # 비밀번호 암호화 설정
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # JWT 설정값
-# 실제 배포 시에는 환경 변수로 분리하는 것이 좋음
-SECRET_KEY = "interview-secret-key"
+SECRET_KEY = settings.jwt_secret_key
 ALGORITHM = "HS256"
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
