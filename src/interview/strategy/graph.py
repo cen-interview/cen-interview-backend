@@ -130,8 +130,11 @@ def pick_topic(state: QuestionGenState) -> dict:
             1) 근거가 약한 주제(weak_topics)는 후보에서 제외한다.
             2) 남은 후보 중 아직 묻지 않은 주제를 우선한다.
             3) 직전 주제와 연속되지 않게 회피한다.
-            4) 모든 후보를 다 물었다면(주제 소진) 처음부터 다시 순환한다.
-            5) 근거가 있는 주제가 하나도 없으면(coverage 미주입 등) 폴백 주제를
+            4) 이전 면접에서 약점이었던 주제(weak_history_topics)가 있고
+            초반(question_count < _EARLY_QUESTION_THRESHOLD)이면, 후보 중
+            그 주제들로 좁혀 우선 배치한다.
+            5) 모든 후보를 다 물었다면(주제 소진) 처음부터 다시 순환한다.
+            6) 근거가 있는 주제가 하나도 없으면(coverage 미주입 등) 폴백 주제를
             반환한다.
 
         남은 후보를 confidence 높은 순으로 정렬한 뒤, 상위 _TOP_N_POOL개 안에서
@@ -166,6 +169,14 @@ def pick_topic(state: QuestionGenState) -> dict:
     if last_topic and len(pool) > 1:
         filtered = [t for t in pool if t != last_topic[0]]
         pool = filtered or pool
+
+    if (
+        state.weak_history_topics
+        and state.strategy_state.question_count < _EARLY_QUESTION_THRESHOLD
+    ):
+        weak_history_pool = [t for t in pool if t in state.weak_history_topics]
+        if weak_history_pool:
+            pool = weak_history_pool
 
     if len(pool) > _TOP_N_POOL:
         pool_sorted = sorted(
