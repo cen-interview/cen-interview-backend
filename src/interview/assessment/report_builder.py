@@ -49,6 +49,8 @@ class ReportContent(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     improvement_points: list[str] = Field(default_factory=list)
     learning_recommendations: list[str] = Field(default_factory=list)
+    
+    evaluation_summaries: list[str] = Field(default_factory=list)
 
 # 누적 역량과 문항별 평가를 이용해 최종 면접 리포트를 생성한다.
 def build_report(
@@ -64,6 +66,16 @@ def build_report(
         evaluations=evaluations,
         overall_score=overall_score,
     )
+    
+    summarized_evaluations = [
+        evaluation.model_copy(
+            update={"answer_summary": summary}
+        )
+        for evaluation, summary in zip(
+            evaluations,
+            report_content.evaluation_summaries,
+        )
+    ]
 
     return FinalReport(
         summary=report_content.summary,
@@ -71,7 +83,7 @@ def build_report(
         strengths=report_content.strengths,
         improvement_points=report_content.improvement_points,
         learning_recommendations=report_content.learning_recommendations,
-        evaluations=evaluations,
+        evaluations=summarized_evaluations,
     )
 
 # 문항별 평가 점수의 평균을 계산하고 반올림한다.
