@@ -97,9 +97,9 @@ graph TD;
 | `answer_excerpt` | Interviewer가 transcript에서 발췌 | 답변 인용 |
 | `rationale` | `AnswerQualitySignal.rationale` | 판단 근거 반영, 더 정확한 문제 지점을 겨냥하는 질문 생성에 사용 |
 
-## 개인화 (personalization.py)
+## 개인화 (weak_history_topics)
 
-`get_weak_topics(user_id)`는 Assessment 담당의 실제 구현 제공 전까지 항상 빈 리스트를 반환하는 stub이다. 이전 면접 이력이 없을 때와 동일하게 동작하므로, 별도 분기 없이 자연스럽게 "커버리지 기반 선택만" 동작한다.
+이전 면접에서 약점으로 평가된 주제 목록은 `api/interviews/service.get_weak_topics(db, user_id)`(DB 조회)가 호출자 쪽(`api/sessions/router.py` → `facade.create_session`)에서 미리 조회해 `StrategyAgent(weak_history_topics=...)` 생성자로 전달한다. Strategy 패키지는 DB나 세션을 전혀 몰라도 되고, 받은 `list[str]`을 `self.weak_history_topics`에 저장해뒀다가 매 `next_question()` 호출 시 `QuestionGenState`에 그대로 넘긴다. 이전 이력이 없으면(신규 사용자 등) 빈 리스트가 전달되며, 이 경우 `pick_topic`의 4번 규칙은 자연스럽게 스킵되고 "커버리지 기반 선택만" 동작한다.
 
 ## 개발용 스크립트
 
