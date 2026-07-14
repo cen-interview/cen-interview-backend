@@ -32,6 +32,7 @@ jobs:
       - name: Import smoke test
         env:
           OPENAI_API_KEY: dummy-key-for-ci
+          JWT_SECRET_KEY: dummy-key-for-ci
         run: |
           uv run python -c "import interview.schemas.events"
           uv run python -c "import interview.strategy"

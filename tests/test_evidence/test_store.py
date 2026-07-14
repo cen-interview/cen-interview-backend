@@ -108,111 +108,8 @@ def test_clear_user_sources_keeps_other_source_chunks() -> None:
     assert [chunk.chunk_id for chunk in store.query("", user_id="user-1")] == ["notion-1"]
 
 
-def test_chroma_backend_embeds_and_upserts_chunks() -> None:
-    """chroma backend는 add_chunks에서 문서를 임베딩하고 metadata와 함께 upsert한다."""
-
-    class FakeEmbeddings:
-        """임베딩 호출 입력을 기록하는 fake embedding client."""
-
-        def __init__(self) -> None:
-            self.documents: list[list[str]] = []
-
-        def embed_documents(self, texts: list[str]) -> list[list[float]]:
-            """문서 임베딩을 고정 벡터로 반환한다."""
-            self.documents.append(texts)
-            return [[1.0, 0.0], [0.0, 1.0]]
-
-    class FakeCollection:
-        """Chroma collection의 upsert 호출을 기록한다."""
-
-        def __init__(self) -> None:
-            self.upsert_calls: list[dict] = []
-
-        def upsert(self, **kwargs) -> None:
-            """upsert 인자를 기록한다."""
-            self.upsert_calls.append(kwargs)
-
-    embeddings = FakeEmbeddings()
-    collection = FakeCollection()
-    store = EvidenceStore(backend="chroma", embedding_client=embeddings)
-    store._collection = collection
-    chunks = [
-        _chunk("chunk-1", "JPA", 0.8, text="JPA N+1 해결 근거"),
-        _chunk("chunk-2", "Redis", 0.7, text="Redis 캐시 적용 근거"),
-    ]
-
-    store.add_chunks(chunks, user_id="user-1")
-
-    assert embeddings.documents == [["JPA N+1 해결 근거", "Redis 캐시 적용 근거"]]
-    assert len(collection.upsert_calls) == 1
-    call = collection.upsert_calls[0]
-    assert call["ids"] == ["user-1:chunk-1", "user-1:chunk-2"]
-    assert call["documents"] == ["JPA N+1 해결 근거", "Redis 캐시 적용 근거"]
-    assert call["embeddings"] == [[1.0, 0.0], [0.0, 1.0]]
-    assert call["metadatas"][0]["user_id"] == "user-1"
-    assert call["metadatas"][0]["chunk_id"] == "chunk-1"
-    assert call["metadatas"][0]["topic"] == "JPA"
-
-
-def test_chroma_backend_query_restores_evidence_chunks() -> None:
-    """chroma backend query는 query embedding으로 검색하고 EvidenceChunk를 복원한다."""
-
-    class FakeEmbeddings:
-        """query 임베딩 호출을 기록하는 fake embedding client."""
-
-        def __init__(self) -> None:
-            self.queries: list[str] = []
-
-        def embed_query(self, query: str) -> list[float]:
-            """query 임베딩을 고정 벡터로 반환한다."""
-            self.queries.append(query)
-            return [0.5, 0.5]
-
-    class FakeCollection:
-        """Chroma query 결과를 반환하는 fake collection."""
-
-        def __init__(self) -> None:
-            self.query_calls: list[dict] = []
-
-        def query(self, **kwargs) -> dict:
-            """query 인자를 기록하고 저장된 청크 metadata를 반환한다."""
-            self.query_calls.append(kwargs)
-            return {
-                "documents": [["JPA N+1 해결 근거"]],
-                "metadatas": [
-                    [
-                        {
-                            "chunk_id": "chunk-1",
-                            "source_type": "notion",
-                            "source_url": "https://notion.so/chunk-1",
-                            "topic": "JPA",
-                            "doc_type": "study",
-                            "week": -1,
-                            "date": "",
-                            "confidence": 0.8,
-                        }
-                    ]
-                ],
-            }
-
-    embeddings = FakeEmbeddings()
-    collection = FakeCollection()
-    store = EvidenceStore(backend="chroma", embedding_client=embeddings)
-    store._collection = collection
-
-    results = store.query("N+1", topic="JPA", user_id="user-1")
-
-    assert embeddings.queries == ["N+1"]
-    assert collection.query_calls[0]["query_embeddings"] == [[0.5, 0.5]]
-    assert collection.query_calls[0]["where"] == {
-        "$and": [{"user_id": "user-1"}, {"topic": "JPA"}]
-    }
-    assert [chunk.chunk_id for chunk in results] == ["chunk-1"]
-    assert results[0].text == "JPA N+1 해결 근거"
-
-
-def test_chroma_metadata_preserves_github_provenance() -> None:
-    """파일 경로와 사용자 기여 정보는 Chroma 왕복 후에도 유지되어야 한다."""
+def test_pgvector_record_values_preserve_github_provenance() -> None:
+    """pgvector 저장 입력과 복원 결과가 GitHub provenance를 보존해야 한다."""
     store = EvidenceStore()
     chunk = EvidenceChunk(
         chunk_id="github-1",
@@ -229,10 +126,31 @@ def test_chroma_metadata_preserves_github_provenance() -> None:
         last_commit_sha="a" * 40,
     )
 
-    metadata = store._metadata_from_chunk(chunk, "user-1")
-    restored = store._chunk_from_metadata(document=chunk.text, metadata=metadata)
+    values = store._record_values(
+        chunk=chunk,
+        namespace="user-1",
+        embedding=[0.1, 0.2],
+    )
+
+    class Record:
+        """ORM 조회 결과와 같은 속성을 제공하는 테스트 대역."""
+
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    restored = store._chunk_from_record(Record(**values))
 
     assert restored.file_path == "src/AuthService.java"
     assert restored.ownership == "user_touched"
     assert restored.commit_count == 3
     assert restored.last_commit_sha == "a" * 40
+
+
+def test_rejects_unsupported_backend() -> None:
+    """지원하지 않는 저장소 backend 설정은 거부한다."""
+    try:
+        EvidenceStore(backend="unsupported")
+    except ValueError as exc:
+        assert "pgvector" in str(exc)
+    else:
+        raise AssertionError("unsupported backend must be rejected")
