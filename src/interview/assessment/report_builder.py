@@ -1,10 +1,19 @@
-"""최종 평가서 생성.
+"""누적된 문항 평가를 바탕으로 면접 최종 리포트를 생성한다.
 
-누적된 역량 모델과 문항별 평가 결과를 바탕으로
-면접 전체 요약, 종합 점수, 전체 강점, 전체 보완 포인트,
-추천 학습 방향을 생성한다.
+문항별 AnswerEvaluation의 평균으로 종합 점수를 계산하고,
+CompetencyModel과 문항별 평가 내용을 LLM에 전달하여 전체 요약,
+강점, 보완 포인트와 추천 학습 방향을 생성한다.
 
-현재는 LLM 연결 전이므로 임시 리포트 내용을 반환한다.
+처리 흐름:
+    1. 문항별 평가 점수의 평균으로 overall_score를 계산한다.
+    2. 오개념 발생 주제와 낮은 점수 주제를 개선 우선순위로 선정한다.
+    3. 전체 문항 평가와 역량 상태를 LLM 프롬프트로 변환한다.
+    4. LLM의 구조화된 출력을 ReportContent로 받는다.
+    5. LLM 호출이 실패하면 규칙 기반 임시 리포트를 반환한다.
+    6. 생성된 본문과 문항별 평가를 FinalReport로 조립한다.
+
+최종 리포트 생성이 실패하더라도 면접 종료가 중단되지 않도록
+규칙 기반 리포트를 폴백으로 제공한다.
 """
 
 from pydantic import BaseModel, Field
@@ -40,27 +49,12 @@ class ReportContent(BaseModel):
     improvement_points: list[str] = Field(default_factory=list)
     learning_recommendations: list[str] = Field(default_factory=list)
 
-
+# 누적 역량과 문항별 평가를 이용해 최종 면접 리포트를 생성한다.
 def build_report(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
 ) -> FinalReport:
-    """누적 평가를 바탕으로 최종 리포트를 생성한다.
 
-    Args:
-        competency:
-            면접 전체의 누적 역량 상태.
-            주제별 점수, 강점, 보완 포인트 등을 담는다.
-
-        evaluations:
-            문항별 평가 목록.
-            각 AnswerEvaluation은 메인 질문, 전체 답변 요약,
-            문항 점수, 평가 코멘트를 포함한다.
-
-    Returns:
-        FinalReport:
-            사용자에게 최종적으로 보여줄 면접 평가 리포트.
-    """
 
     overall_score = _calculate_overall_score(evaluations)
 
@@ -79,25 +73,11 @@ def build_report(
         evaluations=evaluations,
     )
 
-
+# 문항별 평가 점수의 평균을 계산하고 반올림한다.
 def _calculate_overall_score(
     evaluations: list[AnswerEvaluation],
 ) -> float:
-    """문항별 점수의 평균을 계산한다.
 
-    Args:
-        evaluations:
-            문항별 평가 목록.
-
-    Returns:
-        float:
-            전체 문항 점수의 평균.
-            평가가 없으면 0.0을 반환한다.
-
-    Note:
-        round(..., 2)의 2는 문항 개수가 아니라
-        소수점 둘째 자리까지 반올림한다는 의미이다.
-    """
 
     if not evaluations:
         return 0.0
@@ -109,33 +89,13 @@ def _calculate_overall_score(
 
     return round(score_sum / len(evaluations), 0)
 
-
+# LLM으로 리포트 본문을 생성하고 실패하면 폴백 내용을 반환한다.
 def _build_content_with_llm(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
     overall_score: float,
 ) -> ReportContent:
-    """LLM으로 최종 리포트 본문을 생성한다.
 
-    Args:
-        competency:
-            면접 전체의 누적 역량 상태.
-
-        evaluations:
-            문항별 평가 목록.
-
-        overall_score:
-            문항별 점수 평균으로 계산된 종합 점수.
-
-    Returns:
-        ReportContent:
-            FinalReport에 들어갈 summary, strengths,
-            improvement_points, learning_recommendations.
-
-    TODO:
-        현재는 LLM 연결 전이므로 임시 생성 함수를 호출한다.
-        추후 이 함수 내부만 실제 LLM 호출로 교체하면 된다.
-    """
 
     if not evaluations:
         return _temporary_report_content(evaluations)
@@ -160,7 +120,7 @@ def _build_content_with_llm(
     except Exception:
         return _temporary_report_content(evaluations)
 
-
+# 오개념 발생 주제와 낮은 점수 주제를 개선 우선순위로 선정한다.
 def _select_topics_to_improve(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
@@ -185,7 +145,7 @@ def _select_topics_to_improve(
         misconception_topics + low_score_topics
     )
 
-
+# 역량 상태와 문항별 평가를 최종 리포트 생성 프롬프트로 변환한다.
 def _build_report_user_prompt(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
@@ -230,20 +190,11 @@ def _build_report_user_prompt(
         + "\n\n".join(evaluation_lines)
     )
 
-
+# LLM 호출 실패 시 사용할 규칙 기반 리포트 본문을 생성한다.
 def _temporary_report_content(
     evaluations: list[AnswerEvaluation],
 ) -> ReportContent:
-    """LLM 연결 전 사용하는 임시 리포트 내용을 생성한다.
 
-    Args:
-        evaluations:
-            문항별 평가 목록.
-
-    Returns:
-        ReportContent:
-            임시 면접 요약, 강점, 보완 포인트, 학습 추천.
-    """
 
     if not evaluations:
         return ReportContent(
@@ -284,19 +235,10 @@ def _temporary_report_content(
         ],
     )
 
-
+# 입력 순서를 유지하면서 중복 문자열을 제거한다.
 def _collect_unique_items(
     items,
 ) -> list[str]:
-    """중복을 제거하면서 기존 순서를 유지한다.
 
-    Args:
-        items:
-            중복 제거 대상 iterable.
-
-    Returns:
-        list[str]:
-            입력 순서를 유지한 고유 문자열 목록.
-    """
 
     return list(dict.fromkeys(items))
