@@ -13,6 +13,7 @@ from interview.interviewer.speech.prompts import (
     build_utterance_user_prompt,
 )
 from interview.interviewer.workflow.runtime import _runtime_deps, _state_get
+from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.question import Question, QuestionKind
 
 _UTTERANCE_LLM_TIMEOUT_SECONDS = 3.0
@@ -215,6 +216,17 @@ def _generate_llm_preamble(
         raise ValueError("LLM이 빈 면접관 안내 문장을 반환했습니다.")
     if question_text and question_text.strip() in preamble:
         raise ValueError("LLM 안내 문장에 원본 질문이 포함되었습니다.")
+
+    log_llm_output(
+        "INTERVIEWER_PREAMBLE",
+        composed,
+        metadata={
+            "turn_type": turn_type,
+            "question_id": current_question.question_id if current_question else None,
+            "question_kind": question_kind,
+        },
+        input_data={"user_prompt": user_prompt},
+    )
     return preamble
 
 
@@ -284,6 +296,7 @@ def compose_utterance(
     question_kind = current_question.kind if current_question is not None else None
     fallback_preamble = _select_utterance_preamble(turn_type, question_kind)
     preamble = fallback_preamble
+    preamble_source = "template"
     deps = _runtime_deps(runtime)
     if deps.llm is not None:
         try:
@@ -293,8 +306,20 @@ def compose_utterance(
                 turn_type=turn_type,
                 current_question=current_question,
             )
-        except Exception:
+            preamble_source = "llm"
+        except Exception as exc:
             preamble = fallback_preamble
+            preamble_source = "template_fallback"
+            log_llm_error(
+                "INTERVIEWER_PREAMBLE",
+                exc,
+                metadata={
+                    "turn_type": turn_type,
+                    "question_id": current_question.question_id if current_question else None,
+                    "question_kind": question_kind.value if question_kind else None,
+                },
+                fallback={"preamble": fallback_preamble},
+            )
 
     last_utterance = preamble
     question_text = None
@@ -309,6 +334,22 @@ def compose_utterance(
         kind=current_question.kind.value if includes_question else None,
     )
     transcript = _state_get(state, "transcript", []) or []
+
+    log_llm_output(
+        "INTERVIEWER_UTTERANCE",
+        {
+            "preamble": preamble,
+            "question": question_text,
+            "utterance": last_utterance,
+        },
+        metadata={
+            "source": preamble_source,
+            "turn_type": turn_type,
+            "question_id": current_question.question_id if current_question else None,
+            "question_kind": question_kind.value if question_kind else None,
+        },
+        status=preamble_source,
+    )
 
     return {
         "last_utterance": last_utterance,
