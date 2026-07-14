@@ -16,6 +16,7 @@ from interview.schemas.report import (
 )
 from interview.assessment.prompts import REPORT_SYSTEM_PROMPT
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error, log_llm_output
 
 class ReportContent(BaseModel):
     """LLM 또는 임시 로직이 생성하는 최종 리포트 본문 내용.
@@ -143,22 +144,44 @@ def _build_content_with_llm(
     try:
         llm = get_llm(temperature=0.2)
         structured_llm = llm.with_structured_output(ReportContent)
+        user_prompt = _build_report_user_prompt(
+            competency=competency,
+            evaluations=evaluations,
+            overall_score=overall_score,
+        )
 
-        return structured_llm.invoke(
-        [
-            {"role": "system", "content": REPORT_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": _build_report_user_prompt(
-                    competency=competency,
-                    evaluations=evaluations,
-                    overall_score=overall_score,
-                ),
+        result = structured_llm.invoke(
+            [
+                {"role": "system", "content": REPORT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+        log_llm_output(
+            "FINAL_REPORT_GENERATION",
+            result,
+            metadata={
+                "overall_score": overall_score,
+                "evaluation_count": len(evaluations),
             },
-        ]
-    )
-    except Exception:
-        return _temporary_report_content(evaluations)
+            input_data={"user_prompt": user_prompt},
+        )
+        return result
+    except Exception as exc:
+        fallback = _temporary_report_content(evaluations)
+        log_llm_error(
+            "FINAL_REPORT_GENERATION",
+            exc,
+            metadata={
+                "overall_score": overall_score,
+                "evaluation_count": len(evaluations),
+            },
+            fallback=fallback,
+            input_data={
+                "competency": competency,
+                "evaluations": evaluations,
+            },
+        )
+        return fallback
 
 def _select_topics_to_improve(
     competency: CompetencyModel,

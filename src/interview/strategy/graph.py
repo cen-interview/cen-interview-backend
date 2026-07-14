@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from interview.evidence.retrieval import search_evidence
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.evidence import CoverageMap, EvidenceChunk, TopicCoverage
 from interview.schemas.question import Difficulty, Question, QuestionKind
 from interview.strategy.prompts import QUESTION_GEN_SYSTEM
@@ -236,13 +237,44 @@ def generate(state: QuestionGenState) -> dict:
             "validation_failed": False,
             "validation_reason": None,
         })
-    except Exception:
+        log_llm_output(
+            "MAIN_QUESTION_GENERATION",
+            result,
+            metadata={
+                "topic": state.topic,
+                "difficulty": state.difficulty.value,
+                "question_kind": QuestionKind.MAIN.value,
+                "evidence_ids": [chunk.chunk_id for chunk in state.evidence_chunks],
+                "regenerate_count": updates.get(
+                    "regenerate_count",
+                    state.regenerate_count,
+                ),
+            },
+            input_data={"user_prompt": user_prompt},
+        )
+    except Exception as exc:
+        fallback = {
+            "text": f"{state.topic}에 대해 설명해 주세요.",
+            "category": None,
+        }
         updates.update({
-            "generated_text": f"{state.topic}에 대해 설명해 주세요.",
+            "generated_text": fallback["text"],
             "generated_category": None,
             "validation_failed": False,
             "validation_reason": None,
         })
+        log_llm_error(
+            "MAIN_QUESTION_GENERATION",
+            exc,
+            metadata={
+                "topic": state.topic,
+                "difficulty": state.difficulty.value,
+                "question_kind": QuestionKind.MAIN.value,
+                "evidence_ids": [chunk.chunk_id for chunk in state.evidence_chunks],
+            },
+            fallback=fallback,
+            input_data={"user_prompt": user_prompt},
+        )
 
     return updates
 
@@ -261,14 +293,35 @@ def validate(state: QuestionGenState) -> dict:
     text = (state.generated_text or "").strip()
 
     if text.count("?") != 1:
-        return {"validation_failed": True, "validation_reason": "질문이 정확히 1개가 아님"}
+        reason = "질문이 정확히 1개가 아님"
+        log_llm_output(
+            "QUESTION_VALIDATION",
+            {"text": text, "reason": reason},
+            metadata={"topic": state.topic},
+            status="rejected",
+        )
+        return {"validation_failed": True, "validation_reason": reason}
 
     if not text.endswith("?"):
-        return {"validation_failed": True, "validation_reason": "물음표로 끝나지 않음"}
+        reason = "물음표로 끝나지 않음"
+        log_llm_output(
+            "QUESTION_VALIDATION",
+            {"text": text, "reason": reason},
+            metadata={"topic": state.topic},
+            status="rejected",
+        )
+        return {"validation_failed": True, "validation_reason": reason}
 
     for asked in state.strategy_state.asked_question_texts:
         if _too_similar(text, asked):
-            return {"validation_failed": True, "validation_reason": "이미 한 질문과 유사함"}
+            reason = "이미 한 질문과 유사함"
+            log_llm_output(
+                "QUESTION_VALIDATION",
+                {"text": text, "reason": reason, "similar_question": asked},
+                metadata={"topic": state.topic},
+                status="rejected",
+            )
+            return {"validation_failed": True, "validation_reason": reason}
 
     return {"validation_failed": False, "validation_reason": None}
 

@@ -32,6 +32,7 @@ from interview.schemas.question import (
 )
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal,ConflictType
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error, log_llm_output
 from interview.assessment.prompts import JUDGE_SYSTEM,DELIVERY_NOTE
 
 """
@@ -295,9 +296,46 @@ def _judge_with_llm(
             update={"delivery_note": None}
         )
 
+        log_llm_output(
+            "ANSWER_ASSESSMENT",
+            result,
+            metadata={
+                "question_id": question.question_id,
+                "topic": question.topic,
+                "question_kind": question.kind.value,
+                "category": question.category.value if question.category else None,
+                "evidence_ids": [chunk.chunk_id for chunk in evidence_chunks],
+            },
+            input_data={
+                "question": question,
+                "answer_text": answer_text,
+                "delivery_metrics": delivery_metrics,
+                "history": history,
+                "user_prompt": user_prompt,
+            },
+        )
+
         return result
     
     except Exception as e:
+        log_llm_error(
+            "ANSWER_ASSESSMENT",
+            e,
+            metadata={
+                "question_id": question.question_id,
+                "topic": question.topic,
+                "question_kind": question.kind.value,
+                "category": question.category.value if question.category else None,
+                "evidence_ids": [chunk.chunk_id for chunk in evidence_chunks],
+            },
+            input_data={
+                "question": question,
+                "answer_text": answer_text,
+                "delivery_metrics": delivery_metrics,
+                "history": history,
+                "user_prompt": user_prompt,
+            },
+        )
         raise RuntimeError("답변 평가 중 LLM 호출에 실패했습니다.") from e
 
 def _build_evidence_context(

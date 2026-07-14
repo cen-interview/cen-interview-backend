@@ -13,6 +13,7 @@ from interview.assessment.prompts import CONFLICT_CHECK_SYSTEM
 from interview.assessment.scoring import AnswerAttempt
 from interview.evidence.retrieval import search_evidence
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import Question, QuestionCategory
 from interview.schemas.signals import AnswerQualitySignal
@@ -127,12 +128,46 @@ def conflict_check(state: AssessmentState) -> AssessmentState:
 
     llm = get_llm(temperature=0.0)
     structured_llm = llm.with_structured_output(JudgeResult)
-    conflict_result = structured_llm.invoke(
-        [
-            {"role": "system", "content": CONFLICT_CHECK_SYSTEM},
-            {"role": "user", "content": _build_conflict_check_prompt(state)},
-        ]
-    )
+    conflict_prompt = _build_conflict_check_prompt(state)
+    try:
+        conflict_result = structured_llm.invoke(
+            [
+                {"role": "system", "content": CONFLICT_CHECK_SYSTEM},
+                {"role": "user", "content": conflict_prompt},
+            ]
+        )
+        log_llm_output(
+            "CONFLICT_ASSESSMENT",
+            conflict_result,
+            metadata={
+                "question_id": state.question.question_id,
+                "topic": state.question.topic,
+                "question_kind": state.question.kind.value,
+                "evidence_ids": [chunk.chunk_id for chunk in state.evidence_chunks],
+                "same_topic_history_count": len(state.same_topic_history),
+            },
+            input_data={
+                "answer_text": state.answer_text,
+                "conflict_prompt": conflict_prompt,
+            },
+        )
+    except Exception as exc:
+        log_llm_error(
+            "CONFLICT_ASSESSMENT",
+            exc,
+            metadata={
+                "question_id": state.question.question_id,
+                "topic": state.question.topic,
+                "question_kind": state.question.kind.value,
+                "evidence_ids": [chunk.chunk_id for chunk in state.evidence_chunks],
+                "same_topic_history_count": len(state.same_topic_history),
+            },
+            input_data={
+                "answer_text": state.answer_text,
+                "conflict_prompt": conflict_prompt,
+            },
+        )
+        raise
 
     if conflict_result.conflict_suspected:
         state.judge_result = conflict_result.model_copy(
@@ -164,6 +199,18 @@ def finalize_signal(state: AssessmentState) -> AssessmentState:
         accuracy=state.judge_result.accuracy,
         sufficiency=state.judge_result.sufficiency,
         delivery_note=state.judge_result.delivery_note,
+    )
+    log_llm_output(
+        "ANSWER_ASSESSMENT_FINAL",
+        state.final_signal,
+        metadata={
+            "question_id": state.question.question_id,
+            "topic": state.question.topic,
+            "question_kind": state.question.kind.value,
+            "conflict_check_applied": bool(
+                state.same_topic_history_summary or state.evidence_chunks
+            ),
+        },
     )
 
     return state
