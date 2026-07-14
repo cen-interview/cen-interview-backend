@@ -395,7 +395,10 @@ def create_session(
     """
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
     session_deps = deps or InterviewDeps(
-        strategy=StrategyAgent(coverage or CoverageMap(), user_id=user_id,weak_history_topics=weak_history_topics,),
+        strategy=StrategyAgent(coverage or CoverageMap(),
+        user_id=user_id,
+        #weak_history_topics=weak_history_topics,
+                               ),
         assessment=AssessmentAgent(user_id=user_id),
     )
     session_lock = Lock()
