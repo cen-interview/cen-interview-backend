@@ -368,9 +368,9 @@ def _calculate_question_set_score(
             comment="평가할 답변이 없습니다.",
         )
 
-    last_attempt = attempts[-1]
+    main_attempt = _find_main_attempt(attempts)
     base_score = _calculate_attempt_base_score(
-        last_attempt
+        main_attempt
     )
 
     history_adjusted_score, adjustment_comment = (
@@ -400,7 +400,7 @@ def _calculate_question_set_score(
     )
 
     return QuestionSetScore(
-        score=final_score,
+        score=int(round(final_score)),
         comment=adjustment_comment,
     )
 
