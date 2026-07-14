@@ -23,6 +23,7 @@ from interview.api.database import get_db
 from interview.api.interviews.service import (
     create_interview_session_record,
     get_interview_session_by_runtime_id,
+    get_weak_topics,
     save_interview_result,
 )
 
@@ -79,10 +80,16 @@ def start_session(
 
     coverage = get_store().build_coverage_map(user_id=user_id)
 
+    weak_history_topics = get_weak_topics(
+        db,
+        user_id=current_user.id,
+    )
+
     session, _ = session_factory(
         mode,
         coverage=coverage,
         user_id=user_id,
+        weak_history_topics=weak_history_topics,
     )
     state = session.get_state()
 
