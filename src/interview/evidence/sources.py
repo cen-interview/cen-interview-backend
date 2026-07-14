@@ -259,7 +259,7 @@ def _github_response_to_raw_docs(response: dict, repo_link: str) -> list[RawDoc]
     docs: list[RawDoc] = []
 
     readme_text = _extract_mcp_text(response.get("readme"))
-    if readme_text:
+    if readme_text and not _is_github_download_status_text(readme_text):
         docs.append(
             RawDoc(
                 source_url=f"{repo_link}#readme",
@@ -535,6 +535,8 @@ EXCLUDED_PATH_PARTS = {
 }
 
 EXCLUDED_FILENAMES = {
+    "data.sql",
+    "dummy-users.sql",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
@@ -557,6 +559,8 @@ def _is_github_excluded_path(path: str) -> bool:
         return True
     filename = path.rsplit("/", 1)[-1].lower()
     if filename in EXCLUDED_FILENAMES:
+        return True
+    if filename.startswith(("dummy", "seed")):
         return True
     if filename.endswith((".lock", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico")):
         return True

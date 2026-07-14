@@ -75,6 +75,27 @@ class RetrievalResult(BaseModel):
     score: float  # 쿼리와의 관련도 (재랭킹 점수). 높을수록 관련 큼.
 
 
+class EvidenceSectionCandidate(BaseModel):
+    """LLM이 문서 단위로 검토할 원문 섹션 후보.
+
+    preview는 LLM 판단 비용을 줄이기 위한 입력이고, 실제 EvidenceChunk에는
+    같은 section_id를 가진 원문 text 전체를 사용한다.
+    """
+
+    section_id: str
+    heading: str | None = None
+    preview: str
+
+
+class EvidenceExtractionDecision(BaseModel):
+    """문서 1건에 대한 LLM 구조화 추출 결과."""
+
+    topic: str
+    doc_type: str | None = None
+    valuable_section_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class IndexFailure(BaseModel):
     """인덱싱 중 실패한 단일 source 또는 문서 처리 단계."""
 
