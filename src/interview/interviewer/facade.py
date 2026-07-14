@@ -13,6 +13,7 @@ from interview.interviewer.models import AdaptedInput, DeliveryMetrics
 from interview.interviewer.session import SessionState
 from interview.interviewer.workflow.graph import get_compiled_graph
 from interview.interviewer.workflow.runtime import InterviewDeps
+from interview.llm import get_llm
 from interview.schemas.events import InterviewerEvent, Mode
 from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
@@ -68,7 +69,8 @@ class InterviewSession:
 
             deps:
                 테스트나 외부 조립 코드가 주입할 런타임 의존성. 없으면 실제
-                StrategyAgent와 AssessmentAgent를 세션 전용으로 생성한다.
+                StrategyAgent, AssessmentAgent와 preamble 생성용 LLM을 세션
+                의존성으로 구성한다.
 
             user_id:
                 Evidence store에서 사용자별 namespace를 선택하기 위한 사용자 ID.
@@ -81,6 +83,7 @@ class InterviewSession:
         self.deps = deps or InterviewDeps(
             strategy=StrategyAgent(coverage, user_id=user_id),
             assessment=AssessmentAgent(user_id=user_id),
+            llm=get_llm(temperature=0.3),
         )
         self.strategy = self.deps.strategy
         self.assessment = self.deps.assessment
@@ -93,6 +96,7 @@ class InterviewSession:
         self._config = {"configurable": {"thread_id": session_id}}
         self._lock = lock or Lock()
         self._started = False
+        self._processed_client_events: dict[str, SessionState] = {}
 
     @property
     def state(self) -> SessionState:
@@ -127,6 +131,7 @@ class InterviewSession:
         self,
         adapted_input: AdaptedInput | InterviewerEvent,
         delivery_metrics: DeliveryMetrics | None = None,
+        client_event_id: str | None = None,
     ) -> SessionState:
         """정규화된 이벤트로 중단된 그래프를 재개한다.
 
@@ -142,6 +147,10 @@ class InterviewSession:
             delivery_metrics:
                 InterviewerEvent를 직접 전달할 때 사용할 선택적 음성 전달 지표.
 
+            client_event_id:
+                프론트가 한 번의 사용자 행동에 부여한 선택적 멱등성 ID. 이미
+                처리한 ID이면 그래프를 다시 실행하지 않고 당시 결과를 반환한다.
+
         Returns:
             이벤트 처리가 끝나고 다음 interrupt 또는 END에 도달한 SessionState.
 
@@ -152,6 +161,12 @@ class InterviewSession:
         with self._lock:
             if not self._started:
                 raise RuntimeError("session must be started before submitting an event")
+
+            if (
+                client_event_id is not None
+                and client_event_id in self._processed_client_events
+            ):
+                return self._processed_client_events[client_event_id]
 
             current_state = self._get_state_unlocked()
             if current_state.finished:
@@ -175,7 +190,10 @@ class InterviewSession:
                 config=self._config,
                 context=self.deps,
             )
-            return self._get_state_unlocked()
+            result_state = self._get_state_unlocked()
+            if client_event_id is not None:
+                self._processed_client_events[client_event_id] = result_state
+            return result_state
 
     def get_state(self) -> SessionState:
         """compiled graph의 최신 체크포인트를 SessionState로 복원한다.
@@ -350,6 +368,7 @@ def create_session(
     max_questions: int = 10,
     deps: InterviewDeps | None = None,
     user_id: str | None = None,
+    weak_history_topics: list[str] | None = None,
 ) -> tuple[InterviewSession, Question]:
     """세션을 만들고 compiled graph가 생성한 첫 질문을 반환한다.
 
@@ -368,8 +387,8 @@ def create_session(
             세션에서 물어볼 최대 메인 질문 수.
 
         deps:
-            테스트나 통합 환경에서 주입할 Strategy/Assessment 의존성. 없으면
-            실제 StrategyAgent와 AssessmentAgent를 세션별로 생성한다.
+            테스트나 통합 환경에서 주입할 런타임 의존성. 없으면 실제
+            StrategyAgent, AssessmentAgent와 preamble 생성용 LLM을 구성한다.
 
         user_id:
             Evidence store에서 사용자별 namespace를 선택하기 위한 사용자 ID.
@@ -379,12 +398,15 @@ def create_session(
     """
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
     session_deps = deps or InterviewDeps(
-        strategy=StrategyAgent(coverage or CoverageMap(), user_id=user_id),
+        strategy=StrategyAgent(coverage or CoverageMap(),
+        user_id=user_id,
+        weak_history_topics=weak_history_topics,),
         assessment=AssessmentAgent(user_id=user_id),
+        llm=get_llm(temperature=0.3),
     )
     session_lock = Lock()
     session = InterviewSession(
-        session_id=session_id,
+        session_id=session_id, 
         mode=mode,
         coverage=coverage or CoverageMap(),
         max_questions=max_questions,

@@ -15,7 +15,10 @@ class Settings(BaseSettings):
 
     # LLM
     openai_api_key: str = ""
-    llm_model: str = "gpt-4o-mini" # "gpt-5.4-mini"
+    llm_model: str = "gpt-4o-mini-2024-07-18" # "gpt-5.4-mini"
+    llm_log_enabled: bool = True
+    llm_log_include_input: bool = False
+    llm_log_max_length: int = 5000
 
     # MCP / 외부 소스
     # notion

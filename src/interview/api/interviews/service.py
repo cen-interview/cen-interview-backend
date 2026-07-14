@@ -1,3 +1,44 @@
+"""면접 세션과 최종 결과의 DB 작업을 담당하는 서비스 모듈.
+
+이 모듈은 면접 시작 시 DB 세션을 생성하고, 면접 종료 시 FinalReport와
+주제별 점수를 저장한다. 또한 로그인 사용자의 결과 목록, 최근 결과,
+특정 결과와 약점 주제를 조회하는 기능을 제공한다.
+
+주요 기능:
+    get_interview_session_by_runtime_id:
+        LangGraph에서 사용하는 runtime_session_id와 사용자 ID로
+        DB 면접 세션을 조회한다.
+
+    create_interview_session_record:
+        면접 시작 시 interview_sessions에 in_progress 상태의 행을 생성한다.
+
+    save_interview_result:
+        면접 종료 시 interview_results에 최종 리포트를 저장하고
+        면접 세션 상태를 completed로 변경한다.
+        동일한 세션의 결과는 중복 저장하지 않는다.
+
+    get_interview_result:
+        결과 ID와 사용자 ID로 특정 면접 결과를 조회한다.
+
+    get_latest_interview_result:
+        현재 사용자의 가장 최근 면접 결과를 조회한다.
+
+    get_interview_results:
+        현재 사용자의 전체 면접 결과를 최신순으로 조회한다.
+
+    to_result_response:
+        InterviewResult ORM 객체를 API 응답 모델로 변환한다.
+
+    get_weak_topics:
+        최근 면접의 주제별 점수를 낮은 순으로 정렬하여
+        다음 면접에서 참고할 약점 주제를 반환한다.
+
+트랜잭션:
+    데이터 생성과 상태 변경 중 오류가 발생하면 rollback을 수행하고
+    예외를 다시 전달한다. 정상 처리되면 commit 후 ORM 객체를 refresh한다.
+"""
+
+
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -11,15 +52,35 @@ from interview.api.interviews.model import (
 )
 from interview.schemas.events import Mode
 
+# 런타임 세션 ID와 사용자 ID로 DB 면접 세션을 조회한다.
+def get_interview_session_by_runtime_id(
+    db: Session,
+    *,
+    runtime_session_id: str,
+    user_id: int,
+) -> InterviewSession | None:
+    return (
+        db.query(InterviewSession)
+        .filter(
+            InterviewSession.runtime_session_id
+            == runtime_session_id,
+            InterviewSession.user_id == user_id,
+        )
+        .first()
+    )
+
+# 면접 시작 정보를 DB에 저장한다.
 def create_interview_session_record(
     db: Session,
     *,
+    runtime_session_id: str,
     user_id: int,
     mode: Mode,
 ) -> InterviewSession:
     """면접 시작 시 DB 세션을 생성하고 발급된 정수 ID를 반환한다."""
 
     session = InterviewSession(
+        runtime_session_id=runtime_session_id,
         user_id=user_id,
         mode=mode,
         status=InterviewSessionStatus.IN_PROGRESS,
@@ -35,12 +96,12 @@ def create_interview_session_record(
 
     return session
 
-
+# 종료된 면접의 최종 결과를 한 번만 저장한다.
 def save_interview_result(
     db: Session,
     *,
     user_id: int,
-    session_id: int,
+    runtime_session_id: str,
     report: FinalReport,
     topic_scores: dict[str, float],
 ) -> InterviewResult:
@@ -49,7 +110,8 @@ def save_interview_result(
     interview_session = (
         db.query(InterviewSession)
         .filter(
-            InterviewSession.session_id == session_id,
+            InterviewSession.runtime_session_id
+            == runtime_session_id,
             InterviewSession.user_id == user_id,
         )
         .first()
@@ -60,7 +122,10 @@ def save_interview_result(
 
     existing = (
         db.query(InterviewResult)
-        .filter(InterviewResult.session_id == session_id)
+        .filter(
+            InterviewResult.session_id
+            == interview_session.session_id
+        )
         .first()
     )
 
@@ -68,7 +133,7 @@ def save_interview_result(
         return existing
 
     result = InterviewResult(
-        session_id=session_id,
+        session_id=interview_session.session_id,
         overall_score=report.overall_score,
         final_report_json=report.model_dump(mode="json"),
         topic_scores_json=topic_scores,
@@ -86,7 +151,7 @@ def save_interview_result(
 
     return result
 
-
+# 결과 ID로 현재 사용자의 특정 면접 결과를 조회한다.
 def get_interview_result(
     db: Session,
     *,
@@ -106,7 +171,7 @@ def get_interview_result(
         .first()
     )
 
-
+# 현재 사용자의 가장 최근 면접 결과를 조회한다.
 def get_latest_interview_result(
     db: Session,
     *,
@@ -123,7 +188,31 @@ def get_latest_interview_result(
         .first()
     )
 
+# 현재 사용자의 전체 면접 결과를 최신순으로 조회한다.
+def get_interview_results(
+    db: Session,
+    *,
+    user_id: int,
+) -> list[InterviewResult]:
+    """현재 사용자의 전체 면접 결과를 최신순으로 반환한다."""
 
+    return (
+        db.query(InterviewResult)
+        .join(
+            InterviewSession,
+            InterviewResult.session_id
+            == InterviewSession.session_id,
+        )
+        .filter(
+            InterviewSession.user_id == user_id
+        )
+        .order_by(
+            InterviewResult.created_at.desc()
+        )
+        .all()
+    )
+
+# InterviewResult ORM 객체를 API 상세 응답으로 변환한다.
 def to_result_response(
     result: InterviewResult,
 ) -> InterviewResultResponse:
@@ -136,7 +225,7 @@ def to_result_response(
         created_at=result.created_at,
     )
 
-
+# 최근 면접 결과에서 점수가 낮은 주제를 반환한다.
 def get_weak_topics(
     db: Session,
     *,

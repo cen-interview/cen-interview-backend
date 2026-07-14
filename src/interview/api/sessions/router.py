@@ -17,7 +17,15 @@ from interview.interviewer.facade import (
 from interview.interviewer.session import SessionState
 from interview.schemas.events import Mode
 from interview.schemas.question import Question
+from sqlalchemy.orm import Session
 
+from interview.api.database import get_db
+from interview.api.interviews.service import (
+    create_interview_session_record,
+    get_interview_session_by_runtime_id,
+    get_weak_topics,
+    save_interview_result,
+)
 
 router = APIRouter(prefix="/sessions", tags=["Interview Sessions"])
 
@@ -41,6 +49,7 @@ def start_session(
     req: StartRequest,
     current_user: User = Depends(get_current_user),
     session_factory: SessionFactory = Depends(get_interview_session_factory),
+    db: Session = Depends(get_db),
 ):
     """면접 세션을 생성하고 compiled graph가 만든 첫 질문을 반환한다.
 
@@ -62,20 +71,45 @@ def start_session(
     try:
         mode = Mode(req.mode)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"unknown mode: {req.mode}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown mode: {req.mode}",
+        )
 
     user_id = str(current_user.id)
+
     coverage = get_store().build_coverage_map(user_id=user_id)
+
+    weak_history_topics = get_weak_topics(
+        db,
+        user_id=current_user.id,
+    )
+
     session, _ = session_factory(
         mode,
         coverage=coverage,
         user_id=user_id,
+        weak_history_topics=weak_history_topics,
     )
-    return _session_response(session.get_state())
+    state = session.get_state()
+
+    create_interview_session_record(
+        db=db,
+        runtime_session_id=state.session_id,
+        user_id=current_user.id,
+        mode=mode,
+    )
+
+    return _session_response(state)
 
 
 @router.post("/{session_id}/events")
-def post_event(session_id: str, req: EventRequest):
+def post_event(
+    session_id: str,                          # 진행할 면접
+    req: EventRequest,                        # 제출한 답변
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """raw 입력을 세션 mode에 맞게 변환하고 중단된 그래프를 재개한다.
 
     세션 생성 시 저장한 mode와 현재 질문 ID를 사용해 AdaptedInput을 만든다.
@@ -99,10 +133,33 @@ def post_event(session_id: str, req: EventRequest):
         session = get_session(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+    
+    db_session = get_interview_session_by_runtime_id(
+        db,
+        runtime_session_id=session_id,
+        user_id=current_user.id,
+    )
+
+    if db_session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="면접 세션을 찾을 수 없습니다.",
+        )
 
     state = session.get_state()
+
     if state.finished:
-        return _session_response(state)
+        result = _save_finished_result(
+            db=db,
+            current_user=current_user,
+            runtime_session_id=session_id,
+            session=session,
+        )
+
+        return _session_response(
+            state,
+            result_id=result.id,
+        )
 
     question_id = (
         state.current_question.question_id
@@ -111,19 +168,63 @@ def post_event(session_id: str, req: EventRequest):
     )
 
     try:
+        payload = req.to_adapter_payload()
         adapted_input = (
-            from_voice(session_id, question_id, req.payload)
+            from_voice(session_id, question_id, payload)
             if state.mode == Mode.VOICE.value
-            else from_chat(session_id, question_id, req.payload)
+            else from_chat(session_id, question_id, payload)
         )
-        state = session.submit_event(adapted_input)
+        state = session.submit_event(
+            adapted_input,
+            client_event_id=req.client_event_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    result_id = None
 
-    return _session_response(state)
+    # 이번 답변 또는 종료 요청으로 면접이 종료된 경우
+    if state.finished:
+        result = _save_finished_result(
+            db=db,
+            current_user=current_user,
+            runtime_session_id=session_id,
+            session=session,
+        )
+        result_id = result.id
+
+    return _session_response(
+        state,
+        result_id=result_id,
+    )
+
+def _save_finished_result(
+    *,
+    db: Session,
+    current_user: User,
+    runtime_session_id: str,
+    session: InterviewSession,
+):
+    report = session.finalize()
+
+    topic_scores = {
+        evaluation.topic: evaluation.score
+        for evaluation in report.evaluations
+    }
+
+    return save_interview_result(
+        db=db,
+        user_id=current_user.id,
+        runtime_session_id=runtime_session_id,
+        report=report,
+        topic_scores=topic_scores,
+    )
 
 
-def _session_response(state: SessionState) -> dict:
+def _session_response(
+    state: SessionState,
+    result_id: int | None = None,
+) -> dict:
     """SessionState를 세션 생성과 이벤트 API의 공통 응답으로 변환한다.
 
     Args:
@@ -138,6 +239,7 @@ def _session_response(state: SessionState) -> dict:
     return {
         "session_id": state.session_id,
         "finished": state.finished,
+        "result_id": result_id,
         "question": (
             state.current_question.model_dump(mode="json")
             if state.current_question is not None and not state.finished

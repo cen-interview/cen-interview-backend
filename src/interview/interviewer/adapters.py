@@ -152,9 +152,11 @@ def from_voice(
                 {
                     "action": "submit",
                     "text": "LCEL은 체인을 연결하는 방식입니다.",
-                    "speech_rate_wpm": 120.0,
-                    "filler_count": 2,
-                    "duration_seconds": 15.4
+                    "metrics": {
+                        "speech_rate_wpm": 120.0,
+                        "filler_count": 2,
+                        "duration_seconds": 15.4
+                    }
                 }
 
     Returns:
@@ -177,20 +179,24 @@ def from_voice(
             text=payload.get("text", ""),
         )
 
-        metrics = None
-
         metric_keys = (
             "speech_rate_wpm",
             "filler_count",
             "duration_seconds",
         )
+        raw_metrics = payload.get("metrics")
+        if raw_metrics is None and any(key in payload for key in metric_keys):
+            raw_metrics = {
+                key: payload.get(key)
+                for key in metric_keys
+                if key in payload
+            }
 
-        if any(key in payload for key in metric_keys):
-            metrics = DeliveryMetrics(
-                speech_rate_wpm=payload.get("speech_rate_wpm"),
-                filler_count=payload.get("filler_count"),
-                duration_seconds=payload.get("duration_seconds"),
-            )
+        metrics = None
+        if raw_metrics is not None:
+            candidate_metrics = DeliveryMetrics.model_validate(raw_metrics)
+            if candidate_metrics.model_dump(exclude_none=True):
+                metrics = candidate_metrics
 
         return AdaptedInput(
             event=event,

@@ -27,9 +27,11 @@ __pycache__/
 
 # Claude Code 로컬 설정
 .claude/
+CLAUDE.md
 
 # push 전 actions 오류 로컬 체크 용
 check.bat
 
 # Certbot이 생성하는 SSL 인증서/설정
 certbot/
+.chroma/
