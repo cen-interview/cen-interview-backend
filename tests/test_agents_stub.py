@@ -1,9 +1,11 @@
 from interview.assessment.agent import AssessmentAgent
 from interview.assessment.evaluator import judge_answer
 from interview.evidence.retrieval import search_evidence
-from interview.schemas.question import Difficulty, Question, QuestionKind
+from interview.schemas.question import Difficulty, Question, QuestionKind, QuestionCategory
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.strategy.agent import StrategyAgent
+from interview.schemas.evidence import CoverageMap, TopicCoverage
+
 
 
 def make_main_question() -> Question:
@@ -13,6 +15,8 @@ def make_main_question() -> Question:
         topic="FastAPI",
         difficulty=Difficulty.EASY,
         kind=QuestionKind.MAIN,
+        category=QuestionCategory.TECHNICAL,  # 추가
+
     )
 
 
@@ -24,6 +28,7 @@ def make_follow_up_question() -> Question:
         difficulty=Difficulty.EASY,
         kind=QuestionKind.FOLLOW_UP,
         parent_question_id="q-1",
+        category=QuestionCategory.TECHNICAL,
     )
 
 

@@ -8,21 +8,29 @@
 """
 from .events import (
     AnswerSubmitted,
-    BaseEvent,
+    InterviewerEvent,
     EndRequested,
     InterviewerEvent,
     NoResponseTimeout,
     ReplayRequested,
     SilenceDetected,
 )
-from .evidence import EvidenceChunk, RetrievalResult, SourceType
+from .evidence import (
+    CoverageMap,
+    EvidenceChunk,
+    IndexBuildResult,
+    IndexFailure,
+    RetrievalResult,
+    SourceType,
+    TopicCoverage,
+)
 from .question import Difficulty, Question, QuestionKind
 from .signals import AnswerQuality, AnswerQualitySignal
 from .report import AnswerEvaluation, CompetencyModel, FinalReport
 
 __all__ = [
     # events
-    "BaseEvent",
+    "InterviewerEvent",
     "AnswerSubmitted",
     "EndRequested",
     "SilenceDetected",
@@ -30,9 +38,13 @@ __all__ = [
     "NoResponseTimeout",
     "InterviewerEvent",
     # evidence
+    "CoverageMap",
     "EvidenceChunk",
+    "IndexBuildResult",
+    "IndexFailure",
     "RetrievalResult",
     "SourceType",
+    "TopicCoverage",
     # question
     "Question",
     "Difficulty",

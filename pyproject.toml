@@ -12,7 +12,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "python-dotenv>=1.0",
     "langchain-openai>=1.3.3",
-    
+    "mcp>=1.27,<2",
     # Vector DB: 처음엔 chromadb로 간단히 시작. 운영 단계에서 교체 가능.
     "chromadb>=0.5",
     "sqlalchemy>=2.0.51",
@@ -24,6 +24,7 @@ dependencies = [
     "python-jose[cryptography]>=3.5.0",
     "column>=0.4.3",
     "openai>=2.44.0",
+    "interrupt>=1.0.1",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +44,10 @@ packages = ["src/interview"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+markers = [
+    "golden: 실제 LLM을 호출하는 골든 시나리오 테스트 (평소 실행에서 제외, 수동 실행용)",
+]
+addopts = "-m 'not golden'"
 
 [tool.ruff]
 line-length = 100
@@ -50,5 +55,6 @@ target-version = "py311"
 
 [dependency-groups]
 dev = [
+    "langgraph-cli[inmem]>=0.2.6",
     "pytest>=9.1.1",
 ]
