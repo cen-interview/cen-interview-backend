@@ -1,5 +1,8 @@
 """로그인 요청/토큰 응답 스키마."""
 
+from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, EmailStr
 
 
@@ -28,3 +31,20 @@ class RefreshRequest(BaseModel):
 
     # 클라이언트가 가지고 있는 Refresh Token
     refresh_token: str
+
+
+class OAuthAuthorizeUrlResponse(BaseModel):
+    """프론트엔드가 브라우저 이동에 사용할 OAuth 승인 URL."""
+
+    authorize_url: str
+
+
+class OAuthConnectionStatus(BaseModel):
+    """현재 서비스 사용자와 외부 OAuth 계정의 연결 상태."""
+
+    provider: Literal["github", "notion"]
+    connected: bool
+    account_name: str | None = None
+    account_id: str | None = None
+    scope: str | None = None
+    connected_at: datetime | None = None

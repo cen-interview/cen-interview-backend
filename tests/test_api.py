@@ -1,10 +1,13 @@
 """실제 Strategy와 FakeAssessment를 사용하는 채팅 API 통합 시나리오."""
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from interview.api.auth.dependency import get_current_user
+from interview.api.database import get_db
 from interview.api.main import app, get_interview_session_factory
 from interview.interviewer.facade import create_session
 from interview.interviewer.workflow.runtime import InterviewDeps
@@ -88,7 +91,9 @@ class FakeAssessment:
 
 
 @pytest.fixture
-def chat_api() -> Iterator[tuple[TestClient, list[FakeAssessment]]]:
+def chat_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[TestClient, list[FakeAssessment]]]:
     """실제 Strategy와 FakeAssessment를 사용하는 API client를 제공한다.
 
     세션마다 실제 StrategyAgent와 새로운 FakeAssessment를 생성한다. 최대 메인
@@ -99,7 +104,14 @@ def chat_api() -> Iterator[tuple[TestClient, list[FakeAssessment]]]:
     """
     assessments: list[FakeAssessment] = []
 
-    def fake_session_factory(mode: Mode):
+    class FakeEvidenceStore:
+        """세션 API 테스트에서 빈 Evidence 커버리지를 반환한다."""
+
+        def build_coverage_map(self, user_id: str | None = None) -> CoverageMap:
+            """외부 Vector DB 없이 빈 커버리지를 반환한다."""
+            return CoverageMap()
+
+    def fake_session_factory(mode: Mode, **_: object):
         """실제 Strategy와 FakeAssessment를 조립해 테스트 세션을 만든다.
 
         Args:
@@ -121,12 +133,41 @@ def chat_api() -> Iterator[tuple[TestClient, list[FakeAssessment]]]:
             deps=deps,
         )
 
+    def fake_db():
+        """세션 영속화 mock에 전달할 DB 의존성을 제공한다."""
+        yield None
+
+    monkeypatch.setattr(
+        "interview.api.sessions.router.get_store",
+        lambda: FakeEvidenceStore(),
+    )
+    monkeypatch.setattr(
+        "interview.api.sessions.router.get_weak_topics",
+        lambda db, *, user_id: [],
+    )
+    monkeypatch.setattr(
+        "interview.api.sessions.router.create_interview_session_record",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        "interview.api.sessions.router.get_interview_session_by_runtime_id",
+        lambda db, **_: object(),
+    )
+    monkeypatch.setattr(
+        "interview.api.sessions.router.save_interview_result",
+        lambda **_: SimpleNamespace(id=1),
+    )
+
     app.dependency_overrides[get_interview_session_factory] = (
         lambda: fake_session_factory
     )
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
+    app.dependency_overrides[get_db] = fake_db
     with TestClient(app) as client:
         yield client, assessments
     app.dependency_overrides.pop(get_interview_session_factory, None)
+    app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_db, None)
 
 
 def _start_chat_session(client: TestClient) -> dict:
@@ -177,7 +218,8 @@ def test_chat_runs_until_last_main_answer_and_returns_report(chat_api):
 
     assert started["finished"] is False
     assert started["last_utterance"]
-    assert started["utterance_queue"] == [started["last_utterance"]]
+    assert started["utterance_queue"][-1] == started["question"]["text"]
+    assert "\n\n".join(started["utterance_queue"]) == started["last_utterance"]
     assert started["turn_type"] == "greeting"
     assert started["transcript"][-1]["role"] == "interviewer"
 

@@ -24,7 +24,7 @@ def _chunk(
 
 def test_query_keeps_chunks_isolated_by_user_id() -> None:
     """사용자별 namespace에 저장된 청크가 서로 섞이지 않는지 확인한다."""
-    store = EvidenceStore()
+    store = EvidenceStore(backend="memory")
 
     store.add_chunks(
         [
@@ -45,7 +45,7 @@ def test_query_keeps_chunks_isolated_by_user_id() -> None:
 
 def test_query_filters_by_topic_inside_user_namespace() -> None:
     """같은 사용자 namespace 안에서 topic 필터가 동작하는지 확인한다."""
-    store = EvidenceStore()
+    store = EvidenceStore(backend="memory")
     store.add_chunks(
         [
             _chunk("u1-jpa-1", "JPA", 0.8),
@@ -61,7 +61,7 @@ def test_query_filters_by_topic_inside_user_namespace() -> None:
 
 def test_build_coverage_map_aggregates_by_topic_per_user() -> None:
     """CoverageMap이 사용자별 topic confidence 평균과 chunk 수를 집계하는지 확인한다."""
-    store = EvidenceStore()
+    store = EvidenceStore(backend="memory")
     store.add_chunks(
         [
             _chunk("u1-jpa-1", "JPA", 0.8),
@@ -83,7 +83,7 @@ def test_build_coverage_map_aggregates_by_topic_per_user() -> None:
 
 def test_default_namespace_keeps_existing_calls_working() -> None:
     """user_id가 없는 기존 호출은 default namespace에서 저장과 조회가 가능해야 한다."""
-    store = EvidenceStore()
+    store = EvidenceStore(backend="memory")
     store.add_chunks([_chunk("default-jpa-1", "JPA", 0.5)])
 
     results = store.query("JPA", topic="JPA")
@@ -91,6 +91,21 @@ def test_default_namespace_keeps_existing_calls_working() -> None:
 
     assert [chunk.chunk_id for chunk in results] == ["default-jpa-1"]
     assert coverage.topic_coverage["JPA"].chunk_count == 1
+
+
+def test_clear_user_sources_keeps_other_source_chunks() -> None:
+    """GitHub 재인덱싱은 같은 사용자의 Notion 근거를 지우면 안 된다."""
+    store = EvidenceStore(backend="memory")
+    notion = _chunk("notion-1", "JPA", 0.8)
+    github = _chunk("github-1", "Java", 0.7)
+    github = github.model_copy(
+        update={"source_type": SourceType.GITHUB, "file_path": "src/AuthService.java"}
+    )
+    store.add_chunks([notion, github], user_id="user-1")
+
+    store.clear_user_sources({"github"}, user_id="user-1")
+
+    assert [chunk.chunk_id for chunk in store.query("", user_id="user-1")] == ["notion-1"]
 
 
 def test_chroma_backend_embeds_and_upserts_chunks() -> None:
@@ -194,3 +209,30 @@ def test_chroma_backend_query_restores_evidence_chunks() -> None:
     }
     assert [chunk.chunk_id for chunk in results] == ["chunk-1"]
     assert results[0].text == "JPA N+1 해결 근거"
+
+
+def test_chroma_metadata_preserves_github_provenance() -> None:
+    """파일 경로와 사용자 기여 정보는 Chroma 왕복 후에도 유지되어야 한다."""
+    store = EvidenceStore()
+    chunk = EvidenceChunk(
+        chunk_id="github-1",
+        text="public class AuthService {}",
+        source_type=SourceType.GITHUB,
+        source_url="https://github.com/example/project/blob/HEAD/src/AuthService.java",
+        topic="java",
+        doc_type="code",
+        confidence=0.8,
+        file_path="src/AuthService.java",
+        language="java",
+        ownership="user_touched",
+        commit_count=3,
+        last_commit_sha="a" * 40,
+    )
+
+    metadata = store._metadata_from_chunk(chunk, "user-1")
+    restored = store._chunk_from_metadata(document=chunk.text, metadata=metadata)
+
+    assert restored.file_path == "src/AuthService.java"
+    assert restored.ownership == "user_touched"
+    assert restored.commit_count == 3
+    assert restored.last_commit_sha == "a" * 40

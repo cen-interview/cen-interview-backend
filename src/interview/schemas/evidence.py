@@ -62,6 +62,14 @@ class EvidenceChunk(BaseModel):
     # 신뢰도: 내용이 부족한 주제는 낮게 표시한다. (0.0 ~ 1.0)
     confidence: float = Field(ge=0.0, le=1.0)
 
+    # GitHub 코드는 면접 근거의 출처와 사용자의 기여도를 함께 보존한다.
+    # Notion 청크에는 기본값이 유지된다.
+    file_path: str | None = None
+    language: str | None = None
+    ownership: Literal["user_touched", "repo_context"] | None = None
+    commit_count: int = Field(default=0, ge=0)
+    last_commit_sha: str | None = None
+
 
 class RetrievalResult(BaseModel):
     """점수까지 필요한 retrieval 호출에서 사용할 검색 결과 모델.
@@ -85,15 +93,27 @@ class EvidenceSectionCandidate(BaseModel):
     section_id: str
     heading: str | None = None
     preview: str
+    topic_candidates: list[str] = Field(default_factory=list)
+
+
+class EvidenceSectionDecision(BaseModel):
+    """LLM이 개별 섹션에 부여한 검색용 주제와 신뢰도."""
+
+    section_id: str
+    topic: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    doc_type: str | None = None
 
 
 class EvidenceExtractionDecision(BaseModel):
     """문서 1건에 대한 LLM 구조화 추출 결과."""
 
-    topic: str
+    # legacy 필드는 기존 structured-output 테스트와 호환되도록 남긴다.
+    topic: str | None = None
     doc_type: str | None = None
     valuable_section_ids: list[str] = Field(default_factory=list)
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    sections: list[EvidenceSectionDecision] = Field(default_factory=list)
 
 
 class IndexFailure(BaseModel):

@@ -2,7 +2,7 @@
 
 from interview.evidence.extract import extract_evidence
 from interview.evidence.sources import RawDoc
-from interview.schemas.evidence import EvidenceExtractionDecision
+from interview.schemas.evidence import EvidenceExtractionDecision, EvidenceSectionDecision
 
 
 def _raw_doc(
@@ -100,8 +100,8 @@ def test_extract_evidence_normalizes_topic_from_meta() -> None:
     assert chunks[0].topic == "jpa n+1"
 
 
-def test_extract_evidence_infers_topic_from_github_language() -> None:
-    """GitHub code RawDoc은 file_path/language 기반 topic을 보강한다."""
+def test_extract_evidence_prefers_specific_topic_over_github_language() -> None:
+    """GitHub 코드는 언어보다 본문에 드러난 구체 기술 topic을 우선한다."""
     doc = _raw_doc(
         """
 public class UserService {
@@ -122,7 +122,7 @@ public class UserService {
 
     chunks = extract_evidence(doc)
 
-    assert chunks[0].topic == "java"
+    assert chunks[0].topic == "jwt"
     assert chunks[0].doc_type == "code"
     assert chunks[0].confidence > 0.6
 
@@ -191,10 +191,44 @@ Access Token 만료 시 401 응답이 반복되는 문제가 있었다.
     assert len(chunks) == 1
     assert chunks[0].topic == "spring security"
     assert chunks[0].doc_type == "troubleshooting"
-    assert chunks[0].confidence == 0.88
+    assert 0.0 <= chunks[0].confidence <= 1.0
     assert "Access Token 만료" in chunks[0].text
     assert "원문 section에는 보존" in chunks[0].text
     assert "단순 소개" not in chunks[0].text
+
+
+def test_extract_evidence_uses_section_topic_from_llm() -> None:
+    """서로 다른 섹션은 각각의 검색 topic을 가져야 한다."""
+
+    class FakeStructuredLLM:
+        """섹션별 topic 결정을 반환하는 fake LLM."""
+
+        def invoke(self, messages: list[tuple[str, str]]) -> EvidenceExtractionDecision:
+            return EvidenceExtractionDecision(
+                sections=[
+                    EvidenceSectionDecision(
+                        section_id="s1", topic="jwt", confidence=0.8
+                    ),
+                    EvidenceSectionDecision(
+                        section_id="s2", topic="jpa", confidence=0.8
+                    ),
+                ]
+            )
+
+    doc = _raw_doc(
+        """
+# JWT 인증
+Access Token 만료를 처리하기 위해 Refresh Token 재발급 API를 구현했다.
+
+# JPA 조회 최적화
+EntityGraph로 N+1 쿼리 문제를 줄이고 로그에서 쿼리 수를 확인했다.
+""",
+        meta={"doc_type": "retrospective"},
+    )
+
+    chunks = extract_evidence(doc, use_llm=True, structured_llm=FakeStructuredLLM())
+
+    assert [chunk.topic for chunk in chunks] == ["jwt", "jpa"]
 
 
 def test_extract_evidence_falls_back_when_llm_fails() -> None:

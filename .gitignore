@@ -34,3 +34,4 @@ check.bat
 
 # Certbot이 생성하는 SSL 인증서/설정
 certbot/
+.chroma/

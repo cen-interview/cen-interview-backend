@@ -100,6 +100,36 @@ class EvidenceStore:
 
         self._chunks_by_user[namespace] = []
 
+    def clear_user_sources(
+        self,
+        source_types: set[str],
+        user_id: int | str | None = None,
+    ) -> None:
+        """사용자의 특정 출처 청크만 삭제해 부분 재인덱싱을 지원한다."""
+        if not source_types:
+            return
+
+        namespace = self._namespace(user_id)
+        if self.backend == VECTOR_BACKEND_CHROMA:
+            collection = self._get_chroma_collection()
+            for source_type in source_types:
+                try:
+                    collection.delete(
+                        where={"$and": [
+                            {"user_id": namespace},
+                            {"source_type": source_type},
+                        ]}
+                    )
+                except ValueError:
+                    pass
+            return
+
+        self._chunks_by_user[namespace] = [
+            chunk
+            for chunk in self._chunks_by_user.get(namespace, [])
+            if chunk.source_type.value not in source_types
+        ]
+
     def query(
         self,
         query: str,
@@ -269,6 +299,11 @@ class EvidenceStore:
             "week": chunk.week if chunk.week is not None else -1,
             "date": chunk.date or "",
             "confidence": chunk.confidence,
+            "file_path": chunk.file_path or "",
+            "language": chunk.language or "",
+            "ownership": chunk.ownership or "",
+            "commit_count": chunk.commit_count,
+            "last_commit_sha": chunk.last_commit_sha or "",
         }
 
     def _chunk_from_metadata(
@@ -289,6 +324,11 @@ class EvidenceStore:
             week=int(week) if week is not None and int(week) >= 0 else None,
             date=str(metadata.get("date") or "") or None,
             confidence=float(metadata["confidence"]),
+            file_path=str(metadata.get("file_path") or "") or None,
+            language=str(metadata.get("language") or "") or None,
+            ownership=str(metadata.get("ownership") or "") or None,
+            commit_count=int(metadata.get("commit_count") or 0),
+            last_commit_sha=str(metadata.get("last_commit_sha") or "") or None,
         )
 
     def _stored_chunk_id(self, namespace: str, chunk_id: str) -> str:

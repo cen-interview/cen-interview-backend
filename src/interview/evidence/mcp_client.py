@@ -210,25 +210,21 @@ class EvidenceMcpClient:
                 session,
                 owner,
                 repo,
+                max_dirs=settings.evidence_github_max_dirs,
+                max_depth=settings.evidence_github_max_depth,
             )
-            commit_arguments = {
-                "owner": owner,
-                "repo": repo,
-                "perPage": 30,
-            }
-            if github_login:
-                commit_arguments["author"] = github_login
-
-            commits = await self._safe_call_github_tool(
-                session,
-                settings.github_mcp_commits_tool,
-                commit_arguments,
+            commits, commit_shas = await self._fetch_github_commits(
+                session=session,
+                owner=owner,
+                repo=repo,
+                github_login=github_login,
+                max_commits=settings.evidence_github_max_commits,
             )
             commit_details = await self._fetch_github_commit_details(
                 session,
                 owner,
                 repo,
-                commits,
+                commit_shas,
             )
 
         return {
@@ -273,10 +269,9 @@ class EvidenceMcpClient:
         session: ClientSession,
         owner: str,
         repo: str,
-        commits: dict,
+        commit_shas: list[str],
     ) -> list[dict]:
         """list_commits 응답의 sha들을 get_commit detail 응답 목록으로 확장한다."""
-        commit_shas = _extract_github_commit_shas(commits)
         details: list[dict] = []
         for sha in commit_shas:
             details.append(
@@ -293,13 +288,54 @@ class EvidenceMcpClient:
             )
         return details
 
+    async def _fetch_github_commits(
+        self,
+        *,
+        session: ClientSession,
+        owner: str,
+        repo: str,
+        github_login: str | None,
+        max_commits: int,
+    ) -> tuple[dict, list[str]]:
+        """작성자 커밋을 페이지네이션해 설정된 최대 개수까지 수집한다."""
+        per_page = min(100, max(1, max_commits))
+        pages: list[dict] = []
+        shas: list[str] = []
+        page = 1
+
+        while len(shas) < max_commits:
+            arguments: dict[str, object] = {
+                "owner": owner,
+                "repo": repo,
+                "page": page,
+                "perPage": min(per_page, max_commits - len(shas)),
+            }
+            if github_login:
+                arguments["author"] = github_login
+
+            response = await self._safe_call_github_tool(
+                session,
+                settings.github_mcp_commits_tool,
+                arguments,
+            )
+            pages.append(response)
+            page_shas = _extract_github_commit_shas(response)
+            new_shas = [sha for sha in page_shas if sha not in shas]
+            shas.extend(new_shas)
+
+            if response.get("isError") or not page_shas or len(page_shas) < arguments["perPage"]:
+                break
+            page += 1
+
+        return {"pages": pages}, shas[:max_commits]
+
     async def _fetch_github_directory_tree(
         self,
         session: ClientSession,
         owner: str,
         repo: str,
-        max_dirs: int = 30,
-        max_depth: int = 4,
+        max_dirs: int = 100,
+        max_depth: int = 6,
     ) -> dict:
         """get_file_contents directory 응답을 제한적으로 재귀 조회해 tree 텍스트를 만든다."""
         root = await self._safe_call_github_tool(
@@ -370,7 +406,7 @@ def _extract_github_commit_shas(commits: dict) -> list[str]:
             if sha not in seen:
                 seen.add(sha)
                 shas.append(sha)
-    return shas[:30]
+    return shas
 
 
 def _walk_github_values(value: object) -> list[object]:
