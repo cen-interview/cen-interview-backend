@@ -30,6 +30,9 @@ def question() -> str:
     """
     return "네, 답변을 들었습니다."
 
+def unknown() -> str:
+    """답변이 없어 다음 메인 질문으로 넘어갈 때 사용하는 중립 문장."""
+    return "네, 다음 질문으로 넘어가겠습니다."
 
 def sufficient() -> str:
     """충분한 답변 뒤에 사용할 절제된 긍정 리액션을 반환한다.

@@ -85,6 +85,7 @@ def route_quality(state: SessionState | dict[str, Any]) -> str:
 
     routes = {
         AnswerQuality.SUFFICIENT: "complete_set",
+        AnswerQuality.UNKNOWN: "complete_set",
         AnswerQuality.BONUS_AVAILABLE: "ask_follow_up",
         AnswerQuality.MISCONCEPTION: "ask_challenge",
         AnswerQuality.CONFIRM_POSITIVE: "ask_confirm_positive",
