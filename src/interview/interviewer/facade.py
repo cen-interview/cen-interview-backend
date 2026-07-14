@@ -365,6 +365,7 @@ def create_session(
     max_questions: int = 10,
     deps: InterviewDeps | None = None,
     user_id: str | None = None,
+    weak_history_topics: list[str] | None = None,
 ) -> tuple[InterviewSession, Question]:
     """세션을 만들고 compiled graph가 생성한 첫 질문을 반환한다.
 
@@ -394,12 +395,12 @@ def create_session(
     """
     session_id = f"sess_{uuid.uuid4().hex[:8]}"
     session_deps = deps or InterviewDeps(
-        strategy=StrategyAgent(coverage or CoverageMap(), user_id=user_id),
+        strategy=StrategyAgent(coverage or CoverageMap(), user_id=user_id,weak_history_topics=weak_history_topics,),
         assessment=AssessmentAgent(user_id=user_id),
     )
     session_lock = Lock()
     session = InterviewSession(
-        session_id=session_id,
+        session_id=session_id, 
         mode=mode,
         coverage=coverage or CoverageMap(),
         max_questions=max_questions,
