@@ -5,7 +5,12 @@ from collections.abc import Callable
 from fastapi import APIRouter, Depends, HTTPException
 
 from interview.api.auth.dependency import get_current_user
-from interview.api.sessions.schema import EventRequest, StartRequest
+from interview.api.sessions.schema import (
+    EventRequest,
+    MainQuestionProgress,
+    SessionProgress,
+    StartRequest,
+)
 from interview.api.users.model import User
 from interview.evidence.store import get_store
 from interview.interviewer.adapters import from_chat, from_voice
@@ -232,9 +237,9 @@ def _session_response(
             compiled graph의 최신 체크포인트에서 복원한 세션 상태.
 
     Returns:
-        세션 ID, 현재 질문, TTS가 안내 문장과 질문을 순서대로 재생할 수 있는
-        면접관 발화 큐, 오류, 종료 여부와 최종 리포트를 JSON 직렬화 가능한
-        값으로 정리한 dict.
+        세션 ID, 현재 질문, 진행 정보, TTS가 안내 문장과 질문을 순서대로
+        재생할 수 있는 면접관 발화 큐, 오류, 종료 여부와 최종 리포트를 JSON
+        직렬화 가능한 값으로 정리한 dict.
     """
     return {
         "session_id": state.session_id,
@@ -245,6 +250,7 @@ def _session_response(
             if state.current_question is not None and not state.finished
             else None
         ),
+        "progress": _session_progress(state).model_dump(mode="json"),
         "utterance_queue": state.utterance_queue,
         "last_utterance": state.last_utterance,
         "transcript": [turn.model_dump(mode="json") for turn in state.transcript],
@@ -252,3 +258,41 @@ def _session_response(
         "error": state.error,
         "report": state.report if state.finished else None,
     }
+
+
+def _session_progress(state: SessionState) -> SessionProgress:
+    """세션 상태에서 클라이언트용 진행 정보를 계산한다.
+
+    메인 질문 순번은 그래프가 메인 질문을 만들 때만 증가시키는 asked_count를
+    사용한다. 전체 질문과 답변 수는 서버 transcript의 question_id를 기준으로
+    중복 제거해 계산하므로 replay처럼 같은 질문을 재생한 발화는 다시 세지
+    않는다.
+
+    Args:
+        state:
+            compiled graph의 최신 체크포인트에서 복원한 세션 상태.
+
+    Returns:
+        세션 상태, 메인 질문 진행률, 실제 출제 질문 수와 답변 완료 질문 수를
+        담은 SessionProgress.
+    """
+    asked_question_ids = {
+        turn.question_id
+        for turn in state.transcript
+        if turn.role == "interviewer" and turn.question_id is not None
+    }
+    answered_question_ids = {
+        turn.question_id
+        for turn in state.transcript
+        if turn.role == "candidate" and turn.question_id is not None
+    }
+
+    return SessionProgress(
+        status="completed" if state.finished else "in_progress",
+        main_question=MainQuestionProgress(
+            current=state.asked_count,
+            total=state.max_questions,
+        ),
+        asked_question_count=len(asked_question_ids),
+        answered_question_count=len(answered_question_ids),
+    )

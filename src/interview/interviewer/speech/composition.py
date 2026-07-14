@@ -13,9 +13,15 @@ from interview.interviewer.speech.prompts import (
     UTTERANCE_SYSTEM_PROMPT,
     build_utterance_user_prompt,
 )
+from interview.interviewer.speech.reaction import (
+    ReactionPolicy,
+    ReactionTone,
+    select_reaction_policy,
+)
 from interview.interviewer.workflow.runtime import _runtime_deps, _state_get
 from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.question import Question, QuestionKind
+from interview.schemas.signals import AnswerQuality
 
 _UTTERANCE_LLM_TIMEOUT_SECONDS = 3.0
 _UTTERANCE_TRANSCRIPT_TURN_LIMIT = 4
@@ -28,6 +34,28 @@ _QUESTION_ANNOUNCEMENT_EXPRESSIONS = (
     "더 확인하겠",
     "추가로 확인하겠",
     "조금 더 살펴보겠",
+)
+_UNCONDITIONAL_APPROVAL_EXPRESSIONS = (
+    "잘 들었습니다",
+    "감사합니다",
+    "훌륭",
+    "정확하게",
+    "정확히",
+    "좋은 답변",
+    "잘 설명",
+    "핵심을 잘",
+    "충분히 설명",
+)
+_CORRECTIVE_EXPRESSIONS = (
+    "틀렸",
+    "잘못",
+    "오류",
+    "부족",
+    "불충분",
+    "맞지 않",
+    "모순",
+    "다시 짚",
+    "재검토",
 )
 _QUESTION_OVERLAP_STOPWORDS = frozenset(
     {
@@ -174,13 +202,57 @@ def _preamble_announces_question(preamble: str, turn_type: str) -> bool:
     return any(expression in preamble for expression in _QUESTION_ANNOUNCEMENT_EXPRESSIONS)
 
 
-def _select_utterance_preamble(turn_type: str, question_kind: QuestionKind | None) -> str:
+def _preamble_conflicts_with_reaction_tone(
+    preamble: str,
+    reaction_tone: ReactionTone,
+    turn_type: str,
+) -> bool:
+    """LLM 리액션이 평가에서 정한 반응 강도와 충돌하는지 확인한다.
+
+    cautious와 corrective 답변에서 습관적인 칭찬이 나오면 지원자가 자신의
+    답변 상태를 잘못 해석할 수 있다. 반대로 positive 답변에 오류나 부족을
+    암시하는 표현이 나오면 평가와 발화가 모순된다. 완전한 의미 분석 대신
+    방향이 명확한 표현만 보수적으로 검사하고, 충돌하면 평가별 템플릿으로
+    폴백하도록 한다. greeting이나 replay 같은 비평가 턴은 검사하지 않는다.
+
+    Args:
+        preamble:
+            LLM이 생성한 면접관 리액션.
+
+        reaction_tone:
+            직전 평가 신호에서 선택한 발화 반응 강도.
+
+        turn_type:
+            현재 발화 상황. 평가 기반 리액션을 사용하는 question에서만
+            충돌 검사를 수행한다.
+
+    Returns:
+        발화가 반응 강도와 명확히 충돌하면 True, 그렇지 않으면 False.
+    """
+    if turn_type != "question" or reaction_tone == ReactionTone.NEUTRAL:
+        return False
+
+    if reaction_tone in {ReactionTone.CAUTIOUS, ReactionTone.CORRECTIVE}:
+        return any(
+            expression in preamble
+            for expression in _UNCONDITIONAL_APPROVAL_EXPRESSIONS
+        )
+
+    return any(expression in preamble for expression in _CORRECTIVE_EXPRESSIONS)
+
+
+def _select_utterance_preamble(
+    turn_type: str,
+    question_kind: QuestionKind | None,
+    reaction_policy: ReactionPolicy,
+) -> str:
     """현재 상황과 질문 종류에 맞는 기본 안내 문장을 선택한다.
 
     상황을 나타내는 turn_type을 질문 종류보다 먼저 확인한다. 같은 질문을
     사용하더라도 첫 제시, 재제시, 종료 상황의 안내 문장은 달라야 하기
-    때문이다. 일반 질문 상황에서는 Question.kind를 사용해 메인 질문,
-    꼬리 질문, 압박 질문, 힌트 질문의 안내 문장을 구분한다.
+    때문이다. 일반 question 상황에서는 직전 평가 신호를 우선 사용하여
+    충분함, 추가 깊이, 범위 확인, 오개념, 충돌 가능성을 서로 다른 문장으로
+    표현한다. 평가 신호가 없을 때만 Question.kind 기반 템플릿을 사용한다.
 
     Args:
         turn_type:
@@ -190,6 +262,9 @@ def _select_utterance_preamble(turn_type: str, question_kind: QuestionKind | Non
         question_kind:
             현재 질문의 종류. 질문이 없는 종료나 일시 정지 안내에서는
             None일 수 있다.
+
+        reaction_policy:
+            직전 평가 신호에서 변환한 반응 강도와 안전한 발화 지침.
 
     Returns:
         현재 발화 앞에 붙일 템플릿 기반 안내 문장.
@@ -202,6 +277,19 @@ def _select_utterance_preamble(turn_type: str, question_kind: QuestionKind | Non
         return utterance_templates.pause_prompt()
     if turn_type == "closing":
         return utterance_templates.closing()
+
+    if turn_type == "question":
+        quality_templates = {
+            AnswerQuality.SUFFICIENT: utterance_templates.sufficient,
+            AnswerQuality.BONUS_AVAILABLE: utterance_templates.bonus_available,
+            AnswerQuality.CONFIRM_POSITIVE: utterance_templates.confirm_positive,
+            AnswerQuality.TRAP_AVAILABLE: utterance_templates.trap_available,
+            AnswerQuality.MISCONCEPTION: utterance_templates.misconception,
+            AnswerQuality.CONFIRM_NEGATIVE: utterance_templates.confirm_negative,
+        }
+        quality_template = quality_templates.get(reaction_policy.quality)
+        if quality_template is not None:
+            return quality_template()
 
     question_templates = {
         QuestionKind.FOLLOW_UP: utterance_templates.follow_up,
@@ -315,6 +403,7 @@ def _generate_llm_preamble(
     state: SessionState | dict[str, Any],
     turn_type: str,
     current_question: Question | None,
+    reaction_policy: ReactionPolicy,
 ) -> str:
     """선택적 LLM을 사용해 현재 상황의 짧은 안내 문장을 생성한다.
 
@@ -336,6 +425,9 @@ def _generate_llm_preamble(
         current_question:
             현재 Strategy 질문. 종료 안내에서는 None일 수 있다.
 
+        reaction_policy:
+            직전 평가 결과에서 선택한 반응 강도와 간접 표현 지침.
+
     Returns:
         질문 내용을 반복하지 않는 LLM 생성 리액션.
 
@@ -353,6 +445,8 @@ def _generate_llm_preamble(
         question_kind=question_kind,
         question_text=question_text,
         last_signal=_serialize_last_signal_for_prompt(state),
+        reaction_tone=reaction_policy.tone.value,
+        reaction_guidance=reaction_policy.guidance,
         recent_transcript=_format_recent_transcript(state),
     )
     structured_llm = llm.with_structured_output(ComposedUtterance)
@@ -373,6 +467,12 @@ def _generate_llm_preamble(
         raise ValueError("LLM 리액션이 현재 질문의 내용이나 핵심 표현을 반복했습니다.")
     if _preamble_announces_question(preamble, turn_type):
         raise ValueError("LLM 리액션이 다음 질문을 불필요하게 예고했습니다.")
+    if _preamble_conflicts_with_reaction_tone(
+        preamble,
+        reaction_policy.tone,
+        turn_type,
+    ):
+        raise ValueError("LLM 리액션이 직전 평가의 반응 강도와 맞지 않습니다.")
 
     log_llm_output(
         "INTERVIEWER_PREAMBLE",
@@ -381,6 +481,10 @@ def _generate_llm_preamble(
             "turn_type": turn_type,
             "question_id": current_question.question_id if current_question else None,
             "question_kind": question_kind,
+            "reaction_tone": reaction_policy.tone.value,
+            "answer_quality": (
+                reaction_policy.quality.value if reaction_policy.quality else None
+            ),
         },
         input_data={"user_prompt": user_prompt},
     )
@@ -451,7 +555,12 @@ def compose_utterance(
         return {"error": "면접관 발화를 만들 현재 질문이 없습니다."}
 
     question_kind = current_question.kind if current_question is not None else None
-    fallback_preamble = _select_utterance_preamble(turn_type, question_kind)
+    reaction_policy = select_reaction_policy(_state_get(state, "last_signal"))
+    fallback_preamble = _select_utterance_preamble(
+        turn_type,
+        question_kind,
+        reaction_policy,
+    )
     preamble = fallback_preamble
     preamble_source = "template"
     deps = _runtime_deps(runtime)
@@ -462,6 +571,7 @@ def compose_utterance(
                 state=state,
                 turn_type=turn_type,
                 current_question=current_question,
+                reaction_policy=reaction_policy,
             )
             preamble_source = "llm"
         except Exception as exc:
@@ -474,6 +584,10 @@ def compose_utterance(
                     "turn_type": turn_type,
                     "question_id": current_question.question_id if current_question else None,
                     "question_kind": question_kind.value if question_kind else None,
+                    "reaction_tone": reaction_policy.tone.value,
+                    "answer_quality": (
+                        reaction_policy.quality.value if reaction_policy.quality else None
+                    ),
                 },
                 fallback={"preamble": fallback_preamble},
             )
@@ -504,6 +618,10 @@ def compose_utterance(
             "turn_type": turn_type,
             "question_id": current_question.question_id if current_question else None,
             "question_kind": question_kind.value if question_kind else None,
+            "reaction_tone": reaction_policy.tone.value,
+            "answer_quality": (
+                reaction_policy.quality.value if reaction_policy.quality else None
+            ),
         },
         status=preamble_source,
     )
