@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     github_mcp_commits_tool: str = "list_commits"
     github_mcp_commit_tool: str = "get_commit"
 
+    # Browser client
+    frontend_app_url: str = "http://localhost:5173"
+
     # Vector DB (Postgres + pgvector)
     database_url: str = "postgresql://postgres:postgres@localhost:5432/interview"
 
@@ -53,6 +56,11 @@ class Settings(BaseSettings):
     evidence_llm_extract_enabled: bool = False
     evidence_store_backend: str = "memory"
     evidence_chroma_path: str = ".chroma/evidence"
+    evidence_github_max_commits: int = 200
+    evidence_github_max_code_files: int = 50
+    evidence_github_max_file_chars: int = 30000
+    evidence_github_max_dirs: int = 100
+    evidence_github_max_depth: int = 6
 
 
 @lru_cache

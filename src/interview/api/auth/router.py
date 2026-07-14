@@ -1,12 +1,21 @@
 """인증 관련 API 라우터."""
 
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from interview.api.core.security import decode_access_token
 from interview.api.auth.dependency import get_current_user
-from interview.api.auth.schema import LoginRequest, RefreshRequest, TokenResponse
+from interview.api.auth.model import GitHubCredential, NotionCredential
+from interview.api.auth.schema import (
+    LoginRequest,
+    OAuthAuthorizeUrlResponse,
+    OAuthConnectionStatus,
+    RefreshRequest,
+    TokenResponse,
+)
 from interview.api.auth.service import (
     build_github_oauth_authorize_url,
     build_notion_mcp_authorize_url,
@@ -19,6 +28,7 @@ from interview.api.auth.service import (
 )
 from interview.api.database import get_db
 from interview.api.users.model import User
+from interview.config import settings
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -48,6 +58,20 @@ def start_notion_oauth(current_user: User = Depends(get_current_user)):
 
     return RedirectResponse(url=auth_data["authorize_url"])
 
+
+@router.post("/notion/authorize-url", response_model=OAuthAuthorizeUrlResponse)
+def get_notion_authorize_url(
+    current_user: User = Depends(get_current_user),
+) -> OAuthAuthorizeUrlResponse:
+    """Bearer 인증 프론트엔드가 이동할 Notion OAuth 승인 URL을 반환한다."""
+
+    client_data = register_notion_mcp_client()
+    auth_data = build_notion_mcp_authorize_url(
+        user=current_user,
+        client_data=client_data,
+    )
+    return OAuthAuthorizeUrlResponse(authorize_url=auth_data["authorize_url"])
+
 @router.get("/notion/callback")
 def notion_oauth_callback(
     code: str | None = Query(default=None),
@@ -76,14 +100,15 @@ def notion_oauth_callback(
             detail="유효하지 않은 Notion OAuth state입니다.",
         )
 
-    return exchange_notion_mcp_code(
-      db=db,
-      user_id=payload["user_id"],
-      code=code,
-      client_id=payload["client_id"],
-      client_secret=payload.get("client_secret"),
-      code_verifier=payload["code_verifier"],
+    exchange_notion_mcp_code(
+        db=db,
+        user_id=payload["user_id"],
+        code=code,
+        client_id=payload["client_id"],
+        client_secret=payload.get("client_secret"),
+        code_verifier=payload["code_verifier"],
     )
+    return _frontend_oauth_redirect("notion", "connected")
 
 
 @router.get("/github/start")
@@ -92,6 +117,16 @@ def start_github_oauth(current_user: User = Depends(get_current_user)):
 
     auth_data = build_github_oauth_authorize_url(user=current_user)
     return RedirectResponse(url=auth_data["authorize_url"])
+
+
+@router.post("/github/authorize-url", response_model=OAuthAuthorizeUrlResponse)
+def get_github_authorize_url(
+    current_user: User = Depends(get_current_user),
+) -> OAuthAuthorizeUrlResponse:
+    """Bearer 인증 프론트엔드가 이동할 GitHub OAuth 승인 URL을 반환한다."""
+
+    auth_data = build_github_oauth_authorize_url(user=current_user)
+    return OAuthAuthorizeUrlResponse(authorize_url=auth_data["authorize_url"])
 
 
 @router.get("/github/callback")
@@ -122,10 +157,54 @@ def github_oauth_callback(
             detail="유효하지 않은 GitHub OAuth state입니다.",
         )
 
-    return exchange_github_oauth_code(
+    exchange_github_oauth_code(
         db=db,
         user_id=payload["user_id"],
         code=code,
+    )
+    return _frontend_oauth_redirect("github", "connected")
+
+
+@router.get("/github/status", response_model=OAuthConnectionStatus)
+def get_github_connection_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> OAuthConnectionStatus:
+    """마이페이지에서 사용할 GitHub OAuth 연결 상태를 반환한다."""
+
+    credential = (
+        db.query(GitHubCredential)
+        .filter(GitHubCredential.user_id == current_user.id)
+        .first()
+    )
+    return OAuthConnectionStatus(
+        provider="github",
+        connected=credential is not None,
+        account_name=credential.github_login if credential else None,
+        account_id=credential.github_user_id if credential else None,
+        scope=credential.scope if credential else None,
+        connected_at=credential.updated_at if credential else None,
+    )
+
+
+@router.get("/notion/status", response_model=OAuthConnectionStatus)
+def get_notion_connection_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> OAuthConnectionStatus:
+    """마이페이지에서 사용할 Notion OAuth 연결 상태를 반환한다."""
+
+    credential = (
+        db.query(NotionCredential)
+        .filter(NotionCredential.user_id == current_user.id)
+        .first()
+    )
+    return OAuthConnectionStatus(
+        provider="notion",
+        connected=credential is not None,
+        account_name=credential.workspace_name if credential else None,
+        account_id=credential.workspace_id if credential else None,
+        connected_at=credential.updated_at if credential else None,
     )
 
 
@@ -134,3 +213,11 @@ def logout(req: RefreshRequest, db: Session = Depends(get_db)):
     """Refresh Token을 삭제하여 로그아웃한다."""
 
     return logout_user(db, req)
+
+
+def _frontend_oauth_redirect(provider: str, result: str) -> RedirectResponse:
+    """OAuth callback 완료 후 프론트 마이페이지로 안전하게 복귀시킨다."""
+
+    query = urlencode({"oauth": provider, "oauth_result": result})
+    destination = f"{settings.frontend_app_url.rstrip('/')}/my-page?{query}"
+    return RedirectResponse(url=destination)

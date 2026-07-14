@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
+from interview.config import settings
 from interview.evidence.mcp_client import EvidenceMcpClient
 
 
@@ -274,36 +275,6 @@ def _github_response_to_raw_docs(response: dict, repo_link: str) -> list[RawDoc]
             )
         )
 
-    repository_text = _extract_mcp_text(response.get("repository"))
-    if repository_text:
-        docs.append(
-            RawDoc(
-                source_url=repo_link,
-                source_type="github",
-                title=f"{repo_name} repository metadata",
-                raw_text=repository_text,
-                meta={
-                    "repo": repo_name,
-                    "doc_type": "repository_meta",
-                },
-            )
-        )
-
-    tree_text = _extract_mcp_text(response.get("tree"))
-    if tree_text:
-        docs.append(
-            RawDoc(
-                source_url=f"{repo_link}/tree/HEAD",
-                source_type="github",
-                title=f"{repo_name} directory tree",
-                raw_text=tree_text,
-                meta={
-                    "repo": repo_name,
-                    "doc_type": "directory_tree",
-                },
-            )
-        )
-
     return docs
 
 
@@ -322,7 +293,7 @@ def _github_code_response_to_raw_docs(
 
     for file_path, response in file_contents.items():
         raw_text = _extract_github_file_content_text(response)
-        if not raw_text:
+        if not raw_text or len(raw_text) > settings.evidence_github_max_file_chars:
             continue
 
         commit_shas = touched_files.get(file_path, [])
@@ -341,6 +312,7 @@ def _github_code_response_to_raw_docs(
                     "author_login": github_login,
                     "commit_shas": commit_shas,
                     "commit_count": len(commit_shas),
+                    "last_commit_sha": commit_shas[0] if commit_shas else None,
                 },
             )
         )
@@ -613,9 +585,10 @@ def _extract_github_file_paths_from_commit_text(text: str) -> list[str]:
 def _select_github_code_paths(
     tree_paths: list[str],
     touched_files: dict[str, list[str]],
-    max_files: int = 15,
+    max_files: int | None = None,
 ) -> list[str]:
     """전체 핵심 소스와 사용자 touched 파일을 함께 고려해 코드 파일을 선별한다."""
+    max_files = max_files or settings.evidence_github_max_code_files
     candidates = [path for path in tree_paths if _is_github_source_file(path)]
     touched_candidates = [path for path in touched_files if path in candidates]
 
@@ -925,7 +898,11 @@ class GitHubSource:
 
             touched_files = _build_github_touched_file_map(response.get("commit_details"))
             tree_paths = _extract_github_file_paths(response.get("tree"))
-            selected_paths = _select_github_code_paths(tree_paths, touched_files)
+            selected_paths = _select_github_code_paths(
+                tree_paths,
+                touched_files,
+                max_files=settings.evidence_github_max_code_files,
+            )
             if not selected_paths:
                 continue
 

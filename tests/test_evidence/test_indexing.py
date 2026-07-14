@@ -160,5 +160,6 @@ def test_build_index_records_partial_failures_and_keeps_successful_chunks(monkey
     assert result.chunk_count == 1
     assert len(result.failures) == 2
     assert {failure.source_type for failure in result.failures} == {"notion", "github"}
-    assert calls["chunks"] == [chunk]
+    assert [item.chunk_id for item in calls["chunks"]] == ["chunk-1"]
+    assert calls["chunks"][0].topic == "spring security"
     assert calls["user_id"] == "user-1"

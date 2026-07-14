@@ -264,8 +264,8 @@ def test_github_source_skips_invalid_repo_links(monkeypatch) -> None:
     assert [doc.source_url for doc in base_docs] == ["https://github.com/example/project"]
 
 
-def test_github_response_to_raw_docs_creates_readme_meta_and_tree_docs() -> None:
-    """GitHub MCP 응답에서 README, 저장소 메타, 디렉터리 트리 RawDoc을 만든다."""
+def test_github_response_to_raw_docs_keeps_readme_but_excludes_meta_and_tree() -> None:
+    """저장소 메타와 트리는 임베딩하지 않고 README만 RawDoc으로 만든다."""
     response = {
         "repo_url": "https://github.com/example/project",
         "owner": "example",
@@ -279,19 +279,13 @@ def test_github_response_to_raw_docs_creates_readme_meta_and_tree_docs() -> None
 
     docs = _github_response_to_raw_docs(response, "https://github.com/example/project")
 
-    assert [doc.meta["doc_type"] for doc in docs] == [
-        "README",
-        "repository_meta",
-        "directory_tree",
-    ]
+    assert [doc.meta["doc_type"] for doc in docs] == ["README"]
     assert docs[0].raw_text.startswith("# Project")
     assert docs[0].meta["file_path"] == "README.md"
-    assert docs[1].raw_text == "language: Python"
-    assert "src/app.py" in docs[2].raw_text
 
 
 def test_github_response_to_raw_docs_skips_missing_readme() -> None:
-    """README가 없어도 저장소 메타와 디렉터리 트리는 RawDoc으로 만든다."""
+    """README가 없으면 메타와 디렉터리 트리도 임베딩 대상으로 만들지 않는다."""
     response = {
         "repo_url": "https://github.com/example/project",
         "owner": "example",
@@ -305,10 +299,7 @@ def test_github_response_to_raw_docs_skips_missing_readme() -> None:
 
     docs = _github_response_to_raw_docs(response, "https://github.com/example/project")
 
-    assert [doc.meta["doc_type"] for doc in docs] == [
-        "repository_meta",
-        "directory_tree",
-    ]
+    assert docs == []
 
 
 def test_github_response_to_raw_docs_skips_download_status_readme() -> None:
