@@ -64,12 +64,12 @@ class ComposedUtterance(BaseModel):
 
     Attributes:
         preamble:
-            현재 상황에 맞는 한국어 존댓말 안내 문장. 최대 두 문장을
-            요청하며, 질문 본문은 포함하지 않는다.
+            현재 상황에 맞는 짧은 한국어 존댓말 리액션. 질문 상황에서는
+            한 문장으로 생성하며, 질문의 내용이나 핵심 표현은 포함하지 않는다.
     """
 
     preamble: str = Field(
         min_length=1,
         max_length=200,
-        description="질문 본문을 제외한 최대 두 문장의 한국어 면접관 안내 문장.",
+        description="질문의 내용과 핵심 표현을 제외한 짧은 한국어 면접관 리액션.",
     )
