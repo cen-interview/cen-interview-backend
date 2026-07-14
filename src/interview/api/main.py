@@ -18,7 +18,9 @@ from interview.api.sessions.router import (
 )
 from interview.api.users.router import router as users_router
 from interview.api.voice.router import router as voice_router
-
+from interview.api.interviews.router import (
+    router as interviews_router,
+)
 
 load_dotenv()
 
@@ -57,7 +59,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(evidence_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
-
+app.include_router(interviews_router, prefix="/api",)
 
 @app.get("/api/health")
 def health():

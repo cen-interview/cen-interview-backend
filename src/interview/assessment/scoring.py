@@ -106,7 +106,7 @@ class QuestionSetScore(BaseModel):
     comment: str
 
 
-
+# 질문 세트의 답변 이력을 반영해 문항 최종 점수를 계산한다.
 def score_question_set(
     attempts: list[AnswerAttempt],
 ) -> QuestionSetScore:
@@ -129,29 +129,29 @@ def score_question_set(
 
     return _calculate_question_set_score(attempts)
 
+# 점수를 0~100 범위로 제한하고 소수점 둘째 자리까지 반올림한다.
 def _clamp_score(score: float) -> float:
-    """점수를 0~100 범위로 제한하고 소수 둘째 자리까지 반환한다."""
 
     return round(
         max(0.0, min(100.0, score)),
         2,
     )
 
+# 기본 점수에 비율 방식의 가산점 또는 감점을 적용한다.
 def _apply_score_rate(
     score: float,
     rate: float,
 ) -> float:
-    """기본 점수에 비율 기반 가산·감점을 적용한다."""
 
     adjusted_score = score * (1.0 + rate)
 
     return _clamp_score(adjusted_score)
 
+# 메인 질문의 난이도 배율을 질문 세트 점수에 적용한다.
 def _apply_difficulty_adjustment(
     score: float,
     attempts: list[AnswerAttempt],
 ) -> tuple[float, float]:
-    """메인 질문의 난이도에 따라 질문 세트 점수를 보정한다."""
 
     main_attempt = _find_main_attempt(attempts)
 
@@ -166,6 +166,7 @@ def _apply_difficulty_adjustment(
 
     return adjusted_score, multiplier
 
+# 답변의 정확도와 충분성을 이용해 내용 기본 점수를 계산한다.
 def _calculate_attempt_base_score(
     attempt: AnswerAttempt,
 ) -> float:
@@ -194,17 +195,18 @@ def _calculate_attempt_base_score(
         normalized_score * 100
     )
 
+# 마지막 답변 이전에 지정된 quality 판정이 있었는지 확인한다.
 def _has_prior_quality(
     attempts: list[AnswerAttempt],
     quality: AnswerQuality,
 ) -> bool:
-    """마지막 답변 이전에 지정한 quality가 있었는지 확인한다."""
 
     return any(
         attempt.signal.quality == quality
         for attempt in attempts[:-1]
     )
 
+# 파생 질문의 해결 여부에 맞는 질문 세트 평가 문장을 반환한다
 def _build_adjustment_comment(
     question_kind: QuestionKind,
     resolved: bool,
@@ -266,15 +268,12 @@ def _build_adjustment_comment(
 
     return comments[question_kind][resolved]
 
+# 파생 질문에서 이전 부족점이나 오개념을 해결했는지 점수에 반영한다.
 def _apply_history_adjustment(
     base_score: float,
     attempts: list[AnswerAttempt],
 ) -> tuple[float, str]:
-    """마지막 파생 질문에서 문제를 해결했는지에 따라 점수를 보정한다.
-
-    고정 점수를 더하거나 빼지 않고 기본 점수에 비율을 적용한다.
-
-    흐름:
+    """흐름:
     - FOLLOW_UP: 설명 누락 보완 여부
     - CHALLENGE: 오개념 정정 여부
     - CONFIRM_POSITIVE: 세부 사실 확인 여부
@@ -358,12 +357,10 @@ def _apply_history_adjustment(
 
     return adjusted_score, comment
 
-
+# 내용, 답변 이력, 난이도와 전달력을 반영해 질문 세트 최종 점수를 계산한다.
 def _calculate_question_set_score(
     attempts: list[AnswerAttempt],
 ) -> QuestionSetScore:
-    """마지막 답변의 정확도와 충분성으로 질문 세트 기본 점수를 계산한다.
-    """
 
     if not attempts:
         return QuestionSetScore(
@@ -406,11 +403,11 @@ def _calculate_question_set_score(
         score=final_score,
         comment=adjustment_comment,
     )
-    
+
+# 질문 세트에서 기준이 되는 메인 질문 답변을 찾는다.    
 def _find_main_attempt(
     attempts: list[AnswerAttempt],
     ) -> AnswerAttempt:
-    """질문 세트에서 메인 질문 답변을 찾는다."""
 
     for attempt in attempts:
         if attempt.question_kind == QuestionKind.MAIN:
@@ -420,11 +417,10 @@ def _find_main_attempt(
 
 # ---------------------------------------------- 
 
+# 분당 발화 속도를 0~100 범위의 전달력 점수로 변환한다.
 def _calculate_speech_rate_score(
     speech_rate_wpm: float,
 ) -> float:
-    """분당 발화 속도를 0~100 전달력 점수로 변환한다."""
-
     if 120 <= speech_rate_wpm <= 170:
         return 100.0
 
@@ -436,10 +432,10 @@ def _calculate_speech_rate_score(
 
     return 60.0
 
+# 필러 표현 사용 횟수를 0~100 범위의 전달력 점수로 변환한다.
 def _calculate_filler_score(
     filler_count: int,
 ) -> float:
-    """필러 표현 사용 횟수를 0~100 전달력 점수로 변환한다."""
 
     if filler_count <= 2:
         return 100.0
@@ -452,11 +448,10 @@ def _calculate_filler_score(
 
     return 50.0
 
-
+# 답변 하나의 음성 지표를 가중 평균한 전달력 점수로 변환한다.
 def _calculate_attempt_delivery_score(
     delivery_metrics: dict | None,
 ) -> float | None:
-    """답변 하나의 전달력 지표를 전달력 점수로 변환한다."""
 
     # metrics 자체가 없으면 전달력 계산을 하지 않는다.
     if not delivery_metrics:
@@ -506,11 +501,10 @@ def _calculate_attempt_delivery_score(
 
     return _clamp_score(weighted_score)
 
-
+# 질문 세트에 포함된 음성 답변들의 전달력 점수 평균을 계산한다.
 def _calculate_set_delivery_score(
     attempts: list[AnswerAttempt],
 ) -> float | None:
-    """질문 세트에 포함된 음성 답변들의 전달력 점수 평균을 계산한다."""
 
     delivery_scores = []
 
@@ -537,11 +531,11 @@ def _calculate_set_delivery_score(
         / len(delivery_scores)
     )
 
+# 음성 지표가 있으면 내용 점수와 전달력 점수를 가중 결합한다.
 def _combine_content_and_delivery_score(
     content_score: float,
     delivery_score: float | None,
 ) -> float:
-    """음성 지표가 있으면 내용 점수와 전달력 점수를 결합한다."""
 
     if delivery_score is None:
         return _clamp_score(content_score)

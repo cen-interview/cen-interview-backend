@@ -1,6 +1,17 @@
-"""Assessment 평가 그래프.
+"""답변 하나를 평가하는 Assessment 내부 LangGraph 파이프라인.
 
-답변 1개를 평가하는 내부 파이프라인의 state와 graph 노드를 정의한다.
+평가 흐름:
+    retrieve_evidence
+    → judge
+    → 충돌 의심 시 conflict_check
+    → finalize_signal
+
+프로젝트 질문은 Evidence를 조회해 평가하고, 기술 개념 질문은 LLM의
+기술 지식을 기준으로 평가한다. 이전 같은 topic의 답변이 있거나
+Evidence 충돌이 의심되는 경우에만 정밀 충돌 검사를 수행한다.
+
+최종 결과는 Interviewer가 다음 질문 흐름을 결정할 수 있도록
+AnswerQualitySignal 형태로 반환한다.
 """
 
 from uuid import uuid4
@@ -20,7 +31,7 @@ from interview.schemas.signals import AnswerQualitySignal
 from functools import lru_cache
 
 class AssessmentState(BaseModel):
-    """Assessment 내부 그래프에서 노드들이 공유하는 상태."""
+    """답변 1회 평가 과정에서 그래프 노드들이 공유하는 상태를 관리한다."""
     question: Question | None = None
     answer_text: str = ""
     delivery_metrics: dict | None = None
@@ -36,10 +47,11 @@ class AssessmentState(BaseModel):
     same_topic_history: list[AnswerAttempt] = Field(default_factory=list)
     same_topic_history_summary: str = ""
 
+# topic 비교를 위해 앞뒤 공백을 제거하고 소문자로 변환한다.
 def _normalize_topic(topic: str) -> str:
     return topic.strip().lower()
 
-
+# 전체 답변 이력에서 현재 질문과 같은 topic의 답변만 추출한다.
 def _filter_same_topic_history(
     question: Question,
     history: list[AnswerAttempt],
@@ -52,6 +64,7 @@ def _filter_same_topic_history(
         if _normalize_topic(attempt.question_topic) == current_topic
     ]
 
+# 같은 topic의 이전 답변 이력을 충돌 검사 프롬프트 문자열로 변환한다.
 def _build_same_topic_history_summary(history: list[AnswerAttempt]) -> str:
     if not history:
         return ""
@@ -68,9 +81,8 @@ def _build_same_topic_history_summary(history: list[AnswerAttempt]) -> str:
         for attempt in history
     )
 
-
+# 프로젝트 질문이면 관련 Evidence를 조회해 평가 상태에 저장한다.
 def retrieve_evidence(state: AssessmentState) -> AssessmentState:
-    """PROJECT 질문이면 Evidence를 조회하고, 그 외 질문은 근거 없이 진행한다."""
 
     question = state.question
 
@@ -88,9 +100,8 @@ def retrieve_evidence(state: AssessmentState) -> AssessmentState:
     )
     return state
 
-
+# 답변을 LLM으로 1차 평가하고 JudgeResult를 상태에 저장한다.
 def judge(state: AssessmentState) -> AssessmentState:
-    """답변을 1차 판정하고 JudgeResult를 state에 저장한다."""
 
     if state.question is None:
         return state
@@ -113,9 +124,8 @@ def judge(state: AssessmentState) -> AssessmentState:
 
     return state
 
-
+# 이전 답변과 Evidence를 기준으로 현재 답변의 충돌 여부를 정밀 검사한다.
 def conflict_check(state: AssessmentState) -> AssessmentState:
-    """LLM으로 이전 답변/Evidence와의 충돌 여부를 정밀 확인한다."""
 
     if state.question is None or state.judge_result is None:
         return state
@@ -182,9 +192,8 @@ def conflict_check(state: AssessmentState) -> AssessmentState:
 
     return state
 
-
+# 최종 JudgeResult를 Interviewer가 사용할 AnswerQualitySignal로 변환한다.
 def finalize_signal(state: AssessmentState) -> AssessmentState:
-    """최종 JudgeResult를 Interviewer가 소비하는 AnswerQualitySignal로 변환한다."""
 
     if state.question is None or state.judge_result is None:
         return state
@@ -215,9 +224,8 @@ def finalize_signal(state: AssessmentState) -> AssessmentState:
 
     return state
 
-
+# 1차 평가 결과에 따라 충돌 검사 노드를 실행할지 결정한다.
 def route_after_judge(state: AssessmentState) -> str:
-    """judge 결과에 따라 conflict_check 경유 여부를 결정한다."""
 
     if (
         state.judge_result is not None
@@ -227,9 +235,8 @@ def route_after_judge(state: AssessmentState) -> str:
 
     return "finalize_signal"
 
-
+# 답변 평가 노드와 조건부 경로를 연결한 Assessment 그래프를 구성한다.
 def build_assessment_graph():
-    """Assessment 내부 평가 그래프를 구성한다."""
 
     from langgraph.graph import END, START, StateGraph
 
@@ -254,13 +261,13 @@ def build_assessment_graph():
 
     return graph
 
+# 컴파일된 Assessment 그래프를 생성하고 프로세스에서 재사용한다.
 @lru_cache
 def get_compiled_graph():
-    """Assessment 내부 평가 그래프를 compile해서 반환한다."""
 
     return build_assessment_graph().compile()
 
-
+# 충돌 검사 LLM에 전달할 질문·답변·이력·Evidence 프롬프트를 생성한다.
 def _build_conflict_check_prompt(state: AssessmentState) -> str:
     return f"""
 [현재 질문]
