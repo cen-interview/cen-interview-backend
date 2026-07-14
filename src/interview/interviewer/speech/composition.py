@@ -1,6 +1,7 @@
 """면접관 안내 문장을 생성하고 질문 원문과 조립하는 발화 레이어."""
 
 import json
+import re
 from queue import Empty, Queue
 from threading import Thread
 from typing import Any
@@ -19,6 +20,159 @@ from interview.schemas.question import Question, QuestionKind
 _UTTERANCE_LLM_TIMEOUT_SECONDS = 3.0
 _UTTERANCE_TRANSCRIPT_TURN_LIMIT = 4
 _UTTERANCE_TRANSCRIPT_TEXT_LIMIT = 500
+_QUESTION_ANNOUNCEMENT_EXPRESSIONS = (
+    "다음 질문",
+    "질문을 드리",
+    "질문드리",
+    "여쭤보",
+    "더 확인하겠",
+    "추가로 확인하겠",
+    "조금 더 살펴보겠",
+)
+_QUESTION_OVERLAP_STOPWORDS = frozenset(
+    {
+        "경우",
+        "관련",
+        "내용",
+        "다음",
+        "답변",
+        "대해",
+        "대한",
+        "방법",
+        "말씀",
+        "무엇",
+        "사용",
+        "설명",
+        "어떤",
+        "어떻게",
+        "예시",
+        "이유",
+        "의미",
+        "장점",
+        "정도",
+        "조금",
+        "주세",
+        "질문",
+        "차이",
+    }
+)
+_KOREAN_PARTICLE_SUFFIXES = (
+    "으로부터",
+    "에서부터",
+    "에게서",
+    "까지는",
+    "에서는",
+    "으로는",
+    "이라는",
+    "라고는",
+    "부터",
+    "까지",
+    "에게",
+    "에서",
+    "으로",
+    "라고",
+    "이며",
+    "에는",
+    "에게",
+    "처럼",
+    "보다",
+    "과는",
+    "와는",
+    "이라",
+    "라고",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "에",
+    "와",
+    "과",
+    "도",
+    "로",
+)
+
+
+def _content_tokens(text: str) -> set[str]:
+    """질문과 리액션의 내용 중복 검사에 사용할 핵심 토큰을 추린다.
+
+    대소문자와 한국어 조사의 차이 때문에 같은 용어가 다른 문자열로 보이는
+    문제를 줄이기 위해 영문은 소문자로 바꾸고 흔한 조사를 제거한다. 질문의
+    지시 표현처럼 내용 중복 판단에 도움이 되지 않는 일반 단어는 제외한다.
+
+    Args:
+        text:
+            핵심 토큰을 추출할 질문 또는 preamble 문자열.
+
+    Returns:
+        조사와 일반 지시 표현이 제거된 중복 검사용 토큰 집합.
+    """
+    raw_tokens = re.findall(r"[0-9A-Za-z가-힣+#]+", text.lower())
+    normalized_tokens: set[str] = set()
+    for raw_token in raw_tokens:
+        token = raw_token
+        for suffix in _KOREAN_PARTICLE_SUFFIXES:
+            if token.endswith(suffix) and len(token) > len(suffix) + 1:
+                token = token[: -len(suffix)]
+                break
+        if len(token) < 2 or token in _QUESTION_OVERLAP_STOPWORDS:
+            continue
+        normalized_tokens.add(token)
+    return normalized_tokens
+
+
+def _preamble_repeats_question(preamble: str, question: Question) -> bool:
+    """preamble이 현재 질문의 주제나 핵심 표현을 다시 말하는지 확인한다.
+
+    질문 전체 문장이 그대로 들어간 경우뿐 아니라 topic 또는 의미 있는 단어가
+    하나라도 다시 사용된 경우를 중복으로 본다. preamble은 질문 설명이 아니라
+    직전 답변에 대한 리액션만 담당하므로 보수적으로 차단하고 템플릿 폴백을
+    선택한다.
+
+    Args:
+        preamble:
+            LLM이 생성한 면접관 리액션.
+
+        question:
+            리액션 뒤에 원문 그대로 붙일 현재 질문.
+
+    Returns:
+        질문 내용과 중복되면 True, 중복이 없으면 False.
+    """
+    compact_preamble = re.sub(r"\s+", "", preamble).lower()
+    compact_question = re.sub(r"\s+", "", question.text).lower()
+    if compact_question and compact_question in compact_preamble:
+        return True
+
+    compact_topic = re.sub(r"\s+", "", question.topic).lower()
+    if len(compact_topic) >= 2 and compact_topic in compact_preamble:
+        return True
+
+    return bool(_content_tokens(preamble) & _content_tokens(question.text))
+
+
+def _preamble_announces_question(preamble: str, turn_type: str) -> bool:
+    """일반 질문용 preamble이 다음 질문을 예고하는 표현인지 확인한다.
+
+    replay나 hint처럼 상황 안내 자체가 필요한 턴은 검사하지 않는다. Strategy가
+    만든 새 질문 앞에 붙는 question 턴에서만 전환·예고 문구를 거부한다.
+
+    Args:
+        preamble:
+            LLM이 생성한 면접관 리액션.
+
+        turn_type:
+            greeting, question, replay 등 현재 발화 상황.
+
+    Returns:
+        불필요한 질문 예고 표현이 있으면 True, 없으면 False.
+    """
+    if turn_type != "question":
+        return False
+    return any(expression in preamble for expression in _QUESTION_ANNOUNCEMENT_EXPRESSIONS)
+
 
 def _select_utterance_preamble(turn_type: str, question_kind: QuestionKind | None) -> str:
     """현재 상황과 질문 종류에 맞는 기본 안내 문장을 선택한다.
@@ -164,9 +318,10 @@ def _generate_llm_preamble(
 ) -> str:
     """선택적 LLM을 사용해 현재 상황의 짧은 안내 문장을 생성한다.
 
-    LLM에는 최근 대화 일부와 직전 평가 신호만 전달한다. 구조화 출력에서
-    preamble만 꺼내며, 원본 질문이 결과에 포함되면 질문 반복으로 판단하여
-    예외를 발생시킨다. 예외는 compose_utterance가 템플릿 폴백으로 처리한다.
+    LLM에는 최근 대화 일부, 직전 평가 신호와 중복 방지용 현재 질문을 전달한다.
+    구조화 출력에서 preamble만 꺼내며, 질문의 주제·핵심 표현을 반복하거나
+    다음 질문을 예고하면 예외를 발생시킨다. 예외는 compose_utterance가
+    리액션 템플릿 폴백으로 처리한다.
 
     Args:
         llm:
@@ -182,11 +337,11 @@ def _generate_llm_preamble(
             현재 Strategy 질문. 종료 안내에서는 None일 수 있다.
 
     Returns:
-        질문 본문을 포함하지 않는 LLM 생성 preamble.
+        질문 내용을 반복하지 않는 LLM 생성 리액션.
 
     Raises:
         ValueError:
-            LLM 결과가 비어 있거나 원본 질문을 포함한 경우.
+            LLM 결과가 비어 있거나 질문 내용을 반복·예고한 경우.
 
         Exception:
             구조화 출력 설정이나 LLM 호출에 실패한 경우.
@@ -214,8 +369,10 @@ def _generate_llm_preamble(
     preamble = composed.preamble.strip()
     if not preamble:
         raise ValueError("LLM이 빈 면접관 안내 문장을 반환했습니다.")
-    if question_text and question_text.strip() in preamble:
-        raise ValueError("LLM 안내 문장에 원본 질문이 포함되었습니다.")
+    if current_question is not None and _preamble_repeats_question(preamble, current_question):
+        raise ValueError("LLM 리액션이 현재 질문의 내용이나 핵심 표현을 반복했습니다.")
+    if _preamble_announces_question(preamble, turn_type):
+        raise ValueError("LLM 리액션이 다음 질문을 불필요하게 예고했습니다.")
 
     log_llm_output(
         "INTERVIEWER_PREAMBLE",

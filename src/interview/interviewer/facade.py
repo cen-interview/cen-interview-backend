@@ -400,8 +400,7 @@ def create_session(
     session_deps = deps or InterviewDeps(
         strategy=StrategyAgent(coverage or CoverageMap(),
         user_id=user_id,
-        #weak_history_topics=weak_history_topics,
-                               ),
+        weak_history_topics=weak_history_topics,),
         assessment=AssessmentAgent(user_id=user_id),
         llm=get_llm(temperature=0.3),
     )
