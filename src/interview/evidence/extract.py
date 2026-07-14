@@ -10,6 +10,7 @@ from hashlib import sha1
 from typing import Protocol
 
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error, log_llm_output
 from interview.evidence.sources import RawDoc
 from interview.schemas.evidence import (
     EvidenceChunk,
@@ -187,7 +188,33 @@ def _decide_sections_with_llm(
             ),
         ),
     ]
-    return structured_llm.invoke(messages)
+    try:
+        result = structured_llm.invoke(messages)
+        log_llm_output(
+            "EVIDENCE_EXTRACTION",
+            result,
+            metadata={
+                "title": doc.title,
+                "source_type": doc.source_type,
+                "source_url": doc.source_url,
+                "section_count": len(sections),
+            },
+            input_data={"messages": messages},
+        )
+        return result
+    except Exception as exc:
+        log_llm_error(
+            "EVIDENCE_EXTRACTION",
+            exc,
+            metadata={
+                "title": doc.title,
+                "source_type": doc.source_type,
+                "source_url": doc.source_url,
+                "section_count": len(sections),
+            },
+            input_data={"messages": messages},
+        )
+        raise
 
 
 def _split_sections(text: str) -> list[_Section]:
