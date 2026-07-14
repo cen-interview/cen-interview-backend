@@ -47,7 +47,7 @@ class GeneratedQuestion(BaseModel):
 
 class GeneratedDerivedQuestion(BaseModel):
     """LLM이 생성하는 파생 질문의 구조화 출력."""
-    text: str = Field(description="생성된 질문 문장. 반드시 하나의 질문만 담는다.")
+    text: str = Field(description="생성된 질문 문장. 한 문장으로 간결하게, 반드시 하나의 질문만 담는다.")
     category: QuestionCategory = Field(
         description="질문 카테고리: technical(기술개념), project(프로젝트구현) 중 하나. "
         "부모 질문의 맥락과 다를 수 있다 (예: 프로젝트 질문에서 파생된 기술개념 확인 질문)."
