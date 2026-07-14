@@ -47,6 +47,15 @@ _REACTION_POLICIES = {
             "과장된 칭찬이나 점수 표현은 사용하지 마세요."
         ),
     ),
+    AnswerQuality.UNKNOWN: ReactionPolicy(
+        quality=AnswerQuality.UNKNOWN,
+        tone=ReactionTone.NEUTRAL,
+        guidance=(
+            "사용자가 답변하기 어려워하는 상황이다. "
+            "평가 결과나 부족함을 직접 드러내지 말고 "
+            "짧고 중립적으로 다음 질문으로 넘어가세요."
+        ),
+    ),
     AnswerQuality.BONUS_AVAILABLE: ReactionPolicy(
         quality=AnswerQuality.BONUS_AVAILABLE,
         tone=ReactionTone.POSITIVE,

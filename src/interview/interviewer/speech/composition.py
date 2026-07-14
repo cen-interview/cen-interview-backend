@@ -281,6 +281,7 @@ def _select_utterance_preamble(
     if turn_type == "question":
         quality_templates = {
             AnswerQuality.SUFFICIENT: utterance_templates.sufficient,
+            AnswerQuality.UNKNOWN: utterance_templates.unknown,
             AnswerQuality.BONUS_AVAILABLE: utterance_templates.bonus_available,
             AnswerQuality.CONFIRM_POSITIVE: utterance_templates.confirm_positive,
             AnswerQuality.TRAP_AVAILABLE: utterance_templates.trap_available,
