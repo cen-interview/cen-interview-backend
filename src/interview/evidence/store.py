@@ -1,6 +1,7 @@
 """Evidence 청크의 pgvector 저장과 검색을 담당하는 저장소 경계."""
 
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
@@ -13,7 +14,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from interview.api.database import SessionLocal
 from interview.api.evidence.model import EvidenceVectorRecord
 from interview.config import settings
-from interview.schemas.evidence import CoverageMap, EvidenceChunk, TopicCoverage
+from interview.schemas.evidence import (
+    CoverageMap,
+    EvidenceChunk,
+    EvidenceOwnership,
+    TopicCoverage,
+)
 
 DEFAULT_TOP_K = 5
 VECTOR_BACKEND_MEMORY = "memory"
@@ -69,7 +75,7 @@ class EvidenceStore:
             self._chunks_by_user.setdefault(namespace, []).extend(chunks)
             return
 
-        embeddings = self._get_embeddings().embed_documents([chunk.text for chunk in chunks])
+        embeddings = self._embed_chunk_texts(chunks)
         if len(embeddings) != len(chunks):
             raise ValueError("임베딩 개수와 EvidenceChunk 개수가 일치하지 않습니다.")
 
@@ -77,8 +83,44 @@ class EvidenceStore:
             self._record_values(chunk=chunk, namespace=namespace, embedding=embedding)
             for chunk, embedding in zip(chunks, embeddings, strict=True)
         ]
+        with self._session() as db:
+            try:
+                for batch in _batches(values, settings.evidence_db_batch_size):
+                    db.execute(self._upsert_statement(batch))
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+    def _embed_chunk_texts(self, chunks: Sequence[EvidenceChunk]) -> list[list[float]]:
+        """중복 텍스트를 제거하고 제한된 배치 병렬 처리로 임베딩한다."""
+        unique_texts = list(dict.fromkeys(chunk.text for chunk in chunks))
+        batches = list(_batches(unique_texts, settings.evidence_embedding_batch_size))
+        embeddings = self._get_embeddings()
+        max_workers = max(
+            1,
+            min(settings.evidence_embedding_concurrency, len(batches)),
+        )
+        if max_workers == 1:
+            embedded_batches = [embeddings.embed_documents(batch) for batch in batches]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                embedded_batches = list(executor.map(embeddings.embed_documents, batches))
+
+        embedding_by_text = {
+            text: embedding
+            for text, embedding in zip(
+                unique_texts,
+                [item for batch in embedded_batches for item in batch],
+                strict=True,
+            )
+        }
+        return [embedding_by_text[chunk.text] for chunk in chunks]
+
+    def _upsert_statement(self, values: list[dict[str, Any]]) -> Any:
+        """Evidence 레코드 한 배치에 대한 PostgreSQL upsert 문을 만든다."""
         statement = pg_insert(EvidenceVectorRecord).values(values)
-        statement = statement.on_conflict_do_update(
+        return statement.on_conflict_do_update(
             constraint="uq_evidence_vector_records_user_chunk",
             set_={
                 column: getattr(statement.excluded, column)
@@ -101,13 +143,6 @@ class EvidenceStore:
                 )
             },
         )
-        with self._session() as db:
-            try:
-                db.execute(statement)
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
 
     def clear_user(self, user_id: int | str | None = None) -> None:
         """사용자의 이전 Evidence 전체를 삭제한다."""
@@ -144,6 +179,7 @@ class EvidenceStore:
         topic: str | None = None,
         k: int = DEFAULT_TOP_K,
         user_id: int | str | None = None,
+        ownership: EvidenceOwnership | None = None,
     ) -> list[EvidenceChunk]:
         """사용자 namespace 안에서 cosine distance 기준 top-k 청크를 반환한다."""
         namespace = self._namespace(user_id)
@@ -151,6 +187,8 @@ class EvidenceStore:
             chunks = self._chunks_by_user.get(namespace, [])
             if topic is not None:
                 chunks = [chunk for chunk in chunks if chunk.topic == topic]
+            if ownership is not None:
+                chunks = [chunk for chunk in chunks if chunk.ownership == ownership]
             return chunks[:k]
 
         query_embedding = self._get_embeddings().embed_query(query)
@@ -160,6 +198,8 @@ class EvidenceStore:
         )
         if topic is not None:
             statement = statement.where(EvidenceVectorRecord.topic == topic)
+        if ownership is not None:
+            statement = statement.where(EvidenceVectorRecord.ownership == ownership)
         statement = statement.order_by(distance).limit(k)
         with self._session() as db:
             records = db.scalars(statement).all()
@@ -299,3 +339,10 @@ def get_store() -> EvidenceStore:
     if _store is None:
         _store = EvidenceStore()
     return _store
+
+
+def _batches(items: Sequence[Any], batch_size: int) -> Iterator[list[Any]]:
+    """입력 순서를 유지하며 설정된 크기의 리스트 배치를 만든다."""
+    size = max(1, batch_size)
+    for start in range(0, len(items), size):
+        yield list(items[start : start + size])

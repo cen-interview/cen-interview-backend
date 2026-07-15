@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 from interview.config import settings
 from interview.evidence.store import DEFAULT_TOP_K, get_store
-from interview.schemas.evidence import EvidenceChunk
+from interview.schemas.evidence import EvidenceChunk, EvidenceOwnership
 
 
 def search_evidence(
@@ -18,6 +18,7 @@ def search_evidence(
     topic: str | None = None,
     k: int = DEFAULT_TOP_K,
     user_id: int | str | None = None,
+    ownership: EvidenceOwnership | None = None,
 ) -> list[EvidenceChunk]:
     """evidence_store 에서 관련 근거 chunk 를 반환한다.
 
@@ -29,9 +30,16 @@ def search_evidence(
         k: 반환할 최대 chunk 수.
         user_id: 사용자별 Evidence namespace를 선택하기 위한 사용자 ID.
             기존 호출처럼 None이면 store의 기본 namespace에서 검색한다.
+        ownership: GitHub 근거를 사용자 변경 코드 또는 프로젝트 문맥으로 제한하는 필터.
     """
     try:
-        return get_store().query(query=query, topic=topic, k=k, user_id=user_id)
+        return get_store().query(
+            query=query,
+            topic=topic,
+            k=k,
+            user_id=user_id,
+            ownership=ownership,
+        )
     except NotImplementedError:
         if settings.use_stub_evidence:
             return [
@@ -51,10 +59,14 @@ def search_evidence(
 
 
 @tool
-def search_evidence_tool(query: str, topic: str | None = None) -> str:
+def search_evidence_tool(
+    query: str,
+    topic: str | None = None,
+    ownership: EvidenceOwnership | None = None,
+) -> str:
     """학습 기록/프로젝트 근거에서 query 와 관련된 내용을 찾는다.
     LLM tool calling 용. (topic 으로 주제를 좁힐 수 있음)
     """
-    chunks = search_evidence(query=query, topic=topic)
+    chunks = search_evidence(query=query, topic=topic, ownership=ownership)
     # LLM 에 넘기기 좋게 텍스트로 직렬화
     return "\n\n".join(f"[{c.source_type}] {c.text}" for c in chunks)

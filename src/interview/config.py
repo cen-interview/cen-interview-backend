@@ -60,13 +60,21 @@ class Settings(BaseSettings):
     
     # Evidence
     use_stub_evidence: bool = False
-    evidence_llm_extract_enabled: bool = False
+    evidence_llm_extract_enabled: bool = True
     evidence_store_backend: str = "pgvector"
     evidence_github_max_commits: int = 200
-    evidence_github_max_code_files: int = 50
-    evidence_github_max_file_chars: int = 30000
-    evidence_github_max_dirs: int = 100
-    evidence_github_max_depth: int = 6
+    # 0이면 지원하는 모든 소스 파일을 수집한다.
+    evidence_github_max_code_files: int = 0
+    evidence_github_max_file_chars: int = 100000
+    evidence_github_max_dirs: int = 500
+    evidence_github_max_depth: int = 15
+    evidence_llm_concurrency: int = 4
+    evidence_mcp_concurrency: int = 3
+    evidence_mcp_max_attempts: int = 3
+    evidence_mcp_retry_base_seconds: float = 2.0
+    evidence_embedding_batch_size: int = 128
+    evidence_embedding_concurrency: int = 2
+    evidence_db_batch_size: int = 500
 
 
 @lru_cache

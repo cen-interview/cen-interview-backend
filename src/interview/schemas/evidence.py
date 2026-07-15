@@ -16,6 +16,9 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 
+EvidenceOwnership = Literal["user_touched", "repo_context"]
+
+
 # 근거 출처 종류. 새 소스(예: 블로그)를 붙일 일이 없으면 이 둘로 충분.
 class SourceType(str, Enum):
     NOTION = "notion"
@@ -66,7 +69,7 @@ class EvidenceChunk(BaseModel):
     # Notion 청크에는 기본값이 유지된다.
     file_path: str | None = None
     language: str | None = None
-    ownership: Literal["user_touched", "repo_context"] | None = None
+    ownership: EvidenceOwnership | None = None
     commit_count: int = Field(default=0, ge=0)
     last_commit_sha: str | None = None
 

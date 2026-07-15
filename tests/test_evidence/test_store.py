@@ -59,6 +59,64 @@ def test_query_filters_by_topic_inside_user_namespace() -> None:
     assert [chunk.chunk_id for chunk in results] == ["u1-redis-1"]
 
 
+def test_query_filters_by_ownership_before_limit() -> None:
+    """ownership 조건에 맞는 청크 중에서 k개를 반환해야 한다."""
+    store = EvidenceStore(backend="memory")
+    context_chunks = [
+        _chunk(f"context-{index}", "WebSocket", 0.8).model_copy(
+            update={"ownership": "repo_context"}
+        )
+        for index in range(5)
+    ]
+    touched_chunks = [
+        _chunk(f"touched-{index}", "WebSocket", 0.9).model_copy(
+            update={"ownership": "user_touched"}
+        )
+        for index in range(3)
+    ]
+    store.add_chunks(context_chunks + touched_chunks, user_id="user-1")
+
+    results = store.query(
+        "WebSocket",
+        topic="WebSocket",
+        k=2,
+        user_id="user-1",
+        ownership="user_touched",
+    )
+
+    assert [chunk.chunk_id for chunk in results] == ["touched-0", "touched-1"]
+
+
+def test_embedding_batches_deduplicate_text_and_preserve_chunk_order(monkeypatch) -> None:
+    """중복 본문은 한 번만 임베딩하고 결과는 원래 청크 순서로 복원한다."""
+    calls: list[list[str]] = []
+
+    class FakeEmbeddings:
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            calls.append(texts)
+            return [[float(len(text))] for text in texts]
+
+    monkeypatch.setattr(
+        "interview.evidence.store.settings.evidence_embedding_batch_size",
+        2,
+    )
+    monkeypatch.setattr(
+        "interview.evidence.store.settings.evidence_embedding_concurrency",
+        1,
+    )
+    store = EvidenceStore(backend="pgvector", embedding_client=FakeEmbeddings())
+    chunks = [
+        _chunk("one", "JPA", 0.8, text="same"),
+        _chunk("two", "JPA", 0.8, text="different"),
+        _chunk("three", "JPA", 0.8, text="same"),
+    ]
+
+    result = store._embed_chunk_texts(chunks)
+
+    assert calls == [["same", "different"]]
+    assert result == [[4.0], [9.0], [4.0]]
+
+
 def test_build_coverage_map_aggregates_by_topic_per_user() -> None:
     """CoverageMap이 사용자별 topic confidence 평균과 chunk 수를 집계하는지 확인한다."""
     store = EvidenceStore(backend="memory")
@@ -144,6 +202,32 @@ def test_pgvector_record_values_preserve_github_provenance() -> None:
     assert restored.ownership == "user_touched"
     assert restored.commit_count == 3
     assert restored.last_commit_sha == "a" * 40
+
+
+def test_pgvector_record_values_preserve_repo_context_ownership() -> None:
+    """사용자가 직접 변경하지 않은 프로젝트 문맥도 ownership을 보존한다."""
+    store = EvidenceStore()
+    chunk = EvidenceChunk(
+        chunk_id="github-context-1",
+        text="class WebSocketConfig {}",
+        source_type=SourceType.GITHUB,
+        source_url="https://github.com/example/project/blob/HEAD/src/WebSocketConfig.java",
+        topic="웹소켓 실시간 통신",
+        doc_type="code",
+        confidence=0.6,
+        file_path="src/WebSocketConfig.java",
+        language="java",
+        ownership="repo_context",
+    )
+
+    values = store._record_values(
+        chunk=chunk,
+        namespace="user-1",
+        embedding=[0.1, 0.2],
+    )
+
+    assert values["ownership"] == "repo_context"
+    assert values["commit_count"] == 0
 
 
 def test_rejects_unsupported_backend() -> None:
