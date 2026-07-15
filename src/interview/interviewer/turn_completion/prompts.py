@@ -69,6 +69,7 @@ def build_turn_completion_user_prompt(snapshot: TurnCompletionSnapshot) -> str:
             turn.model_dump(mode="json") for turn in snapshot.recent_turns
         ],
         "speech_active": snapshot.speech_active,
+        "segment_final": snapshot.segment_final,
         "answer_duration_seconds": snapshot.answer_duration_seconds,
     }
     serialized_payload = json.dumps(

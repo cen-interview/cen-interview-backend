@@ -20,6 +20,10 @@ from interview.interviewer.turn_completion.models import (
     TurnCompletionResult,
     TurnCompletionSnapshot,
 )
+from interview.interviewer.turn_completion.worker import (
+    LatestWinsTurnCompletionWorker,
+    TurnCompletionResultCallback,
+)
 from interview.interviewer.turn_completion.registry import (
     VoiceTurnRegistry,
     VoiceTurnRegistryEntry,
@@ -29,11 +33,13 @@ from interview.interviewer.turn_completion.registry import (
 __all__ = [
     "ConfirmationIntentClassifier",
     "ConfirmationIntentDecision",
+    "LatestWinsTurnCompletionWorker",
     "TurnCompletionContextTurn",
     "TurnCompletionDecision",
     "TurnCompletionJudge",
     "TurnCompletionQuestionSnapshot",
     "TurnCompletionResult",
+    "TurnCompletionResultCallback",
     "TurnCompletionSnapshot",
     "VoiceTurnAlreadyCommittedError",
     "VoiceTurnBuffer",

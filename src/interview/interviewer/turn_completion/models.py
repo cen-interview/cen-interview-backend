@@ -72,6 +72,10 @@ class TurnCompletionSnapshot(BaseModel):
         speech_active:
             snapshot 생성 시점에 사용자가 실제로 발화 중인지 여부.
 
+        segment_final:
+            snapshot의 현재 STT 구간이 안정화된 최종 구간인지 여부. 이 값만으로
+            의미적 답변 완료를 결정하지 않는다.
+
         answer_duration_seconds:
             현재 답변 발화가 시작된 뒤 경과한 선택적 시간. 음수가 아닌
             유한한 값이어야 한다.
@@ -87,6 +91,7 @@ class TurnCompletionSnapshot(BaseModel):
         max_length=2,
     )
     speech_active: bool = False
+    segment_final: bool = False
     answer_duration_seconds: float | None = Field(
         default=None,
         ge=0,

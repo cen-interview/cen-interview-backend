@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from threading import Lock
 
 from interview.interviewer.turn_completion.buffer import VoiceTurnBuffer
+from interview.interviewer.turn_completion.worker import (
+    LatestWinsTurnCompletionWorker,
+)
 
 
 @dataclass(slots=True)
@@ -18,10 +21,15 @@ class VoiceTurnRegistryEntry:
         lock:
             같은 세션에서 들어오는 전사, 발화와 판단 결과 갱신을 순서대로
             처리하기 위한 비동기 lock.
+
+        worker:
+            현재 질문의 최신 snapshot 완료 판단을 실행하는 선택적 런타임
+            worker. JSON 직렬화 대상이 아니며 질문 교체나 세션 제거 시 취소한다.
     """
 
     buffer: VoiceTurnBuffer
     lock: AsyncLock
+    worker: LatestWinsTurnCompletionWorker | None = None
 
 
 class VoiceTurnRegistry:
@@ -83,6 +91,9 @@ class VoiceTurnRegistry:
             ):
                 return current_entry
 
+            if current_entry is not None and current_entry.worker is not None:
+                current_entry.worker.cancel()
+
             entry = VoiceTurnRegistryEntry(
                 buffer=VoiceTurnBuffer(
                     session_id=normalized_session_id,
@@ -134,8 +145,57 @@ class VoiceTurnRegistry:
             lock=AsyncLock(),
         )
         with self._lock:
+            current_entry = self._entries.get(normalized_session_id)
+            if current_entry is not None and current_entry.worker is not None:
+                current_entry.worker.cancel()
             self._entries[normalized_session_id] = entry
         return entry
+
+    def attach_worker(
+        self,
+        *,
+        session_id: str,
+        worker: LatestWinsTurnCompletionWorker,
+    ) -> VoiceTurnRegistryEntry:
+        """현재 세션과 질문의 registry 항목에 완료 판단 worker를 연결한다.
+
+        기존 worker가 있으면 먼저 취소해 세션 하나에서 runner가 중복 실행되지
+        않게 한다. 같은 질문 ID라도 교체된 이전 buffer에 묶인 worker는 연결할
+        수 없도록 buffer 객체 identity를 확인한다.
+
+        Args:
+            session_id:
+                worker를 연결할 면접 세션 ID.
+
+            worker:
+                현재 registry buffer와 lock을 사용하도록 생성한 latest-wins
+                완료 판단 worker.
+
+        Returns:
+            worker가 연결된 현재 VoiceTurnRegistryEntry.
+
+        Raises:
+            KeyError:
+                등록되지 않은 session_id인 경우.
+
+            ValueError:
+                닫힌 worker이거나 현재 registry buffer가 아닌 객체에 연결된
+                worker인 경우.
+        """
+        with self._lock:
+            entry = self._entries[session_id]
+            if worker.closed:
+                raise ValueError("취소된 완료 판단 worker는 연결할 수 없습니다.")
+            if worker.buffer is not entry.buffer:
+                raise ValueError("현재 음성 턴 buffer에 연결된 worker가 아닙니다.")
+            if worker.buffer_lock is not entry.lock:
+                raise ValueError("현재 음성 턴 lock을 사용하는 worker가 아닙니다.")
+            if entry.worker is worker:
+                return entry
+            if entry.worker is not None:
+                entry.worker.cancel()
+            entry.worker = worker
+            return entry
 
     def get(self, session_id: str) -> VoiceTurnRegistryEntry:
         """등록된 세션의 현재 음성 턴 항목을 반환한다.
@@ -168,7 +228,10 @@ class VoiceTurnRegistry:
             제거한 항목. 등록된 항목이 없으면 None.
         """
         with self._lock:
-            return self._entries.pop(session_id, None)
+            entry = self._entries.pop(session_id, None)
+            if entry is not None and entry.worker is not None:
+                entry.worker.cancel()
+            return entry
 
 
 _voice_turn_registry = VoiceTurnRegistry()
