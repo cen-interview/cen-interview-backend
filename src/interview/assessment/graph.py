@@ -30,6 +30,9 @@ from interview.schemas.question import Question, QuestionCategory
 from interview.schemas.signals import AnswerQualitySignal
 from functools import lru_cache
 
+ASSESSMENT_EVIDENCE_TOP_K = 5
+ASSESSMENT_EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
+
 class AssessmentState(BaseModel):
     """답변 1회 평가 과정에서 그래프 노드들이 공유하는 상태를 관리한다."""
     question: Question | None = None
@@ -99,40 +102,24 @@ def retrieve_evidence(
         f"[지원자 답변]\n{state.answer_text}"
     )
 
-    # 검색에 전달되는 값
-    print("\n===== ASSESSMENT EVIDENCE SEARCH INPUT =====")
-    print("user_id:", state.user_id)
-    print("category:", question.category.value)
-    print("topic:", question.topic)
-    print("query:")
-    print(search_query)
 
     evidence_chunks = search_evidence(
         query=search_query,
         topic=question.topic,
+        k=ASSESSMENT_EVIDENCE_TOP_K,
         user_id=state.user_id,
     )
 
-    # 검색 결과
-    print("\n===== ASSESSMENT EVIDENCE SEARCH RESULT =====")
-    print("result_count:", len(evidence_chunks))
+    reliable_chunks = [
+        chunk
+        for chunk in evidence_chunks
+        if chunk.confidence
+        >= ASSESSMENT_EVIDENCE_CONFIDENCE_THRESHOLD
+    ]
 
-    for index, chunk in enumerate(
-        evidence_chunks,
-        start=1,
-    ):
-        print(f"\n--- chunk {index} ---")
-        print("chunk_id:", chunk.chunk_id)
-        print("topic:", chunk.topic)
-        print("source_type:", chunk.source_type)
-        print("source_url:", chunk.source_url)
-        print("confidence:", chunk.confidence)
-
-        # 터미널이 너무 길어지지 않도록 앞부분만 출력
-        print("text:", chunk.text[:300])
-
-    state.evidence_chunks = evidence_chunks
+    state.evidence_chunks = reliable_chunks
     return state
+
 
 # 답변을 LLM으로 1차 평가하고 JudgeResult를 상태에 저장한다.
 def judge(state: AssessmentState) -> AssessmentState:
@@ -330,8 +317,4 @@ rationale: {state.judge_result.rationale}
 accuracy: {state.judge_result.accuracy}
 sufficiency: {state.judge_result.sufficiency}
 
-[판단 요청]
-현재 답변이 이전 답변 또는 Evidence와 명확히 충돌하는지 판단하라.
-충돌이 명확하면 quality=confirm_negative로 반환하라.
-충돌이 명확하지 않으면 기존 1차 judge 결과를 유지할 수 있도록 conflict_suspected=false로 반환하라.
 """

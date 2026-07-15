@@ -31,6 +31,10 @@ from interview.api.interviews.service import (
     get_weak_topics,
     save_interview_result,
 )
+from interview.api.interviews.model import (
+    InterviewSessionStatus,
+)
+
 
 router = APIRouter(prefix="/sessions", tags=["Interview Sessions"])
 
@@ -149,6 +153,16 @@ def post_event(
         raise HTTPException(
             status_code=404,
             detail="면접 세션을 찾을 수 없습니다.",
+        )
+
+    # 여기에 추가
+    if (
+        db_session.status
+        == InterviewSessionStatus.CANCELLED
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="새 면접이 시작되어 이전 면접은 종료되었습니다.",
         )
 
     state = session.get_state()
