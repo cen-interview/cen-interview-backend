@@ -26,12 +26,7 @@ _EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
 
 
 def filter_reliable_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
-    """confidence 기준을 통과한 근거만 남긴다.
-
-    TODO(담당 B, evidence 담당 A와 조율 필요): ownership == "repo_context"
-    제외는 top-k 선정 이전 쿼리 단계(search_evidence의 exclude_ownership)에서
-    처리해야 함.
-    """
+    """confidence 기준을 통과한 근거만 남긴다."""
     return [c for c in chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
 
 _DERIVED_DIFFICULTY: dict[QuestionKind, Difficulty] = {
