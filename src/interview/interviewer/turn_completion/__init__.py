@@ -3,6 +3,10 @@
 from interview.interviewer.turn_completion.confirmation import (
     ConfirmationIntentClassifier,
 )
+from interview.interviewer.turn_completion.coordinator import (
+    VoiceTurnCoordinator,
+    VoiceTurnCoordinatorError,
+)
 from interview.interviewer.turn_completion.buffer import (
     VoiceTurnAlreadyCommittedError,
     VoiceTurnBuffer,
@@ -44,6 +48,8 @@ __all__ = [
     "VoiceTurnAlreadyCommittedError",
     "VoiceTurnBuffer",
     "VoiceTurnBufferError",
+    "VoiceTurnCoordinator",
+    "VoiceTurnCoordinatorError",
     "VoiceTurnInvalidTransitionError",
     "VoiceTurnQuestionMismatchError",
     "VoiceTurnRegistry",

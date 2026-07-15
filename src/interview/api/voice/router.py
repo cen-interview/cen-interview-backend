@@ -9,9 +9,11 @@ from interview.api.voice.service import (
     create_realtime_transcription_client_secret,
     create_tts_audio_stream,
 )
+from interview.api.voice.websocket import router as voice_turn_websocket_router
 
 
 router = APIRouter(prefix="/interview", tags=["Voice"])
+router.include_router(voice_turn_websocket_router)
 
 
 @router.post(

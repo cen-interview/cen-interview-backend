@@ -1,9 +1,11 @@
 """제출 전 음성 답변의 실시간 상태와 상태 전이를 관리한다."""
 
+from math import isfinite
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from interview.interviewer.models import DeliveryMetrics
 from interview.interviewer.turn_completion.models import (
     ConfirmationIntentDecision,
     TurnCompletionDecision,
@@ -66,6 +68,13 @@ class VoiceTurnBuffer(BaseModel):
         segment_final:
             현재 STT 구간이 안정화된 최종 구간인지 여부.
 
+        answer_duration_seconds:
+            현재 답변 발화가 시작된 뒤 경과한 선택적 시간.
+
+        latest_delivery_metrics:
+            현재까지 전달된 말하기 속도, 필러 횟수와 실제 발화 시간의 최신
+            선택적 관찰 값.
+
         state:
             현재 음성 답변의 수집, 확인 또는 제출 진행 상태.
 
@@ -88,6 +97,12 @@ class VoiceTurnBuffer(BaseModel):
     answer_text: str = ""
     speech_active: bool = False
     segment_final: bool = False
+    answer_duration_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    latest_delivery_metrics: DeliveryMetrics | None = None
     state: VoiceTurnState = "listening"
     latest_decision_revision: int | None = Field(default=None, ge=0)
     latest_decision: TurnCompletionDecision | None = None
@@ -132,6 +147,8 @@ class VoiceTurnBuffer(BaseModel):
         text: str,
         speech_active: bool,
         segment_final: bool,
+        answer_duration_seconds: float | None = None,
+        delivery_metrics: DeliveryMetrics | None = None,
     ) -> bool:
         """더 높은 revision의 누적 전사문 snapshot을 반영한다.
 
@@ -155,6 +172,14 @@ class VoiceTurnBuffer(BaseModel):
             segment_final:
                 현재 STT 구간이 안정화됐는지 여부.
 
+            answer_duration_seconds:
+                답변 시작 후 경과한 선택적 시간. 없으면 기존 관찰 값을
+                유지한다.
+
+            delivery_metrics:
+                현재 답변의 선택적 음성 전달 지표. 없으면 기존 최신 지표를
+                유지한다.
+
         Returns:
             새 revision을 반영했으면 True. 오래된 revision을 무시했으면 False.
 
@@ -164,16 +189,29 @@ class VoiceTurnBuffer(BaseModel):
 
             VoiceTurnAlreadyCommittedError:
                 이미 제출이 완료된 buffer를 변경하려는 경우.
+
+            VoiceTurnBufferError:
+                답변 경과 시간이 음수이거나 유한하지 않은 경우.
         """
         self._validate_question_id(question_id)
         self._ensure_not_committed()
         if revision <= self.revision:
             return False
+        if answer_duration_seconds is not None and (
+            answer_duration_seconds < 0 or not isfinite(answer_duration_seconds)
+        ):
+            raise VoiceTurnBufferError(
+                "답변 경과 시간은 0 이상의 유한한 값이어야 합니다."
+            )
 
         self.revision = revision
         self.answer_text = text
         self.speech_active = speech_active
         self.segment_final = segment_final
+        if answer_duration_seconds is not None:
+            self.answer_duration_seconds = answer_duration_seconds
+        if delivery_metrics is not None:
+            self.latest_delivery_metrics = delivery_metrics
         self.latest_decision_revision = None
         self.latest_decision = None
         self.state = "listening"

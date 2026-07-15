@@ -197,6 +197,37 @@ class VoiceTurnRegistry:
             entry.worker = worker
             return entry
 
+    def detach_worker(
+        self,
+        *,
+        session_id: str,
+        worker: LatestWinsTurnCompletionWorker,
+    ) -> bool:
+        """현재 연결이 소유한 worker만 registry 항목에서 분리한다.
+
+        reconnect로 새 worker가 이미 연결된 경우 이전 WebSocket의 종료 처리가
+        새 worker를 제거하지 않도록 객체 identity를 비교한다. buffer는
+        재연결 복구를 위해 registry에 그대로 유지한다.
+
+        Args:
+            session_id:
+                worker를 분리할 면접 세션 ID.
+
+            worker:
+                종료 중인 WebSocket coordinator가 소유한 worker.
+
+        Returns:
+            현재 registry worker와 일치해 분리했으면 True. 세션이 없거나 이미
+            다른 worker로 교체됐으면 False.
+        """
+        with self._lock:
+            entry = self._entries.get(session_id)
+            if entry is None or entry.worker is not worker:
+                return False
+            entry.worker.cancel()
+            entry.worker = None
+            return True
+
     def get(self, session_id: str) -> VoiceTurnRegistryEntry:
         """등록된 세션의 현재 음성 턴 항목을 반환한다.
 
