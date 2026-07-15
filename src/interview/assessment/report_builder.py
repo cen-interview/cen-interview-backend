@@ -16,16 +16,29 @@ CompetencyModel과 문항별 평가 내용을 LLM에 전달하여 전체 요약,
 규칙 기반 리포트를 폴백으로 제공한다.
 """
 
+import json
+
 from pydantic import BaseModel, Field
 
 from interview.schemas.report import (
     AnswerEvaluation,
+    CodeAnalysis,
     CompetencyModel,
     FinalReport,
+)
+from interview.schemas.evidence import EvidenceChunk
+from interview.schemas.question import QuestionCategory
+from interview.assessment.context7_client import (
+    Context7Error,
+    get_context7_client,
 )
 from interview.assessment.prompts import REPORT_SYSTEM_PROMPT
 from interview.llm.client import get_llm
 from interview.llm.logging import log_llm_error, log_llm_output
+
+
+CONTEXT7_MAX_TOPICS = 3
+CONTEXT7_MAX_CONTEXT_CHARS = 8000
 
 class ReportContent(BaseModel):
     """LLM 또는 임시 로직이 생성하는 최종 리포트 본문 내용.
@@ -51,31 +64,48 @@ class ReportContent(BaseModel):
     learning_recommendations: list[str] = Field(default_factory=list)
     
     evaluation_summaries: list[str] = Field(default_factory=list)
+    code_analysis: list[list[CodeAnalysis]] = Field(default_factory=list)
 
 # 누적 역량과 문항별 평가를 이용해 최종 면접 리포트를 생성한다.
 def build_report(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
+    evidence_chunks: dict[str, EvidenceChunk] | None = None,
 ) -> FinalReport:
 
 
     overall_score = _calculate_overall_score(evaluations)
+    context7_docs = _fetch_context7_docs(evaluations)
 
     report_content = _build_content_with_llm(
         competency=competency,
         evaluations=evaluations,
         overall_score=overall_score,
+        evidence_chunks=evidence_chunks or {},
+        context7_docs=context7_docs,
     )
     
-    summarized_evaluations = [
-        evaluation.model_copy(
-            update={"answer_summary": summary}
+    summarized_evaluations = []
+
+    for index, evaluation in enumerate(evaluations):
+        if index < len(report_content.evaluation_summaries):
+            summary = report_content.evaluation_summaries[index]
+        else:
+            summary = evaluation.answer_summary
+
+        if index < len(report_content.code_analysis):
+            analyses = report_content.code_analysis[index]
+        else:
+            analyses = []
+
+        summarized_evaluations.append(
+            evaluation.model_copy(
+                update={
+                    "answer_summary": summary,
+                    "code_analysis": analyses,
+                }
+            )
         )
-        for evaluation, summary in zip(
-            evaluations,
-            report_content.evaluation_summaries,
-        )
-    ]
 
     return FinalReport(
         summary=report_content.summary,
@@ -107,6 +137,8 @@ def _build_content_with_llm(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
     overall_score: float,
+    evidence_chunks: dict[str, EvidenceChunk],
+    context7_docs: dict[str, dict],
 ) -> ReportContent:
 
 
@@ -120,6 +152,8 @@ def _build_content_with_llm(
             competency=competency,
             evaluations=evaluations,
             overall_score=overall_score,
+            evidence_chunks=evidence_chunks,
+            context7_docs=context7_docs,
         )
 
         result = structured_llm.invoke(
@@ -185,7 +219,12 @@ def _build_report_user_prompt(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
     overall_score: float,
+    evidence_chunks: dict[str, EvidenceChunk] | None = None,
+    context7_docs: dict[str, dict] | None = None,
 ) -> str:
+    evidence_chunks = evidence_chunks or {}
+    context7_docs = context7_docs or {}
+
     topics_to_improve = _select_topics_to_improve(
         competency=competency,
         evaluations=evaluations,
@@ -204,12 +243,17 @@ def _build_report_user_prompt(
                 f"[문항 {index}]\n"
                 f"question_id: {evaluation.question_id}\n"
                 f"topic: {evaluation.topic}\n"
+                f"question_category: {evaluation.question_category.value}\n"
                 f"question: {evaluation.question}\n"
+                f"question_evidence_ids: {evaluation.question_evidence_ids}\n"
+                f"assessment_evidence_ids: {evaluation.assessment_evidence_ids}\n"
                 f"answer_summary: {evaluation.answer_summary}\n"
                 f"score: {evaluation.score}\n"
                 f"comment: {evaluation.comment}\n"
                 f"delivery_note: {evaluation.delivery_note or '(없음)'}\n"
-                f"quality_trace: {quality_trace}"
+                f"quality_trace: {quality_trace}\n"
+                f"evidence: {_build_evidence_context(evaluation, evidence_chunks)}\n"
+                f"context7: {_build_context7_context(evaluation, context7_docs)}"
             )
         )
 
@@ -223,6 +267,99 @@ def _build_report_user_prompt(
         f"competency.learning_recommendations: {competency.learning_recommendations}\n\n"
         "[문항별 evaluations]\n"
         + "\n\n".join(evaluation_lines)
+    )
+
+
+def _fetch_context7_docs(
+    evaluations: list[AnswerEvaluation],
+) -> dict[str, dict]:
+    """Fetch latest docs only for project evaluations linked to Evidence."""
+    client = get_context7_client()
+
+    if not client.api_key:
+        return {}
+
+    targets = [
+        evaluation
+        for evaluation in evaluations
+        if (
+            evaluation.question_category == QuestionCategory.PROJECT
+            and (
+                evaluation.assessment_evidence_ids
+                or evaluation.question_evidence_ids
+            )
+        )
+    ][:CONTEXT7_MAX_TOPICS]
+
+    context_by_question: dict[str, dict] = {}
+
+    for evaluation in targets:
+        query = (
+            f"{evaluation.question} Current implementation review, "
+            "latest recommended approach, compatibility, deprecations, "
+            "and migration guidance."
+        )
+
+        try:
+            context = client.fetch_topic_context(
+                topic=evaluation.topic,
+                query=query,
+            )
+        except Context7Error:
+            continue
+
+        if context is not None:
+            context_by_question[evaluation.question_id] = context
+
+    return context_by_question
+
+
+def _build_context7_context(
+    evaluation: AnswerEvaluation,
+    context7_docs: dict[str, dict],
+) -> str:
+    """Serialize bounded Context7 output for the final report prompt."""
+    context = context7_docs.get(evaluation.question_id)
+
+    if context is None:
+        return "(Context7 문서 조회 결과 없음)"
+
+    serialized = json.dumps(
+        context,
+        ensure_ascii=False,
+        indent=2,
+    )
+    return serialized[:CONTEXT7_MAX_CONTEXT_CHARS]
+
+
+def _build_evidence_context(
+    evaluation: AnswerEvaluation,
+    evidence_chunks: dict[str, EvidenceChunk],
+) -> str:
+    """현재 리포트 생성 과정에서 확보된 Evidence 원문을 문항별로 구성한다."""
+    evidence_ids = list(dict.fromkeys(
+        evaluation.assessment_evidence_ids
+        + evaluation.question_evidence_ids
+    ))
+
+    matched_chunks = [
+        evidence_chunks[evidence_id]
+        for evidence_id in evidence_ids
+        if evidence_id in evidence_chunks
+    ]
+
+    if not matched_chunks:
+        return "(현재 실행에서 확보된 Evidence 원문 없음)"
+
+    return "\n\n".join(
+        (
+            f"- chunk_id: {chunk.chunk_id}\n"
+            f"  source_type: {chunk.source_type.value}\n"
+            f"  source_file: {chunk.file_path or '(없음)'}\n"
+            f"  language: {chunk.language or '(없음)'}\n"
+            f"  content:\n{chunk.text}"
+        )
+        for chunk in matched_chunks
     )
 
 # LLM 호출 실패 시 사용할 규칙 기반 리포트 본문을 생성한다.

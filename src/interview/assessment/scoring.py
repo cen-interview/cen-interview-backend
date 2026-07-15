@@ -83,6 +83,9 @@ class AnswerAttempt(BaseModel):
     question_kind: QuestionKind
     question_category: QuestionCategory
     question_difficulty: Difficulty
+    
+    question_evidence_ids: list[str] = Field(default_factory=list)
+    assessment_evidence_ids: list[str] = Field(default_factory=list)
 
     answer_text: str
     signal: AnswerQualitySignal
@@ -368,9 +371,9 @@ def _calculate_question_set_score(
             comment="평가할 답변이 없습니다.",
         )
 
-    main_attempt = _find_main_attempt(attempts)
+    last_attempt = attempts[-1]
     base_score = _calculate_attempt_base_score(
-        main_attempt
+        last_attempt
     )
 
     history_adjusted_score, adjustment_comment = (
@@ -400,7 +403,7 @@ def _calculate_question_set_score(
     )
 
     return QuestionSetScore(
-        score=int(round(final_score)),
+        score=final_score,
         comment=adjustment_comment,
     )
 
