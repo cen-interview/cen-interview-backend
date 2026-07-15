@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from interview.evidence.retrieval import search_evidence
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.question import Difficulty, Question, QuestionCategory,QuestionKind
 from interview.strategy.prompts import (
     QUESTION_GEN_SYSTEM,
@@ -111,9 +112,42 @@ def _generate_derived_question(
         )
         text = result.text
         category = result.category
-    except Exception:
+        log_llm_output(
+            "DERIVED_QUESTION_GENERATION",
+            result,
+            metadata={
+                "topic": topic,
+                "question_kind": kind.value,
+                "difficulty": difficulty.value,
+                "parent_question_id": parent_question_id,
+                "target": probe,
+                "evidence_ids": [chunk.chunk_id for chunk in reliable_chunks],
+            },
+            input_data={
+                "user_prompt": user_prompt,
+                "answer_excerpt": answer_excerpt,
+            },
+        )
+    except Exception as exc:
         text = f"{topic} 답변에서 '{probe}' 부분을 조금 더 설명해 주시겠어요?"
         category = None
+        log_llm_error(
+            "DERIVED_QUESTION_GENERATION",
+            exc,
+            metadata={
+                "topic": topic,
+                "question_kind": kind.value,
+                "difficulty": difficulty.value,
+                "parent_question_id": parent_question_id,
+                "target": probe,
+                "evidence_ids": [chunk.chunk_id for chunk in reliable_chunks],
+            },
+            fallback={"text": text, "category": category},
+            input_data={
+                "user_prompt": user_prompt,
+                "answer_excerpt": answer_excerpt,
+            },
+        )
 
     return Question(
         question_id=str(uuid4()),
@@ -189,8 +223,36 @@ def generate_question(
                 {"role": "user", "content": user_prompt},
             ]
         )
-    except Exception :
-        return _fallback_question(topic, difficulty, [c.chunk_id for c in reliable_chunks])
+        log_llm_output(
+            "MAIN_QUESTION_GENERATION",
+            result,
+            metadata={
+                "topic": topic,
+                "difficulty": difficulty.value,
+                "question_kind": QuestionKind.MAIN.value,
+                "evidence_ids": [chunk.chunk_id for chunk in reliable_chunks],
+            },
+            input_data={"user_prompt": user_prompt},
+        )
+    except Exception as exc:
+        fallback = _fallback_question(
+            topic,
+            difficulty,
+            [chunk.chunk_id for chunk in reliable_chunks],
+        )
+        log_llm_error(
+            "MAIN_QUESTION_GENERATION",
+            exc,
+            metadata={
+                "topic": topic,
+                "difficulty": difficulty.value,
+                "question_kind": QuestionKind.MAIN.value,
+                "evidence_ids": fallback.evidence_ids,
+            },
+            fallback=fallback,
+            input_data={"user_prompt": user_prompt},
+        )
+        return fallback
 
     return Question(
         question_id=str(uuid4()),
@@ -325,8 +387,39 @@ def generate_hint(
             ]
         )
         text = result.text
-    except Exception :
+        log_llm_output(
+            "HINT_GENERATION",
+            result,
+            metadata={
+                "topic": question.topic,
+                "question_kind": QuestionKind.HINT.value,
+                "parent_question_id": question.question_id,
+                "target": probe,
+                "evidence_ids": [chunk.chunk_id for chunk in reliable_chunks],
+            },
+            input_data={
+                "user_prompt": user_prompt,
+                "answer_excerpt": answer_excerpt,
+            },
+        )
+    except Exception as exc:
         text = f"힌트: {question.text}에 대해 생각할 때 '{probe}' 부분을 고려해 보세요."
+        log_llm_error(
+            "HINT_GENERATION",
+            exc,
+            metadata={
+                "topic": question.topic,
+                "question_kind": QuestionKind.HINT.value,
+                "parent_question_id": question.question_id,
+                "target": probe,
+                "evidence_ids": [chunk.chunk_id for chunk in reliable_chunks],
+            },
+            fallback={"text": text},
+            input_data={
+                "user_prompt": user_prompt,
+                "answer_excerpt": answer_excerpt,
+            },
+        )
 
     return Question(
         question_id=str(uuid4()),

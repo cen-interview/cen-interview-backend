@@ -11,7 +11,7 @@ chunking → store 순서를 배선만 한다.
 
 from interview.config import settings
 from interview.evidence.chunking import chunk
-from interview.evidence.extract import extract_evidence
+from interview.evidence.extract import extract_evidence, refine_evidence_chunks
 from interview.evidence.sources import GitHubSource, NotionSource, RawDoc
 from interview.evidence.store import get_store
 from interview.schemas.evidence import IndexBuildResult, IndexFailure
@@ -40,7 +40,15 @@ def build_index(
         인덱싱 상태, 실패 목록, 저장 청크 수, 주제별 커버리지 맵.
     """
     store = get_store()
-    store.clear_user(user_id=user_id)
+    requested_sources = {
+        source_type
+        for source_type, links in (("notion", notion_links), ("github", github_links))
+        if links
+    }
+    if hasattr(store, "clear_user_sources"):
+        store.clear_user_sources(requested_sources, user_id=user_id)
+    elif requested_sources:
+        store.clear_user(user_id=user_id)
 
     failures: list[IndexFailure] = []
     raw_docs: list[RawDoc] = []
@@ -102,6 +110,8 @@ def build_index(
             )
         )
         all_chunks = []
+
+    all_chunks = refine_evidence_chunks(all_chunks)
 
     store.add_chunks(all_chunks, user_id=user_id)
     coverage_map = store.build_coverage_map(user_id=user_id)

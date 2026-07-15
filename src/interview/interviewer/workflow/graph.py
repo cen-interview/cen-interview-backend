@@ -15,6 +15,7 @@ from interview.interviewer.workflow.nodes import (
     final_report,
     finalize,
     greet,
+    handle_off_topic,
     handle_replay,
     handle_silence,
     handle_timeout,
@@ -85,6 +86,7 @@ def _build_graph(
     builder.add_node("handle_replay", handle_replay)
     builder.add_node("handle_silence", handle_silence)
     builder.add_node("handle_timeout", handle_timeout)
+    builder.add_node("handle_off_topic",handle_off_topic,)
 
     builder.add_edge(START, "greet")
     builder.add_edge("greet", "compose_utterance")
@@ -114,6 +116,7 @@ def _build_graph(
         route_quality,
         {
             "complete_set": "complete_set",
+            "handle_off_topic": "handle_off_topic",
             "ask_follow_up": "ask_follow_up",
             "ask_challenge": "ask_challenge",
             "ask_confirm_positive": "ask_confirm_positive",
@@ -136,6 +139,7 @@ def _build_graph(
     builder.add_edge("ask_confirm_negative", "compose_utterance")
     builder.add_edge("ask_trap", "compose_utterance")
     builder.add_edge("handle_replay", "compose_utterance")
+    builder.add_edge("handle_off_topic","compose_utterance",)
     builder.add_conditional_edges(
         "handle_silence",
         after_handle_silence,

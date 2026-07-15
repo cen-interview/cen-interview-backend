@@ -13,8 +13,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "langchain-openai>=1.3.3",
     "mcp>=1.27,<2",
-    # Vector DB: 처음엔 chromadb로 간단히 시작. 운영 단계에서 교체 가능.
-    "chromadb>=0.5",
+    # Vector DB: PostgreSQL의 pgvector 확장을 사용.
     "sqlalchemy>=2.0.51",
     "alembic>=1.18.5",
     "pgvector>=0.4.2",

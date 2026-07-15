@@ -115,12 +115,9 @@ def make_runtime(llm: Any = None) -> SimpleNamespace:
     ("template", "expected"),
     [
         (utterance.greeting, "안녕하세요. 지금부터 면접을 시작하겠습니다."),
-        (utterance.question, "좋습니다. 다음 질문을 드리겠습니다."),
-        (utterance.follow_up, "말씀해 주신 내용에서 한 가지를 조금 더 여쭤보겠습니다."),
-        (
-            utterance.challenge,
-            "말씀하신 내용을 정확히 확인하기 위해 한 가지 더 질문드리겠습니다.",
-        ),
+        (utterance.question, "네, 답변 잘 들었습니다."),
+        (utterance.follow_up, "네, 말씀 감사합니다."),
+        (utterance.challenge, "네, 답변 감사합니다."),
         (utterance.hint, "답변이 어려우시다면 다음 관점에서 생각해 보셔도 좋습니다."),
         (utterance.replay, "네, 질문을 다시 말씀드리겠습니다."),
         (utterance.pause_prompt, "잠시 쉬었다가 면접을 계속 진행하시겠습니까?"),
@@ -219,7 +216,7 @@ def test_llm_preamble_uses_recent_transcript_and_last_signal():
         Turn(role="candidate", text=f"대화-{index}", question_id=question.question_id)
         for index in range(6)
     ]
-    llm = FakeLlm(output={"preamble": "좋습니다. 관련 내용을 조금 더 확인하겠습니다."})
+    llm = FakeLlm(output={"preamble": "네, 답변 잘 들었습니다."})
     state = SessionState(
         session_id="session-llm",
         current_question=question,
@@ -239,9 +236,7 @@ def test_llm_preamble_uses_recent_transcript_and_last_signal():
     assert "대화-5" in user_prompt
     assert "bonus_available" in user_prompt
     assert "next_probe_target" in user_prompt
-    assert result["last_utterance"].startswith(
-        "좋습니다. 관련 내용을 조금 더 확인하겠습니다."
-    )
+    assert result["last_utterance"].startswith("네, 답변 잘 들었습니다.")
     assert result["last_utterance"].endswith(question.text)
 
 

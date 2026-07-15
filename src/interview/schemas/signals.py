@@ -37,6 +37,11 @@ class AnswerQualitySignal:
     - 다음 질문에서 집중적으로 파고들 대상을 나타낸다.
     - 예: "fetch join", "지연 로딩", "트랜잭션 전파"
     - 필수는 아니며, 추가 질문이 필요 없으면 None이 될 수 있다.
+    
+  unknown
+    - 사용자가 모른다고 답했거나 답변 내용이 거의 없어 평가할 수 없음
+    - 오답이나 오개념으로 단정하지 않고 현재 질문을 종료
+    - 다음 메인 질문으로 이동
 """
 
 from __future__ import annotations
@@ -73,8 +78,8 @@ from pydantic import BaseModel, Field
 #   - 사용자가 헷갈리기 쉬운 개념을 정확히 구분하는지 확인할 필요가 있음
 #   - 의도적으로 혼동 가능성이 있는 함정 질문 생성
 #
-# fallback_available
-#   - 사용자가 개념을 모를경우
+# unknown
+#   - 사용자가 개념을 모른다고 답했거나 답변 내용이 없어 평가할 수 없음
 
 class AnswerQuality(str, Enum):
     SUFFICIENT = "sufficient"
@@ -83,6 +88,8 @@ class AnswerQuality(str, Enum):
     CONFIRM_POSITIVE = "confirm_positive"
     CONFIRM_NEGATIVE = "confirm_negative"
     TRAP_AVAILABLE = "trap_available"
+    UNKNOWN = "unknown"
+    OFF_TOPIC = "off_topic"
 
 
 class ConflictType(str, Enum):

@@ -10,6 +10,7 @@ from hashlib import sha1
 from typing import Protocol
 
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error, log_llm_output
 from interview.evidence.sources import RawDoc
 from interview.schemas.evidence import (
     EvidenceChunk,
@@ -62,22 +63,21 @@ def extract_evidence(
 
 
 def _extract_rule_based(doc: RawDoc, text: str) -> list[EvidenceChunk]:
-    """규칙 기반으로 문서 전체를 하나의 근거 후보로 만든다."""
-    topic = _infer_topic(doc, text)
-    confidence = _score_confidence(doc, text)
+    """규칙 기반으로 섹션별 주제와 신뢰도를 부여한다."""
+    sections = _split_sections(text)
+    if not sections:
+        sections = [_Section(section_id="s1", text=text)]
 
     return [
-        EvidenceChunk(
-            chunk_id=_chunk_id(doc),
-            text=text,
-            source_type=doc.source_type,
-            source_url=doc.source_url,
-            topic=topic,
-            doc_type=doc.meta.get("doc_type"),
-            week=doc.meta.get("week"),
-            date=doc.meta.get("date"),
-            confidence=confidence,
+        _new_chunk(
+            doc,
+            chunk_id=_section_chunk_id(doc, section.section_id),
+            text=section.text,
+            topic=_infer_topic(doc, section.text),
+            confidence=_score_confidence(doc, section.text),
         )
+        for section in sections
+        if _has_interview_value(section.text, doc)
     ]
 
 
@@ -103,13 +103,15 @@ def _extract_with_llm(
                 section_id=section.section_id,
                 heading=section.heading,
                 preview=_preview(section.text),
+                topic_candidates=_topic_candidates(doc, section.text),
             )
             for section in sections
         ],
         structured_llm=structured_llm,
     )
 
-    selected_ids = set(decision.valuable_section_ids)
+    decision_by_section = {item.section_id: item for item in decision.sections}
+    selected_ids = set(decision.valuable_section_ids) | set(decision_by_section)
     selected_sections = [
         section
         for section in sections
@@ -118,21 +120,31 @@ def _extract_with_llm(
     if not selected_sections:
         return []
 
-    topic = _normalize_topic(decision.topic) or _infer_topic(doc, text)
-    doc_type = decision.doc_type or doc.meta.get("doc_type")
-    confidence = _clamp(decision.confidence)
-
     return [
-        EvidenceChunk(
+        _new_chunk(
+            doc,
             chunk_id=_section_chunk_id(doc, section.section_id),
             text=section.text,
-            source_type=doc.source_type,
-            source_url=doc.source_url,
-            topic=topic,
-            doc_type=doc_type,
-            week=doc.meta.get("week"),
-            date=doc.meta.get("date"),
-            confidence=confidence,
+            topic=_validated_llm_topic(
+                decision_by_section.get(section.section_id).topic
+                if section.section_id in decision_by_section
+                else decision.topic,
+                doc,
+                section.text,
+            ),
+            confidence=_llm_confidence(
+                decision_by_section.get(section.section_id).confidence
+                if section.section_id in decision_by_section
+                else decision.confidence,
+                doc,
+                section.text,
+            ),
+            doc_type=(
+                decision_by_section[section.section_id].doc_type
+                if section.section_id in decision_by_section
+                else decision.doc_type
+            )
+            or doc.meta.get("doc_type"),
         )
         for section in selected_sections
     ]
@@ -154,6 +166,7 @@ def _decide_sections_with_llm(
         (
             f"[{section.section_id}]"
             f"\nheading: {section.heading or ''}"
+            f"\ntopic_candidates: {', '.join(section.topic_candidates)}"
             f"\npreview:\n{section.preview}"
         )
         for section in sections
@@ -166,7 +179,10 @@ def _decide_sections_with_llm(
                     "당신은 개발자 면접용 근거 문서를 선별하는 도우미입니다.",
                     "RawDoc 한 건에서 면접 질문 생성에 가치 있는 섹션만 고릅니다.",
                     "목차, 빈 템플릿, 단순 체크리스트, 잡담은 제외합니다.",
-                    "topic은 검색 필터에 쓰기 좋게 짧은 기술 주제로 작성합니다.",
+                    "각 selected section마다 sections에 section_id, topic, confidence를 반환합니다.",
+                    "topic은 제공한 topic_candidates 중 하나를 우선 사용합니다.",
+                    "후보가 맞지 않을 때만 2~4단어의 일반적인 기술 주제를 사용합니다.",
+                    "문서 전체에 하나의 topic을 재사용하지 말고 각 섹션 본문을 기준으로 판단합니다.",
                     "doc_type은 code, README, troubleshooting, retrospective, weekly_note, repository_meta 중 가장 가까운 값을 사용합니다.",
                     "반드시 제공된 section_id만 valuable_section_ids에 넣습니다.",
                 ]
@@ -187,7 +203,33 @@ def _decide_sections_with_llm(
             ),
         ),
     ]
-    return structured_llm.invoke(messages)
+    try:
+        result = structured_llm.invoke(messages)
+        log_llm_output(
+            "EVIDENCE_EXTRACTION",
+            result,
+            metadata={
+                "title": doc.title,
+                "source_type": doc.source_type,
+                "source_url": doc.source_url,
+                "section_count": len(sections),
+            },
+            input_data={"messages": messages},
+        )
+        return result
+    except Exception as exc:
+        log_llm_error(
+            "EVIDENCE_EXTRACTION",
+            exc,
+            metadata={
+                "title": doc.title,
+                "source_type": doc.source_type,
+                "source_url": doc.source_url,
+                "section_count": len(sections),
+            },
+            input_data={"messages": messages},
+        )
+        raise
 
 
 def _split_sections(text: str) -> list[_Section]:
@@ -318,8 +360,8 @@ TECH_KEYWORDS = [
     ("websocket", "websocket"),
     ("oauth", "oauth"),
     ("jwt", "jwt"),
-    ("jpa", "jpa"),
     ("n+1", "jpa n+1"),
+    ("jpa", "jpa"),
     ("redis", "redis"),
     ("docker", "docker"),
     ("kubernetes", "kubernetes"),
@@ -342,11 +384,18 @@ TECH_KEYWORDS = [
 
 def _clean_evidence_text(raw_text: str) -> str:
     """목차, 빈 블록, MCP boilerplate, 반복 체크리스트를 제거한다."""
+    raw_text = re.sub(
+        r"📅?\*\*?이번 주 학습 현황.*?</table>",
+        "",
+        raw_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     cleaned_lines: list[str] = []
     previous_blank = False
 
     for line in raw_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = _remove_image_references(line)
+        line = re.sub(r"</?(?:details|callout)[^>]*>", "", line, flags=re.IGNORECASE)
         stripped = line.strip()
         if _is_noise_line(stripped):
             if cleaned_lines and not previous_blank:
@@ -418,8 +467,8 @@ def _infer_topic(doc: RawDoc, text: str) -> str:
     """RawDoc 메타데이터와 본문에서 검색 필터에 쓸 topic을 추정한다."""
     candidates = [
         doc.meta.get("topic"),
-        _topic_from_github_meta(doc),
         _topic_from_keywords(f"{doc.title}\n{text}"),
+        _topic_from_github_meta(doc),
         doc.title,
     ]
 
@@ -429,6 +478,20 @@ def _infer_topic(doc: RawDoc, text: str) -> str:
             return topic
 
     return "general"
+
+
+def _topic_candidates(doc: RawDoc, text: str) -> list[str]:
+    """LLM이 임의의 topic을 만들지 않도록 섹션별 후보를 제공한다."""
+    candidates: list[str] = []
+    for candidate in (
+        doc.meta.get("topic"),
+        _topic_from_keywords(f"{doc.title}\n{text}"),
+        _topic_from_github_meta(doc),
+    ):
+        normalized = _normalize_topic(candidate)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+    return candidates or ["general"]
 
 
 def _topic_from_github_meta(doc: RawDoc) -> str | None:
@@ -453,6 +516,29 @@ def _topic_from_keywords(text: str) -> str | None:
         if keyword in lower_text:
             return topic
     return None
+
+
+def _validated_llm_topic(value: object, doc: RawDoc, text: str) -> str:
+    """LLM topic을 정규화하고 섹션 본문과 무관한 값은 규칙 기반 값으로 바꾼다."""
+    topic = _normalize_topic(value)
+    candidates = _topic_candidates(doc, text)
+    if topic and (
+        topic in candidates
+        or topic == "general"
+        or _topic_from_keywords(topic) == topic
+    ):
+        return topic
+    return _infer_topic(doc, text)
+
+
+def _llm_confidence(value: object, doc: RawDoc, text: str) -> float:
+    """LLM confidence가 있어도 규칙 점수와 큰 차이가 나지 않게 보정한다."""
+    rule_score = _score_confidence(doc, text)
+    try:
+        llm_score = _clamp(float(value))
+    except (TypeError, ValueError):
+        return rule_score
+    return _clamp((rule_score * 0.6) + (llm_score * 0.4))
 
 
 def _normalize_topic(value: object) -> str | None:
@@ -492,40 +578,105 @@ def _score_confidence(doc: RawDoc, text: str) -> float:
         except (TypeError, ValueError):
             pass
 
-    score = 0.40
+    score = 0.32
     length = len(text)
 
     if length >= 150:
-        score += 0.10
+        score += 0.06
     if length >= 500:
-        score += 0.10
+        score += 0.06
     if length >= 1000:
-        score += 0.10
+        score += 0.05
     if length >= 3000:
-        score += 0.10
+        score += 0.04
 
     lower_text = text.lower()
     doc_type = doc.meta.get("doc_type")
-    if doc_type in {"code", "troubleshooting", "retrospective"}:
-        score += 0.08
-    if "```" in text or doc.meta.get("doc_type") == "code":
+    if doc_type in {"troubleshooting", "retrospective"}:
+        score += 0.06
+    if doc_type == "code":
         score += 0.12
     concrete_markers = ("error", "exception", "troubleshooting", "원인", "해결", "구현", "설계")
     marker_count = sum(1 for token in concrete_markers if token in lower_text)
-    score += min(marker_count * 0.06, 0.18)
+    score += min(marker_count * 0.04, 0.12)
+    if "원인" in lower_text and "해결" in lower_text:
+        score += 0.10
     if re.search(r"\b(class|def|function|public|private|select|insert|update)\b", lower_text):
-        score += 0.08
-    if doc.meta.get("date") or doc.meta.get("week") is not None:
-        score += 0.05
+        score += 0.06
     if doc.meta.get("ownership") == "user_touched":
-        score += 0.05
+        score += 0.18
+    elif doc.source_type == "github" and doc_type == "code":
+        score -= 0.05
+
+    if doc.meta.get("language") in {"html", "css", "scss", "sql"}:
+        score -= 0.10
 
     if length < 80 and doc_type != "code":
         score -= 0.15
     if _looks_like_template(text):
         score -= 0.20
 
-    return _clamp(score)
+    return _clamp(min(score, 0.92))
+
+
+def _new_chunk(
+    doc: RawDoc,
+    *,
+    chunk_id: str,
+    text: str,
+    topic: str,
+    confidence: float,
+    doc_type: str | None = None,
+) -> EvidenceChunk:
+    """RawDoc 메타데이터를 보존한 EvidenceChunk를 생성한다."""
+    commit_shas = doc.meta.get("commit_shas")
+    return EvidenceChunk(
+        chunk_id=chunk_id,
+        text=text,
+        source_type=doc.source_type,
+        source_url=doc.source_url,
+        topic=topic,
+        doc_type=doc_type or doc.meta.get("doc_type"),
+        week=doc.meta.get("week"),
+        date=doc.meta.get("date"),
+        confidence=confidence,
+        file_path=doc.meta.get("file_path"),
+        language=doc.meta.get("language"),
+        ownership=doc.meta.get("ownership"),
+        commit_count=int(doc.meta.get("commit_count") or 0),
+        last_commit_sha=doc.meta.get("last_commit_sha")
+        or (commit_shas[0] if isinstance(commit_shas, list) and commit_shas else None),
+    )
+
+
+def refine_evidence_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
+    """청킹 뒤 자식 텍스트 기준으로 topic과 confidence를 다시 계산한다."""
+    refined: list[EvidenceChunk] = []
+    for chunk in chunks:
+        doc = RawDoc(
+            source_url=chunk.source_url,
+            source_type=chunk.source_type.value,
+            title=chunk.file_path or chunk.source_url,
+            raw_text=chunk.text,
+            meta={
+                "topic": None,
+                "doc_type": chunk.doc_type,
+                "language": chunk.language,
+                "ownership": chunk.ownership,
+                "commit_count": chunk.commit_count,
+            },
+        )
+        refined.append(
+            chunk.model_copy(
+                update={
+                    # LLM/섹션 추출 단계가 이미 정한 topic은 보존한다. 코드가
+                    # max_chars로 잘린 뒤에도 앞 청크의 topic으로 덮어쓰지 않는다.
+                    "topic": _normalize_topic(chunk.topic) or _infer_topic(doc, chunk.text),
+                    "confidence": _score_confidence(doc, chunk.text),
+                }
+            )
+        )
+    return refined
 
 
 def _looks_like_template(text: str) -> bool:

@@ -13,12 +13,6 @@ Assessment에서 답변 하나를 평가하는 단계이다.
     - 질문 세트(메인 질문 + 파생 질문)의 점수는 scoring.py에서 계산한다.
 """
 
-
-# TODO:
-# - judge는 정확도 우선 모델을 사용한다.
-# - 목표 지연 시간은 답변당 3초 이내로 둔다.
-# - question generation보다 한 단계 높은 모델 사용을 검토한다.
-
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -32,10 +26,11 @@ from interview.schemas.question import (
 )
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal,ConflictType
 from interview.llm.client import get_llm
+from interview.llm.logging import log_llm_error
 from interview.assessment.prompts import JUDGE_SYSTEM,DELIVERY_NOTE
 
-"""
-분기 기준:
+""" 분기 기준:
+
 
 sufficient
 → 답변이 충분함
@@ -62,6 +57,7 @@ trap_available
 → Strategy.next_trap()
 """
 
+# LLM이 생성한 답변 품질, 정확도, 충분성과 후속 질문 정보를 담는다.
 class JudgeResult(BaseModel):
     """LLM이 생성하는 답변 평가 결과.
 
@@ -114,7 +110,7 @@ class JudgeResult(BaseModel):
 )
 
 
-# 평가
+# 답변을 평가하고 Interviewer가 사용할 최종 평가 신호를 반환한다.
 def judge_answer(
     question: Question,
     answer_text: str,
@@ -187,6 +183,7 @@ def judge_answer(
     )
 
 
+# 질문, 답변, Evidence와 이전 이력을 LLM에 전달해 구조화된 평가를 생성한다.
 def _judge_with_llm(
     question: Question,
     answer_text: str,
@@ -217,22 +214,8 @@ def _judge_with_llm(
         JudgeResult:
             답변 품질과 다음 질문 방향을 포함한 평가 결과.
 
-    TODO:
-        실제 구현 시 LLM에게 아래 정보를 전달한다.
-
-        - Question
-        - Answer
-        - Evidence
-        - Delivery Metrics
-        - History
     """
 
-    # TODO : 실제 LLM 호출
-    _ = question
-    _ = answer_text
-    _ = evidence_chunks
-    _ = delivery_metrics
-    _ = history
     
     history_summary = _build_history_summary(history)
     evidence_context = _build_evidence_context(question,evidence_chunks)
@@ -298,8 +281,27 @@ def _judge_with_llm(
         return result
     
     except Exception as e:
+        log_llm_error(
+            "ANSWER_ASSESSMENT",
+            e,
+            metadata={
+                "question_id": question.question_id,
+                "topic": question.topic,
+                "question_kind": question.kind.value,
+                "category": question.category.value if question.category else None,
+                "evidence_ids": [chunk.chunk_id for chunk in evidence_chunks],
+            },
+            input_data={
+                "question": question,
+                "answer_text": answer_text,
+                "delivery_metrics": delivery_metrics,
+                "history": history,
+                "user_prompt": user_prompt,
+            },
+        )
         raise RuntimeError("답변 평가 중 LLM 호출에 실패했습니다.") from e
 
+# 검색된 Evidence를 LLM 평가 프롬프트에 사용할 문자열로 변환한다.
 def _build_evidence_context(
     question: Question,
     evidence_chunks: list[EvidenceChunk],
@@ -327,6 +329,7 @@ def _build_evidence_context(
         "Evidence에 없는 프로젝트 사실은 단정하지 말고, 확인 필요 또는 설명 부족으로 판단한다."
 )
 
+# 이전 답변 이력을 충돌 검사에 사용할 요약 문자열로 변환한다.
 def _build_history_summary(history: list | None) -> str:
     if not history:
         return ""
@@ -336,7 +339,7 @@ def _build_history_summary(history: list | None) -> str:
         for attempt in history
     )
 
-
+# 현재 답변과 Evidence·이전 답변 사이의 충돌 여부를 정밀 검사한다.
 def _run_conflict_check(
     question: Question,
     answer_text: str,
@@ -365,9 +368,6 @@ def _run_conflict_check(
             충돌이 있으면 CONFIRM_NEGATIVE,
             충돌이 없으면 기존 judge 결과를 유지할 수 있도록 충분 또는 추가확인 결과를 반환한다.
 
-    TODO:
-        추후 LLM으로 이전 답변 요약 + 현재 답변 + Evidence를 비교하여
-        실제 충돌 여부를 판단하도록 교체한다.
     """
 
     _ = question
@@ -447,7 +447,7 @@ def _run_conflict_check(
     )
 
 
-
+# 프로젝트 질문인 경우에만 관련 Evidence를 검색해 반환한다.
 def _collect_evidence_for_question(
     question: Question,
     answer_text: str,
@@ -462,7 +462,7 @@ def _collect_evidence_for_question(
         user_id=user_id,
     )
 
-
+# 음성 전달력 지표를 delivery_note 생성용 프롬프트 문자열로 변환한다.
 def _build_delivery_context(
     delivery_metrics: dict | None,
 ) -> str:

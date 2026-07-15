@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from interview.api.auth.router import router as auth_router
+from interview.api.database import create_missing_tables
 from interview.api.evidence.router import router as evidence_router
 from interview.api.sessions.router import (
     get_interview_session_factory,
@@ -18,7 +19,9 @@ from interview.api.sessions.router import (
 )
 from interview.api.users.router import router as users_router
 from interview.api.voice.router import router as voice_router
-
+from interview.api.interviews.router import (
+    router as interviews_router,
+)
 
 load_dotenv()
 
@@ -31,6 +34,7 @@ async def lifespan(app: FastAPI):
         app:
             수명주기를 적용할 FastAPI 애플리케이션.
     """
+    create_missing_tables()
     yield
 
 
@@ -57,7 +61,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(evidence_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
-
+app.include_router(interviews_router, prefix="/api",)
 
 @app.get("/api/health")
 def health():

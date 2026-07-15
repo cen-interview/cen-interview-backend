@@ -6,6 +6,7 @@
 
 import re
 
+from interview.evidence.code_chunking import normalize_code_text, split_code_units
 from interview.schemas.evidence import EvidenceChunk
 
 
@@ -20,14 +21,22 @@ def chunk(chunks: list[EvidenceChunk], max_chars: int = 1000) -> list[EvidenceCh
 
     result: list[EvidenceChunk] = []
     for source_chunk in chunks:
-        text = source_chunk.text.strip()
+        text = (
+            normalize_code_text(source_chunk.text)
+            if _is_code_chunk(source_chunk)
+            else source_chunk.text.strip()
+        )
         if not text:
             continue
         if len(text) <= max_chars:
             result.append(source_chunk.model_copy(update={"text": text}))
             continue
 
-        parts = _split_code_text(text, max_chars) if _is_code_chunk(source_chunk) else _split_text(text, max_chars)
+        parts = (
+            _split_code_text(text, source_chunk.language, max_chars)
+            if _is_code_chunk(source_chunk)
+            else _split_text(text, max_chars)
+        )
         if len(parts) == 1:
             result.append(source_chunk.model_copy(update={"text": parts[0]}))
             continue
@@ -70,8 +79,11 @@ def _split_text(text: str, max_chars: int) -> list[str]:
     return parts
 
 
-def _split_code_text(text: str, max_chars: int) -> list[str]:
+def _split_code_text(text: str, language: str | None, max_chars: int) -> list[str]:
     """코드 문서를 code fence 또는 빈 줄 경계 기준으로 분할한다."""
+    if "```" not in text:
+        return _pack_code_units(split_code_units(text, language, max_chars), max_chars)
+
     blocks = _split_code_blocks(text)
     parts: list[str] = []
     current = ""
@@ -80,6 +92,17 @@ def _split_code_text(text: str, max_chars: int) -> list[str]:
         for unit in _split_oversized_code_block(block, max_chars):
             current = _append_unit(parts, current, unit, max_chars, separator="\n\n")
 
+    if current:
+        parts.append(current.strip())
+    return parts
+
+
+def _pack_code_units(units: list[str], max_chars: int) -> list[str]:
+    """작은 선언 단위는 함께 묶되 선언 경계를 넘겨 중간에서 자르지 않는다."""
+    parts: list[str] = []
+    current = ""
+    for unit in units:
+        current = _append_unit(parts, current, unit, max_chars, separator="\n\n")
     if current:
         parts.append(current.strip())
     return parts

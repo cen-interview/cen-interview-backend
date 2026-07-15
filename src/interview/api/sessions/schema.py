@@ -1,4 +1,4 @@
-"""면접 세션 API의 요청 모델."""
+"""면접 세션 API의 요청 및 진행 상태 응답 모델."""
 
 from typing import Literal
 
@@ -12,6 +12,49 @@ from pydantic import (
 
 
 _AUTO_SUBMIT_MIN_SILENCE_SECONDS = 2.0
+
+
+class MainQuestionProgress(BaseModel):
+    """현재 메인 질문 구간의 진행 정보를 나타낸다.
+
+    Attributes:
+        current:
+            현재 진행 중인 메인 질문의 순번. 세션 시작 전에는 0이다.
+
+        total:
+            세션에서 물어볼 최대 메인 질문 수.
+    """
+
+    current: int = Field(ge=0)
+    total: int = Field(ge=0)
+
+
+class SessionProgress(BaseModel):
+    """클라이언트에 전달할 면접 세션 진행 정보를 나타낸다.
+
+    메인 질문 진행률과 실제 질문·답변 수를 분리한다. 실제 질문 수에는
+    꼬리 질문과 힌트 등 파생 질문이 포함되지만, 같은 질문을 다시 들려주는
+    replay는 중복으로 집계하지 않는다.
+
+    Attributes:
+        status:
+            서버가 알고 있는 세션 상태. 진행 중이면 ``in_progress``, 종료되면
+            ``completed``이다.
+
+        main_question:
+            현재 메인 질문 순번과 세션의 최대 메인 질문 수.
+
+        asked_question_count:
+            메인 질문과 파생 질문을 포함해 실제로 출제한 질문 수.
+
+        answered_question_count:
+            지원자의 답변이 제출된 질문 수.
+    """
+
+    status: Literal["in_progress", "completed"]
+    main_question: MainQuestionProgress
+    asked_question_count: int = Field(ge=0)
+    answered_question_count: int = Field(ge=0)
 
 
 class StartRequest(BaseModel):

@@ -90,7 +90,7 @@
     │       ├── complete_question_set(main_question_id)
     │       ├── finalize()
     │       ├── _find_main_attempt(main_question_id)
-    │       └── _build_answer_summary()
+    │       └── _build_answer_context()
     │
     │       내부 상태
     │       ├── competency: CompetencyModel
@@ -304,7 +304,7 @@ AnswerQualitySignal:
         │
         ├── score_question_set(current_attempts)
         ├── _find_main_attempt(main_question_id)
-        ├── _build_answer_summary()
+        ├── _build_answer_context()
         ├── AnswerEvaluation 생성
         ├── evaluations.append()
         ├── competency.topic_scores[topic] = score
@@ -832,7 +832,7 @@ Assessment는 아직 실제 LLM-as-a-Judge가 완성된 상태가 아니다.
         ├── complete_question_set()
         ├── finalize()
         ├── _find_main_attempt()
-        └── _build_answer_summary()
+        └── _build_answer_context()
 
 ### 3단계. 답변 1건 평가 확인
 

@@ -1,9 +1,52 @@
-"""Assessment Agent.
+"""답변 평가 상태와 질문 세트 단위 채점을 관리하는 Assessment Agent.
 
-답변 하나의 평가 결과를 저장하고,
-메인 질문과 파생 질문을 질문 세트 단위로 묶어 최종 평가한다.
-면접 종료 시 FinalReport를 생성한다.
-""" 
+이 모듈은 Interviewer로부터 질문과 사용자 답변을 전달받아 답변 하나를
+평가하고, 메인 질문과 파생 질문을 하나의 질문 세트로 묶어 최종 점수를
+계산한다. 면접이 종료되면 누적된 문항별 평가를 이용해 FinalReport를 생성한다.
+
+주요 처리 흐름:
+    1. evaluate():
+        질문과 답변을 Assessment LangGraph에 전달한다.
+        LangGraph가 반환한 AnswerQualitySignal을 AnswerAttempt로 저장한다.
+
+    2. complete_question_set():
+        메인 질문과 follow_up, challenge, confirm, trap 등의 파생 답변을
+        하나의 질문 세트로 묶어 점수를 계산한다.
+        계산 결과는 AnswerEvaluation과 CompetencyModel에 누적한다.
+
+    3. finalize():
+        누적된 문항별 평가와 역량 상태를 report_builder에 전달하여
+        최종 면접 리포트를 생성한다.
+
+상태 관리:
+    current_attempts:
+        현재 질문 세트에 속한 답변 시도 목록.
+        질문 세트 평가가 완료되면 초기화된다.
+
+    all_attempts:
+        면접 전체의 답변 이력.
+        질문 세트가 끝나도 유지되며 이전 답변과의 모순 검사에 사용된다.
+
+    evaluations:
+        완료된 질문 세트별 최종 평가 목록.
+
+    competency:
+        주제별 점수, 평균 점수, 강점과 보완 포인트를 관리하는 누적 역량 모델.
+
+평가 단위:
+    AnswerQualitySignal:
+        답변 하나의 정확도, 충분성, quality와 다음 질문 방향을 나타낸다.
+
+    AnswerAttempt:
+        질문 하나와 답변 하나, 그리고 해당 답변의 평가 신호를 기록한다.
+
+    AnswerEvaluation:
+        메인 질문과 파생 질문을 합친 질문 세트의 최종 점수와 평가 내용이다.
+
+    FinalReport:
+        전체 면접의 종합 점수, 요약, 강점, 보완점, 학습 추천과
+        문항별 평가를 포함한다.
+"""
 
 from interview.assessment import report_builder
 from interview.assessment.scoring import AnswerAttempt, score_question_set
@@ -17,7 +60,7 @@ from interview.schemas.report import (
     FinalReport,
     QualityTrace,
 )
-from interview.schemas.signals import AnswerQualitySignal
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.assessment.graph import AssessmentState, get_compiled_graph
 
 class AssessmentAgent:
@@ -45,8 +88,8 @@ class AssessmentAgent:
             이전 답변과 현재 답변의 모순 감지에 사용된다.
     """
 
+# 답변 평가와 최종 리포트 생성에 필요한 내부 상태를 초기화한다.
     def __init__(self, user_id: str | None = None) -> None:
-        """AssessmentAgent의 내부 상태를 초기화한다."""
         self.user_id = user_id
         self.competency = CompetencyModel()
         self.evaluations: list[AnswerEvaluation] = []
@@ -59,6 +102,7 @@ class AssessmentAgent:
         # 이전 답변과 현재 답변의 모순 여부를 확인할 때 사용
         self.all_attempts: list[AnswerAttempt] = []
 
+# 답변 하나를 평가하고 다음 면접 흐름을 결정할 평가 신호를 반환한다.
     def evaluate(
         self,
         question: Question,
@@ -100,6 +144,9 @@ class AssessmentAgent:
 
         signal = result_state["final_signal"]
 
+        if signal.quality == AnswerQuality.OFF_TOPIC:
+            return signal
+
         # AnswerAttempt는 "질문 1개에 대한 답변 시도 1건"을 기록하는 객체다.
         # 이후 질문 세트 단위 점수 산정(score_question_set)에 사용된다.
         attempt = AnswerAttempt(
@@ -128,6 +175,7 @@ class AssessmentAgent:
 
         return signal
 
+# 현재 메인 질문과 파생 질문을 묶어 하나의 문항 평가를 생성한다.
     def complete_question_set(
         self,
         main_question_id: str,
@@ -168,7 +216,7 @@ class AssessmentAgent:
             # 메인 질문 원문.
             question=main_attempt.question_text,
             # 메인 질문에 대한 최초 답변.
-            answer_summary=self._build_answer_summary(),
+            answer_summary=self._build_answer_context(),
             score=score.score,
             comment=score.comment,
             delivery_note=self._build_delivery_note(),
@@ -180,9 +228,9 @@ class AssessmentAgent:
         self._update_competency_model()
         
         self.current_attempts.clear()
-        
+
+# 누적된 문항 평가 점수로 전체 평균 점수를 갱신한다.        
     def _update_competency_model(self) -> None:
-        """누적 문항 평가를 바탕으로 역량 모델의 평균 점수를 갱신한다."""
 
         if not self.evaluations:
             self.competency.average_score = 0
@@ -197,6 +245,7 @@ class AssessmentAgent:
             0,
         )
 
+# 현재 질문 세트에서 기준이 되는 메인 질문 답변을 찾는다.
     def _find_main_attempt(
         self,
         main_question_id: str,
@@ -227,7 +276,8 @@ class AssessmentAgent:
 
         # 기존 데이터와의 임시 호환을 위해 첫 답변을 사용한다.
         return self.current_attempts[0]
-    
+
+# 현재 질문 세트의 quality 판정 이력을 생성한다.    
     def _build_quality_trace(self) -> list[QualityTrace]:
         return [
             QualityTrace(
@@ -238,7 +288,8 @@ class AssessmentAgent:
             )
             for attempt in self.current_attempts
         ]
-    
+
+# 현재 질문 세트의 전달력 평가 문장을 중복 없이 합친다.    
     def _build_delivery_note(self) -> str | None:
         notes = [
             attempt.signal.delivery_note
@@ -251,23 +302,14 @@ class AssessmentAgent:
 
         return " ".join(dict.fromkeys(notes))
 
-    def _build_answer_summary(self) -> str:
-        """현재 질문 세트의 답변들을 하나의 답변 요약 문자열로 만든다.
-
-        Returns:
-            str:
-                현재는 current_attempts에 저장된 answer_text를 줄바꿈으로 연결한 문자열.
-
-        TODO:
-            추후 LLM을 이용해 메인 답변과 파생 답변을 하나의 자연스러운
-            답변 요약으로 변환한다.
-        """
-    
+# 현재 질문 세트에 포함된 답변 내용을 하나의 문자열로 합친다.
+    def _build_answer_context(self) -> str:   
         return "\n".join(
             attempt.answer_text
             for attempt in self.current_attempts
     )
 
+# 누적된 문항 평가를 바탕으로 최종 면접 리포트를 생성한다.
     def finalize(self) -> FinalReport:
         """면접 종료 후 최종 평가서를 생성한다.
 

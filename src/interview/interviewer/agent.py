@@ -156,10 +156,13 @@ class InterviewerAgent:
                 target=target,
             )
 
-        else:  # AnswerQuality.SUFFICIENT
+        elif signal.quality in (
+            AnswerQuality.SUFFICIENT,
+            AnswerQuality.UNKNOWN,
+            ):
             self.assessment.complete_question_set(
                 main_question_id=self.session.main_question_id or current_question.question_id,
-            )   
+                )   
 
             if self.session.is_done():
                 self.session.finished = True
