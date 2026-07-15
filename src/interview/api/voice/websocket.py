@@ -16,6 +16,9 @@ from interview.api.voice.schema import (
     AnswerTranscriptUpdatedMessage,
     ConnectionAuthenticateMessage,
     ConnectionReadyMessage,
+    TurnConfirmationCancelledMessage,
+    TurnConfirmationRequestedMessage,
+    TurnConfirmationRespondedMessage,
     TurnStateChangedMessage,
     VoiceActivityChangedMessage,
     VoiceTurnErrorMessage,
@@ -32,7 +35,6 @@ from interview.interviewer.turn_completion.coordinator import (
     VoiceTurnCoordinator,
     VoiceTurnCoordinatorError,
 )
-from interview.interviewer.turn_completion.models import TurnCompletionResult
 from interview.interviewer.turn_completion.registry import get_voice_turn_registry
 from interview.schemas.events import Mode
 
@@ -149,43 +151,122 @@ async def voice_turn_websocket(
             question_id=state.current_question.question_id,
         )
 
-        async def on_result(result: TurnCompletionResult) -> None:
-            """최신 keep_listening 판단을 현재 WebSocket에 전달한다.
+        def owns_current_worker() -> bool:
+            """현재 WebSocket이 registry의 활성 worker를 소유하는지 확인한다.
 
-            Args:
-                result:
-                    현재 buffer에 실제 기록된 최신 완료 판단 결과.
+            Returns:
+                연결이 열려 있고 현재 coordinator의 worker가 registry에 연결돼
+                있으면 True.
             """
             if not connection_open or coordinator is None:
-                return
+                return False
             try:
                 current_entry = registry.get(session_id)
             except KeyError:
-                return
-            if current_entry.worker is not coordinator.worker:
-                return
-            if result.decision.recommended_action != "keep_listening":
+                return False
+            return current_entry.worker is coordinator.worker
+
+        async def on_state_changed(
+            question_id: str,
+            revision: int,
+            reason: str,
+        ) -> None:
+            """최신 계속 듣기 상태를 현재 WebSocket에 전달한다.
+
+            Args:
+                question_id:
+                    상태가 변경된 현재 질문 ID.
+
+                revision:
+                    상태 판단에 사용한 최신 답변 revision.
+
+                reason:
+                    계속 듣기 상태를 유지하거나 되돌린 사유.
+            """
+            if not owns_current_worker():
                 return
             try:
                 await send_model(
                     TurnStateChangedMessage(
-                        question_id=result.question_id,
-                        revision=result.revision,
-                        reason=result.decision.reason_code,
+                        question_id=question_id,
+                        revision=revision,
+                        reason=reason,
                     )
                 )
             except Exception:
                 return
 
+        async def on_confirmation_requested(
+            confirmation_id: str,
+            question_id: str,
+            revision: int,
+            text: str,
+        ) -> None:
+            """확인 질문 재생 요청을 현재 WebSocket에 전달한다.
+
+            Args:
+                confirmation_id:
+                    확인 요청과 후속 응답을 연결할 고유 ID.
+
+                question_id:
+                    종료 여부를 확인할 현재 질문 ID.
+
+                revision:
+                    확인 판단에 사용한 답변 revision.
+
+                text:
+                    프론트가 TTS로 재생할 고정 확인 문구.
+            """
+            if not owns_current_worker():
+                return
+            await send_model(
+                TurnConfirmationRequestedMessage(
+                    confirmation_id=confirmation_id,
+                    question_id=question_id,
+                    revision=revision,
+                    text=text,
+                )
+            )
+
+        async def on_confirmation_cancelled(
+            confirmation_id: str,
+            question_id: str,
+            reason: str,
+        ) -> None:
+            """중간 발화로 취소된 확인 질문을 현재 WebSocket에 알린다.
+
+            Args:
+                confirmation_id:
+                    취소할 활성 확인 질문 ID.
+
+                question_id:
+                    확인 질문이 속한 현재 질문 ID.
+
+                reason:
+                    확인 질문을 취소한 안정적인 사유.
+            """
+            if not owns_current_worker():
+                return
+            await send_model(
+                TurnConfirmationCancelledMessage(
+                    confirmation_id=confirmation_id,
+                    question_id=question_id,
+                    reason=reason,
+                )
+            )
+
         coordinator = VoiceTurnCoordinator(
             session=session,
             entry=entry,
-            on_result=on_result,
+            on_state_changed=on_state_changed,
+            on_confirmation_requested=on_confirmation_requested,
+            on_confirmation_cancelled=on_confirmation_cancelled,
         )
         registry.attach_worker(
             session_id=session_id,
             worker=coordinator.worker,
         )
+        await coordinator.prepare_connection()
         await send_model(
             ConnectionReadyMessage(
                 session_id=session_id,
@@ -259,6 +340,36 @@ async def voice_turn_websocket(
                                 question_id=buffer_snapshot.question_id,
                                 revision=buffer_snapshot.revision,
                                 reason="candidate_resumed_speaking",
+                            )
+                        )
+                elif isinstance(
+                    client_message,
+                    TurnConfirmationRespondedMessage,
+                ):
+                    confirmation_result = (
+                        await coordinator.handle_confirmation_response(
+                            confirmation_id=client_message.confirmation_id,
+                            question_id=client_message.question_id,
+                            revision=client_message.revision,
+                            response_revision=client_message.response_revision,
+                            text=client_message.text,
+                        )
+                    )
+                    if confirmation_result.decision.intent != "finish":
+                        reason_by_intent = {
+                            "continue": "candidate_wants_to_continue",
+                            "answer_content": "additional_answer_content",
+                            "unknown": "confirmation_unknown",
+                        }
+                        await send_model(
+                            TurnStateChangedMessage(
+                                question_id=(
+                                    confirmation_result.buffer.question_id
+                                ),
+                                revision=confirmation_result.buffer.revision,
+                                reason=reason_by_intent[
+                                    confirmation_result.decision.intent
+                                ],
                             )
                         )
             except VoiceTurnCoordinatorError as exc:

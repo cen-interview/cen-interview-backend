@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 
 from interview.api.sessions.schema import VoiceDeliveryMetricsPayload
 from interview.interviewer.turn_completion.buffer import VoiceTurnState
@@ -156,8 +156,49 @@ class VoiceActivityChangedMessage(_QuestionScopedClientMessage):
     speech_active: bool
 
 
+class TurnConfirmationRespondedMessage(_QuestionScopedClientMessage):
+    """종료 확인 질문 이후의 지원자 응답 전사문을 전달한다.
+
+    Attributes:
+        type:
+            확인 응답을 나타내는 고정 discriminator.
+
+        confirmation_id:
+            응답 대상인 활성 확인 질문의 고유 ID.
+
+        response_revision:
+            확인 응답 STT에 부여한 새 revision. 실질적인 추가 답변으로
+            분류된 경우에만 buffer의 새 답변 revision으로 사용한다.
+
+        text:
+            확인 질문 이후 지원자가 말한 응답 원문.
+    """
+
+    type: Literal["turn.confirmation.responded"]
+    confirmation_id: str = Field(min_length=1, max_length=100)
+    response_revision: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=5000)
+
+    @model_validator(mode="after")
+    def validate_response_revision(self) -> "TurnConfirmationRespondedMessage":
+        """확인 응답 revision이 원래 답변 revision보다 높은지 확인한다.
+
+        Returns:
+            revision 순서가 검증된 현재 확인 응답 메시지.
+
+        Raises:
+            ValueError:
+                response_revision이 확인 기준 revision 이하인 경우.
+        """
+        if self.response_revision <= self.revision:
+            raise ValueError("확인 응답 revision은 기준 revision보다 커야 합니다.")
+        return self
+
+
 VoiceTurnClientMessage = Annotated[
-    AnswerTranscriptUpdatedMessage | VoiceActivityChangedMessage,
+    AnswerTranscriptUpdatedMessage
+    | VoiceActivityChangedMessage
+    | TurnConfirmationRespondedMessage,
     Field(discriminator="type"),
 ]
 """인증 이후 WebSocket에서 받을 수 있는 클라이언트 메시지 union."""
