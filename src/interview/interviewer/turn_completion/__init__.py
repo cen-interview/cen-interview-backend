@@ -3,6 +3,14 @@
 from interview.interviewer.turn_completion.confirmation import (
     ConfirmationIntentClassifier,
 )
+from interview.interviewer.turn_completion.buffer import (
+    VoiceTurnAlreadyCommittedError,
+    VoiceTurnBuffer,
+    VoiceTurnBufferError,
+    VoiceTurnInvalidTransitionError,
+    VoiceTurnQuestionMismatchError,
+    VoiceTurnState,
+)
 from interview.interviewer.turn_completion.judge import TurnCompletionJudge
 from interview.interviewer.turn_completion.models import (
     ConfirmationIntentDecision,
@@ -11,6 +19,11 @@ from interview.interviewer.turn_completion.models import (
     TurnCompletionQuestionSnapshot,
     TurnCompletionResult,
     TurnCompletionSnapshot,
+)
+from interview.interviewer.turn_completion.registry import (
+    VoiceTurnRegistry,
+    VoiceTurnRegistryEntry,
+    get_voice_turn_registry,
 )
 
 __all__ = [
@@ -22,4 +35,13 @@ __all__ = [
     "TurnCompletionQuestionSnapshot",
     "TurnCompletionResult",
     "TurnCompletionSnapshot",
+    "VoiceTurnAlreadyCommittedError",
+    "VoiceTurnBuffer",
+    "VoiceTurnBufferError",
+    "VoiceTurnInvalidTransitionError",
+    "VoiceTurnQuestionMismatchError",
+    "VoiceTurnRegistry",
+    "VoiceTurnRegistryEntry",
+    "VoiceTurnState",
+    "get_voice_turn_registry",
 ]

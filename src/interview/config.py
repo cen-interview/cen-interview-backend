@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     llm_log_include_input: bool = False
     llm_log_max_length: int = 5000
     turn_completion_timeout_seconds: float = 3.0
+    turn_confirmation_max_per_question: int = 1
 
     # TTS
     openai_tts_model: str = "gpt-4o-mini-tts"
