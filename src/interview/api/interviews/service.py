@@ -26,6 +26,9 @@
     get_interview_results:
         현재 사용자의 전체 면접 결과를 최신순으로 조회한다.
 
+    get_interview_history:
+        마이페이지용 완료 면접 통계와 페이지 단위 기록을 조회한다.
+
     to_result_response:
         InterviewResult ORM 객체를 API 응답 모델로 변환한다.
 
@@ -41,9 +44,15 @@
 
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from interview.api.interviews.schema import InterviewResultResponse
+from interview.api.interviews.schema import (
+    InterviewHistoryItem,
+    InterviewHistoryResponse,
+    InterviewHistorySummary,
+    InterviewResultResponse,
+)
 from interview.schemas.report import FinalReport
 from interview.api.interviews.model import (
     InterviewResult,
@@ -211,6 +220,103 @@ def get_interview_results(
         )
         .all()
     )
+
+
+def get_interview_history(
+    db: Session,
+    *,
+    user_id: int,
+    page: int,
+    size: int,
+) -> InterviewHistoryResponse:
+    """마이페이지용 완료 면접 기록과 요약 통계를 조회한다.
+
+    로그인 사용자의 완료된 면접만 대상으로 총 연습 횟수와 종합 점수
+    평균을 계산하고, 실제 종료 시각의 내림차순으로 한 페이지를 반환한다.
+    평균 점수는 화면에서 바로 사용할 수 있도록 정수로 반올림하며 기록이
+    없으면 ``None``을 반환한다.
+
+    Args:
+        db:
+            면접 세션과 결과를 조회할 SQLAlchemy DB 세션.
+
+        user_id:
+            기록을 조회할 로그인 사용자의 ID.
+
+        page:
+            1부터 시작하는 페이지 번호.
+
+        size:
+            한 페이지에 포함할 최대 기록 수.
+
+    Returns:
+        요약 통계, 완료 면접 목록과 페이지 정보를 담은 응답 모델.
+    """
+    completed_filter = (
+        InterviewSession.user_id == user_id,
+        InterviewSession.status == InterviewSessionStatus.COMPLETED,
+    )
+
+    total, average_score = (
+        db.query(
+            func.count(InterviewResult.id),
+            func.avg(InterviewResult.overall_score),
+        )
+        .select_from(InterviewResult)
+        .join(
+            InterviewSession,
+            InterviewResult.session_id == InterviewSession.session_id,
+        )
+        .filter(*completed_filter)
+        .one()
+    )
+
+    rows = (
+        db.query(InterviewResult, InterviewSession)
+        .join(
+            InterviewSession,
+            InterviewResult.session_id == InterviewSession.session_id,
+        )
+        .filter(*completed_filter)
+        .order_by(
+            InterviewSession.ended_at.desc(),
+            InterviewResult.id.desc(),
+        )
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
+
+    items = [
+        InterviewHistoryItem(
+            result_id=result.id,
+            session_id=interview_session.runtime_session_id,
+            completed_at=interview_session.ended_at or result.created_at,
+            mode=(
+                interview_session.mode.value
+                if isinstance(interview_session.mode, Mode)
+                else str(interview_session.mode)
+            ),
+            overall_score=result.overall_score,
+        )
+        for result, interview_session in rows
+    ]
+
+    return InterviewHistoryResponse(
+        summary=InterviewHistorySummary(
+            total_practice_count=total,
+            average_score=(
+                int(round(float(average_score)))
+                if average_score is not None
+                else None
+            ),
+        ),
+        items=items,
+        page=page,
+        size=size,
+        total=total,
+    )
+
 
 # InterviewResult ORM 객체를 API 상세 응답으로 변환한다.
 def to_result_response(
