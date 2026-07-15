@@ -97,7 +97,7 @@ def test_extract_evidence_normalizes_topic_from_meta() -> None:
 
     chunks = extract_evidence(doc)
 
-    assert chunks[0].topic == "jpa n+1"
+    assert chunks[0].topic == "jpa 조회 최적화"
 
 
 def test_extract_evidence_prefers_specific_topic_over_github_language() -> None:
@@ -122,9 +122,32 @@ public class UserService {
 
     chunks = extract_evidence(doc)
 
-    assert chunks[0].topic == "jwt"
+    assert chunks[0].topic == "jwt 인증"
     assert chunks[0].doc_type == "code"
     assert chunks[0].confidence > 0.6
+
+
+def test_extract_evidence_keeps_short_verified_user_contribution() -> None:
+    """일반 코드보다 짧아도 검증된 사용자 diff는 유효 코드면 보존한다."""
+    doc = _raw_doc(
+        "return tokenService.refresh(token);",
+        source_type="github",
+        title="example/project AuthService.java user contribution",
+        meta={
+            "doc_type": "code",
+            "file_path": "src/AuthService.java",
+            "language": "java",
+            "ownership": "user_touched",
+            "last_commit_sha": "a" * 40,
+        },
+    )
+
+    chunks = extract_evidence(doc)
+
+    assert len(chunks) == 1
+    assert chunks[0].text == "return tokenService.refresh(token);"
+    assert chunks[0].ownership == "user_touched"
+    assert chunks[0].last_commit_sha == "a" * 40
 
 
 def test_extract_evidence_scores_sparse_template_lower_than_specific_note() -> None:
@@ -189,7 +212,7 @@ Access Token 만료 시 401 응답이 반복되는 문제가 있었다.
 
     assert len(fake_llm.calls) == 1
     assert len(chunks) == 1
-    assert chunks[0].topic == "spring security"
+    assert chunks[0].topic == "spring security 인증"
     assert chunks[0].doc_type == "troubleshooting"
     assert 0.0 <= chunks[0].confidence <= 1.0
     assert "Access Token 만료" in chunks[0].text
@@ -228,7 +251,7 @@ EntityGraph로 N+1 쿼리 문제를 줄이고 로그에서 쿼리 수를 확인�
 
     chunks = extract_evidence(doc, use_llm=True, structured_llm=FakeStructuredLLM())
 
-    assert [chunk.topic for chunk in chunks] == ["jwt", "jpa"]
+    assert [chunk.topic for chunk in chunks] == ["jwt 인증", "jpa 조회 최적화"]
 
 
 def test_extract_evidence_falls_back_when_llm_fails() -> None:
@@ -250,5 +273,75 @@ def test_extract_evidence_falls_back_when_llm_fails() -> None:
     chunks = extract_evidence(doc, use_llm=True, structured_llm=FailingStructuredLLM())
 
     assert len(chunks) == 1
-    assert chunks[0].topic == "jpa n+1"
+    assert chunks[0].topic == "jpa 조회 최적화"
     assert "EntityGraph" in chunks[0].text
+
+
+def test_extract_evidence_replaces_language_only_llm_topic() -> None:
+    """LLM이 언어명만 반환해도 본문 구현 목적을 topic으로 사용한다."""
+
+    class LanguageOnlyLLM:
+        def invoke(self, messages: list[tuple[str, str]]) -> EvidenceExtractionDecision:
+            return EvidenceExtractionDecision(
+                sections=[
+                    EvidenceSectionDecision(
+                        section_id="s1",
+                        topic="JavaScript",
+                        confidence=0.8,
+                    )
+                ]
+            )
+
+    doc = _raw_doc(
+        """
+SockJS와 STOMP를 이용해 WebSocket 연결을 구성했다.
+채팅방을 구독하고 메시지를 실시간으로 송수신하도록 구현했다.
+연결 종료와 재접속 예외도 처리했다.
+""",
+        source_type="github",
+        title="example/chat chat-client.js",
+        meta={
+            "doc_type": "code",
+            "file_path": "src/chat-client.js",
+            "language": "javascript",
+            "ownership": "repo_context",
+        },
+    )
+
+    chunks = extract_evidence(doc, use_llm=True, structured_llm=LanguageOnlyLLM())
+
+    assert chunks[0].topic == "웹소켓 실시간 통신"
+
+
+def test_extract_evidence_prompt_requests_implementation_topic() -> None:
+    """LLM 프롬프트가 언어명 대신 구현 목적을 요구한다."""
+
+    class PromptCapturingLLM:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str]] = []
+
+        def invoke(self, messages: list[tuple[str, str]]) -> EvidenceExtractionDecision:
+            self.messages = messages
+            return EvidenceExtractionDecision(
+                sections=[
+                    EvidenceSectionDecision(
+                        section_id="s1",
+                        topic="langchain 에이전트 워크플로",
+                        confidence=0.8,
+                    )
+                ]
+            )
+
+    llm = PromptCapturingLLM()
+    doc = _raw_doc(
+        "LangChain Agent가 도구를 선택하고 실행 결과를 다음 단계로 전달하도록 "
+        "워크플로와 상태 전이를 구현했다.",
+        source_type="github",
+        title="agent.py",
+        meta={"doc_type": "code", "language": "python"},
+    )
+
+    chunks = extract_evidence(doc, use_llm=True, structured_llm=llm)
+
+    assert chunks[0].topic == "langchain 에이전트 워크플로"
+    assert "언어·프레임워크 이름이 아니라" in llm.messages[0][1]
