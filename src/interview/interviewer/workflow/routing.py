@@ -64,6 +64,18 @@ def route_quality(state: SessionState | dict[str, Any]) -> str:
         답변 품질에 대응하는 다음 그래프 노드 이름. 평가 신호가 없거나 형식이
         올바르지 않은 경우에는 안전하게 complete_set을 반환한다.
     """
+
+    last_signal = _restore_signal(
+        _state_get(state, "last_signal")
+    )
+
+    if last_signal is None:
+        return "complete_set"
+
+    if last_signal.quality == AnswerQuality.OFF_TOPIC:
+        return "handle_off_topic"
+
+
     derived_turn_count = _state_get(state, "derived_turn_count", 0)
     max_derived_turns = _state_get(state, "max_derived_turns_per_set", 2)
     if derived_turn_count >= max_derived_turns:
