@@ -29,6 +29,11 @@ from interview.interviewer.turn_completion.models import (
     TurnCompletionSnapshot,
 )
 from interview.interviewer.turn_completion.registry import VoiceTurnRegistryEntry
+from interview.interviewer.turn_completion.telemetry import (
+    elapsed_milliseconds,
+    log_voice_turn_event,
+    monotonic_time,
+)
 from interview.interviewer.turn_completion.worker import (
     LatestWinsTurnCompletionWorker,
     TurnCompletionResultCallback,
@@ -365,7 +370,19 @@ class VoiceTurnCoordinator:
                 buffer.state == "listening"
                 and (buffer.revision > 0 or bool(buffer.answer_text))
             )
-            return buffer.model_copy(deep=True)
+            buffer_snapshot = buffer.model_copy(deep=True)
+
+        log_voice_turn_event(
+            "voice_turn.connection.prepared",
+            session_id=buffer_snapshot.session_id,
+            question_id=buffer_snapshot.question_id,
+            revision=buffer_snapshot.revision,
+            answer_text=buffer_snapshot.answer_text,
+            voice_turn_state=buffer_snapshot.state,
+            reconnect_snapshot_expected=self._accept_equal_reconnect_snapshot,
+            confirmation_count=buffer_snapshot.confirmation_count,
+        )
+        return buffer_snapshot
 
     async def handle_transcript_updated(
         self,
@@ -437,6 +454,14 @@ class VoiceTurnCoordinator:
                         delivery_metrics=delivery_metrics,
                     )
                 except VoiceTurnRevisionConflictError as exc:
+                    log_voice_turn_event(
+                        "voice_turn.connection.revision_conflict",
+                        session_id=self._entry.buffer.session_id,
+                        question_id=question_id,
+                        revision=revision,
+                        answer_text=text,
+                        server_revision=self._entry.buffer.revision,
+                    )
                     raise VoiceTurnCoordinatorError(
                         "revision_conflict",
                         str(exc),
@@ -457,6 +482,15 @@ class VoiceTurnCoordinator:
                 if updated:
                     self._accept_equal_reconnect_snapshot = False
             if not updated:
+                log_voice_turn_event(
+                    "voice_turn.transcript.discarded",
+                    session_id=self._entry.buffer.session_id,
+                    question_id=question_id,
+                    revision=revision,
+                    answer_text=text,
+                    discard_reason="stale_revision",
+                    server_revision=self._entry.buffer.revision,
+                )
                 raise VoiceTurnCoordinatorError(
                     "stale_revision",
                     "최신 전사문보다 오래된 이벤트입니다.",
@@ -464,6 +498,17 @@ class VoiceTurnCoordinator:
                 )
             snapshot = self._build_snapshot(session_state)
             buffer_snapshot = self._entry.buffer.model_copy(deep=True)
+
+        if reconnect_snapshot:
+            log_voice_turn_event(
+                "voice_turn.connection.snapshot_resynchronized",
+                session_id=buffer_snapshot.session_id,
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+                answer_text=buffer_snapshot.answer_text,
+                speech_active=buffer_snapshot.speech_active,
+                segment_final=buffer_snapshot.segment_final,
+            )
 
         if previous_state in {"confirmation_pending", "confirming_end"}:
             self._cancel_confirmation_task()
@@ -476,6 +521,15 @@ class VoiceTurnCoordinator:
                 )
         if previous_state == "complete_candidate":
             self._cancel_commit_task()
+            log_voice_turn_event(
+                "voice_turn.commit.cancelled",
+                session_id=buffer_snapshot.session_id,
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+                answer_text=buffer_snapshot.answer_text,
+                cancel_reason="new_transcript",
+                candidate_resumed_speaking=True,
+            )
 
         await self._worker.submit(snapshot)
         return buffer_snapshot
@@ -540,6 +594,15 @@ class VoiceTurnCoordinator:
                 )
         if speech_active and previous_state == "complete_candidate":
             self._cancel_commit_task()
+            log_voice_turn_event(
+                "voice_turn.commit.cancelled",
+                session_id=buffer_snapshot.session_id,
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+                answer_text=buffer_snapshot.answer_text,
+                cancel_reason="candidate_resumed_speaking",
+                candidate_resumed_speaking=True,
+            )
         return buffer_snapshot
 
     async def handle_confirmation_response(
@@ -621,10 +684,30 @@ class VoiceTurnCoordinator:
         if snapshot is not None:
             await self._worker.submit(snapshot)
         elif decision.intent == "finish":
+            log_voice_turn_event(
+                "voice_turn.commit.candidate",
+                session_id=buffer_snapshot.session_id,
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+                answer_text=buffer_snapshot.answer_text,
+                completion_reason="user_confirmed",
+                grace_milliseconds=round(self._commit_grace_seconds * 1000),
+            )
             self._schedule_commit(
                 question_id=buffer_snapshot.question_id,
                 revision=buffer_snapshot.revision,
             )
+        log_voice_turn_event(
+            "voice_turn.confirmation.responded",
+            session_id=buffer_snapshot.session_id,
+            question_id=buffer_snapshot.question_id,
+            revision=buffer_snapshot.revision,
+            answer_text=buffer_snapshot.answer_text,
+            confirmation_id=confirmation_id,
+            confirmation_intent=decision.intent,
+            confidence=decision.confidence,
+            voice_turn_state=buffer_snapshot.state,
+        )
         return ConfirmationResponseResult(
             buffer=buffer_snapshot,
             decision=decision,
@@ -657,6 +740,7 @@ class VoiceTurnCoordinator:
         """
         schedule_confirmation = False
         schedule_commit = False
+        completion_reason: VoiceTurnCompletionReason | None = None
         listening_reason: str | None = None
         async with self._entry.lock:
             buffer = self._entry.buffer
@@ -678,7 +762,7 @@ class VoiceTurnCoordinator:
                 )
             elif decision.recommended_action == "auto_submit":
                 if self._can_start_auto_submit(buffer, decision):
-                    completion_reason: VoiceTurnCompletionReason = (
+                    completion_reason = (
                         "explicit_finish"
                         if decision.explicit_completion
                         else "semantic_complete"
@@ -700,11 +784,33 @@ class VoiceTurnCoordinator:
                     listening_reason = "confirmation_not_available"
 
         if schedule_commit:
+            log_voice_turn_event(
+                "voice_turn.commit.candidate",
+                session_id=self._entry.buffer.session_id,
+                question_id=result.question_id,
+                revision=result.revision,
+                answer_text=self._entry.buffer.answer_text,
+                completion_reason=completion_reason,
+                semantic_state=result.decision.semantic_state,
+                confidence=result.decision.confidence,
+                grace_milliseconds=round(self._commit_grace_seconds * 1000),
+            )
             self._schedule_commit(
                 question_id=result.question_id,
                 revision=result.revision,
             )
         elif schedule_confirmation:
+            log_voice_turn_event(
+                "voice_turn.confirmation.pending",
+                session_id=self._entry.buffer.session_id,
+                question_id=result.question_id,
+                revision=result.revision,
+                answer_text=self._entry.buffer.answer_text,
+                confidence=result.decision.confidence,
+                pause_milliseconds=round(
+                    self._confirmation_pause_seconds * 1000
+                ),
+            )
             self._schedule_confirmation(
                 question_id=result.question_id,
                 revision=result.revision,
@@ -865,8 +971,28 @@ class VoiceTurnCoordinator:
                     ),
                 )
 
+            commit_started_at = monotonic_time()
+            log_voice_turn_event(
+                "voice_turn.commit.started",
+                session_id=request.session_id,
+                question_id=request.question_id,
+                revision=request.revision,
+                answer_text=request.answer_text,
+                completion_reason=request.completion_reason,
+                client_event_id=request.client_event_id,
+            )
             if self._on_commit_answer is None:
                 await self._abort_commit(request=request)
+                log_voice_turn_event(
+                    "voice_turn.commit.failed",
+                    session_id=request.session_id,
+                    question_id=request.question_id,
+                    revision=request.revision,
+                    answer_text=request.answer_text,
+                    completion_reason=request.completion_reason,
+                    latency_ms=elapsed_milliseconds(commit_started_at),
+                    error_code="commit_callback_unavailable",
+                )
                 await self._notify_state_changed(
                     question_id=question_id,
                     revision=revision,
@@ -878,8 +1004,18 @@ class VoiceTurnCoordinator:
                 session_payload = await self._on_commit_answer(request)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 await self._abort_commit(request=request)
+                log_voice_turn_event(
+                    "voice_turn.commit.failed",
+                    session_id=request.session_id,
+                    question_id=request.question_id,
+                    revision=request.revision,
+                    answer_text=request.answer_text,
+                    completion_reason=request.completion_reason,
+                    latency_ms=elapsed_milliseconds(commit_started_at),
+                    error_code=type(exc).__name__,
+                )
                 await self._notify_commit_failed(
                     request=request,
                     reason="commit_failed",
@@ -892,6 +1028,17 @@ class VoiceTurnCoordinator:
                     expected_revision=revision,
                 )
 
+            log_voice_turn_event(
+                "voice_turn.commit.completed",
+                session_id=request.session_id,
+                question_id=request.question_id,
+                revision=request.revision,
+                answer_text=request.answer_text,
+                completion_reason=request.completion_reason,
+                latency_ms=elapsed_milliseconds(commit_started_at),
+                client_event_id=request.client_event_id,
+                session_finished=bool(session_payload.get("finished")),
+            )
             self._worker.cancel()
             if self._on_answer_committed is not None:
                 try:
@@ -930,6 +1077,14 @@ class VoiceTurnCoordinator:
                 and buffer.revision == revision
             ):
                 buffer.resume_listening()
+                log_voice_turn_event(
+                    "voice_turn.commit.cancelled",
+                    session_id=buffer.session_id,
+                    question_id=question_id,
+                    revision=revision,
+                    answer_text=buffer.answer_text,
+                    cancel_reason="session_state_changed",
+                )
 
     async def _abort_commit(self, *, request: VoiceTurnCommitRequest) -> None:
         """기존 제출 경로 실패 후 committing 상태를 listening으로 복구한다.
@@ -1048,6 +1203,16 @@ class VoiceTurnCoordinator:
                     expected_revision=revision,
                     max_confirmations=self._max_confirmations,
                 )
+
+            log_voice_turn_event(
+                "voice_turn.confirmation.requested",
+                session_id=self._entry.buffer.session_id,
+                question_id=question_id,
+                revision=revision,
+                answer_text=self._entry.buffer.answer_text,
+                confirmation_id=confirmation_id,
+                confirmation_count=self._entry.buffer.confirmation_count,
+            )
 
             if self._on_confirmation_requested is None:
                 await self._rollback_confirmation_request(
@@ -1204,6 +1369,15 @@ class VoiceTurnCoordinator:
             reason:
                 확인 질문을 취소한 안정적인 사유 코드.
         """
+        log_voice_turn_event(
+            "voice_turn.confirmation.cancelled",
+            session_id=self._entry.buffer.session_id,
+            question_id=question_id,
+            revision=self._entry.buffer.revision,
+            answer_text=self._entry.buffer.answer_text,
+            confirmation_id=confirmation_id,
+            cancel_reason=reason,
+        )
         if self._on_confirmation_cancelled is None:
             return
         try:

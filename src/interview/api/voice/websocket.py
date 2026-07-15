@@ -45,6 +45,7 @@ from interview.interviewer.turn_completion.registry import (
     VoiceTurnRegistryEntry,
     get_voice_turn_registry,
 )
+from interview.interviewer.turn_completion.telemetry import log_voice_turn_event
 from interview.schemas.events import Mode
 
 
@@ -160,6 +161,7 @@ async def voice_turn_websocket(
             session_id=session_id,
             question_id=state.current_question.question_id,
         )
+        reconnecting = entry.buffer.revision > 0 or bool(entry.buffer.answer_text)
 
         def owns_current_worker() -> bool:
             """현재 WebSocket이 registry의 활성 worker를 소유하는지 확인한다.
@@ -416,6 +418,14 @@ async def voice_turn_websocket(
         coordinator = build_coordinator(entry)
         async with entry.lock:
             if entry.buffer.state == "committing":
+                log_voice_turn_event(
+                    "voice_turn.connection.rejected",
+                    session_id=session_id,
+                    question_id=entry.buffer.question_id,
+                    revision=entry.buffer.revision,
+                    answer_text=entry.buffer.answer_text,
+                    reject_reason="turn_commit_in_progress",
+                )
                 await _send_fatal_error(
                     websocket=websocket,
                     send_model=send_model,
@@ -437,6 +447,15 @@ async def voice_turn_websocket(
                 revision=entry.buffer.revision,
                 state=entry.buffer.state,
             )
+        )
+        log_voice_turn_event(
+            "voice_turn.connection.ready",
+            session_id=session_id,
+            question_id=entry.buffer.question_id,
+            revision=entry.buffer.revision,
+            answer_text=entry.buffer.answer_text,
+            voice_turn_state=entry.buffer.state,
+            reconnected=reconnecting,
         )
 
         while connection_open:
@@ -583,6 +602,14 @@ async def voice_turn_websocket(
     finally:
         connection_open = False
         if coordinator is not None:
+            log_voice_turn_event(
+                "voice_turn.connection.closed",
+                session_id=session_id,
+                question_id=coordinator.worker.buffer.question_id,
+                revision=coordinator.worker.buffer.revision,
+                answer_text=coordinator.worker.buffer.answer_text,
+                voice_turn_state=coordinator.worker.buffer.state,
+            )
             await coordinator.aclose()
             registry.detach_worker(
                 session_id=session_id,

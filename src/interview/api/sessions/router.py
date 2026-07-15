@@ -21,6 +21,11 @@ from interview.interviewer.facade import (
 )
 from interview.interviewer.session import SessionState
 from interview.interviewer.turn_completion.registry import get_voice_turn_registry
+from interview.interviewer.turn_completion.telemetry import (
+    elapsed_milliseconds,
+    log_voice_turn_event,
+    monotonic_time,
+)
 from interview.schemas.events import Mode
 from interview.schemas.question import Question
 from sqlalchemy.orm import Session
@@ -180,6 +185,7 @@ def post_event(
             if state.mode == Mode.VOICE.value
             else from_chat(session_id, question_id, payload)
         )
+        event_started_at = monotonic_time()
         state = session.submit_event(
             adapted_input,
             client_event_id=req.client_event_id,
@@ -189,6 +195,20 @@ def post_event(
             and payload.get("action") == "submit"
             and payload.get("submission_type", "manual") == "manual"
         ):
+            log_voice_turn_event(
+                "voice_turn.manual_submit.completed",
+                session_id=session_id,
+                question_id=question_id,
+                answer_text=str(payload.get("text", "")),
+                completion_reason=payload.get("completion_reason"),
+                latency_ms=elapsed_milliseconds(event_started_at),
+                session_finished=state.finished,
+                next_question_id=(
+                    state.current_question.question_id
+                    if state.current_question is not None
+                    else None
+                ),
+            )
             _sync_voice_turn_after_manual_submit(
                 session_id=session_id,
                 submitted_question_id=question_id,
@@ -245,6 +265,12 @@ def _sync_voice_turn_after_manual_submit(
         return
 
     if state.finished:
+        log_voice_turn_event(
+            "voice_turn.manual_submit.registry_synchronized",
+            session_id=session_id,
+            question_id=submitted_question_id,
+            sync_action="removed_finished_session",
+        )
         registry.remove(session_id)
         return
 
@@ -253,6 +279,13 @@ def _sync_voice_turn_after_manual_submit(
         current_question is not None
         and current_question.question_id != submitted_question_id
     ):
+        log_voice_turn_event(
+            "voice_turn.manual_submit.registry_synchronized",
+            session_id=session_id,
+            question_id=submitted_question_id,
+            sync_action="replaced_question",
+            next_question_id=current_question.question_id,
+        )
         registry.replace_question(
             session_id=session_id,
             question_id=current_question.question_id,

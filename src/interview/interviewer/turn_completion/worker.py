@@ -12,6 +12,7 @@ from interview.interviewer.turn_completion.models import (
     TurnCompletionResult,
     TurnCompletionSnapshot,
 )
+from interview.interviewer.turn_completion.telemetry import log_voice_turn_event
 
 
 TurnCompletionResultCallback = Callable[[TurnCompletionResult], Awaitable[None]]
@@ -286,7 +287,15 @@ class LatestWinsTurnCompletionWorker:
                     result = await self._judge.judge(snapshot)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
+                    log_voice_turn_event(
+                        "voice_turn.judge.failed",
+                        session_id=snapshot.session_id,
+                        question_id=snapshot.question_id,
+                        revision=snapshot.revision,
+                        answer_text=snapshot.current_answer,
+                        error_code=type(exc).__name__,
+                    )
                     continue
 
                 applied = await self._apply_latest_result(result)
@@ -328,12 +337,47 @@ class LatestWinsTurnCompletionWorker:
             revision 또는 상태가 달라 폐기했으면 False.
         """
         if self._closed:
+            self._log_discarded(result, reason="worker_closed")
             return False
         async with self._buffer_lock:
             if self._closed:
+                self._log_discarded(result, reason="worker_closed")
                 return False
             if result.question_id != self._buffer.question_id:
+                self._log_discarded(result, reason="question_changed")
                 return False
             if result.revision != self._buffer.revision:
+                self._log_discarded(result, reason="stale_revision")
                 return False
-            return self._buffer.record_decision(result)
+            applied = self._buffer.record_decision(result)
+            if not applied:
+                self._log_discarded(result, reason="state_changed")
+            return applied
+
+    def _log_discarded(
+        self,
+        result: TurnCompletionResult,
+        *,
+        reason: str,
+    ) -> None:
+        """현재 buffer에 적용하지 않은 완료 판단 결과를 기록한다.
+
+        Args:
+            result:
+                폐기한 질문 ID와 revision의 완료 판단 결과.
+
+            reason:
+                worker 종료, 질문 변경, 오래된 revision 또는 상태 변경을
+                나타내는 안정적인 폐기 사유.
+        """
+        log_voice_turn_event(
+            "voice_turn.judge.discarded",
+            session_id=self._buffer.session_id,
+            question_id=result.question_id,
+            revision=result.revision,
+            answer_text=self._buffer.answer_text,
+            discard_reason=reason,
+            current_question_id=self._buffer.question_id,
+            current_revision=self._buffer.revision,
+            voice_turn_state=self._buffer.state,
+        )

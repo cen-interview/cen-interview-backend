@@ -39,6 +39,11 @@ from interview.interviewer.turn_completion.registry import (
     VoiceTurnRegistryEntry,
     get_voice_turn_registry,
 )
+from interview.interviewer.turn_completion.telemetry import (
+    elapsed_milliseconds,
+    log_voice_turn_event,
+    monotonic_time,
+)
 
 __all__ = [
     "ConfirmationIntentClassifier",
@@ -68,4 +73,7 @@ __all__ = [
     "VoiceTurnRegistryEntry",
     "VoiceTurnState",
     "get_voice_turn_registry",
+    "elapsed_milliseconds",
+    "log_voice_turn_event",
+    "monotonic_time",
 ]

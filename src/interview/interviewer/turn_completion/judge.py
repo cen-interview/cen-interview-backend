@@ -13,6 +13,11 @@ from interview.interviewer.turn_completion.prompts import (
     TURN_COMPLETION_SYSTEM_PROMPT,
     build_turn_completion_user_prompt,
 )
+from interview.interviewer.turn_completion.telemetry import (
+    elapsed_milliseconds,
+    log_voice_turn_event,
+    monotonic_time,
+)
 from interview.llm.client import get_llm
 
 
@@ -87,7 +92,19 @@ class TurnCompletionJudge:
             },
         ]
 
+        started_at = monotonic_time()
+        log_voice_turn_event(
+            "voice_turn.judge.started",
+            session_id=snapshot.session_id,
+            question_id=snapshot.question_id,
+            revision=snapshot.revision,
+            answer_text=snapshot.current_answer,
+            speech_active=snapshot.speech_active,
+            segment_final=snapshot.segment_final,
+        )
+
         fallback_used = False
+        fallback_error_code: str | None = None
         try:
             structured_llm = self._llm.with_structured_output(
                 TurnCompletionDecision
@@ -101,9 +118,29 @@ class TurnCompletionJudge:
                 if isinstance(raw_decision, TurnCompletionDecision)
                 else TurnCompletionDecision.model_validate(raw_decision)
             )
-        except Exception:
+        except Exception as exc:
             decision = _keep_listening_fallback()
             fallback_used = True
+            fallback_error_code = type(exc).__name__
+
+        log_voice_turn_event(
+            (
+                "voice_turn.judge.fallback"
+                if fallback_used
+                else "voice_turn.judge.completed"
+            ),
+            session_id=snapshot.session_id,
+            question_id=snapshot.question_id,
+            revision=snapshot.revision,
+            answer_text=snapshot.current_answer,
+            latency_ms=elapsed_milliseconds(started_at),
+            semantic_state=decision.semantic_state,
+            recommended_action=decision.recommended_action,
+            reason_code=decision.reason_code,
+            confidence=decision.confidence,
+            fallback_used=fallback_used,
+            error_code=fallback_error_code,
+        )
 
         return TurnCompletionResult(
             question_id=snapshot.question_id,
