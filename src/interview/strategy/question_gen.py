@@ -26,17 +26,13 @@ _EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
 
 
 def filter_reliable_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
-    """질문 생성에 쓸 근거만 남긴다.
+    """confidence 기준을 통과한 근거만 남긴다.
 
-    confidence 기준을 통과해야 하고, GitHub 코드 중 사용자가 직접 커밋하지
-    않은 주변 코드(ownership == "repo_context")는 제외한다. Notion 청크는
-    ownership이 항상 None이라 이 조건에 걸리지 않는다.
+    TODO(담당 B, evidence 담당 A와 조율 필요): ownership == "repo_context"
+    제외는 top-k 선정 이전 쿼리 단계(search_evidence의 exclude_ownership)에서
+    처리해야 함.
     """
-    return [
-        c
-        for c in chunks
-        if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD and c.ownership != "repo_context"
-    ]
+    return [c for c in chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
 
 _DERIVED_DIFFICULTY: dict[QuestionKind, Difficulty] = {
     QuestionKind.FOLLOW_UP: Difficulty.EASY,
