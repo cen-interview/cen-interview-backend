@@ -1,16 +1,66 @@
-"""음성 면접의 OpenAI Realtime 연결 정보를 제공하는 라우터."""
+"""음성 면접의 OpenAI Realtime 연결 정보와 TTS를 제공하는 라우터."""
 
 from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from openai import OpenAIError
 
-from interview.api.voice.schema import RealtimeTranscriptionTokenResponse
-from interview.api.voice.service import create_realtime_transcription_client_secret
+from interview.api.voice.schema import RealtimeTranscriptionTokenResponse, TtsRequest
+from interview.api.voice.service import (
+    create_realtime_transcription_client_secret,
+    create_tts_audio_stream,
+)
 
 
-router = APIRouter(prefix="/interview/realtime-transcription", tags=["Voice"])
+router = APIRouter(prefix="/interview", tags=["Voice"])
 
 
-@router.post("/token", response_model=RealtimeTranscriptionTokenResponse)
+@router.post(
+    "/tts",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"audio/mpeg": {}}}},
+)
+def create_tts(request: TtsRequest) -> StreamingResponse:
+    """면접관 발화를 OpenAI TTS 음성 스트림으로 반환한다.
+
+    OpenAI 표준 API 키는 서버 환경변수에만 보관하고 프론트에는
+    MP3 음성 청크만 전달한다. 생성된 면접 음성이 브라우저나
+    중간 캐시에 남지 않도록 no-store 헤더를 설정한다.
+
+    Args:
+        request:
+            음성으로 변환할 면접관 발화를 담은 요청.
+
+    Returns:
+        audio/mpeg 형식의 면접관 발화 스트림.
+
+    Raises:
+        HTTPException:
+            OpenAI 설정 또는 upstream 요청 문제로 음성을 생성하지
+            못한 경우 503 응답을 반환한다.
+    """
+    try:
+        audio_stream = create_tts_audio_stream(request.text)
+    except OpenAIError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="면접관 음성을 생성할 수 없습니다.",
+        ) from exc
+
+    return StreamingResponse(
+        audio_stream,
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.post(
+    "/realtime-transcription/token",
+    response_model=RealtimeTranscriptionTokenResponse,
+)
 def create_realtime_transcription_token(
     response: Response,
 ) -> RealtimeTranscriptionTokenResponse:

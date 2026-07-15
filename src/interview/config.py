@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     llm_log_include_input: bool = False
     llm_log_max_length: int = 5000
 
+    # TTS
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "marin"
+
     # MCP / 외부 소스
     # notion
     notion_mcp_url: str = "https://mcp.notion.com/mcp"

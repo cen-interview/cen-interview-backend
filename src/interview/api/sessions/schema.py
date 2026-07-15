@@ -11,9 +11,6 @@ from pydantic import (
 )
 
 
-_AUTO_SUBMIT_MIN_SILENCE_SECONDS = 2.0
-
-
 class MainQuestionProgress(BaseModel):
     """현재 메인 질문 구간의 진행 정보를 나타낸다.
 
@@ -137,11 +134,19 @@ class SubmitEventPayload(BaseModel):
             사용자가 제출한 답변 또는 STT 최종 전사문.
 
         submission_type:
-            사용자가 버튼으로 제출한 ``manual`` 또는 종료 침묵을 감지해
+            사용자가 직접 제출한 ``manual`` 또는 문맥 기반 완료 판단으로
             제출한 ``auto``.
 
+        completion_reason:
+            답변 제출을 확정한 이유. 수동 제출에서는 ``manual_button``을
+            사용한다. 자동 제출에서는 ``semantic_complete``,
+            ``explicit_finish``, ``user_confirmed`` 중 하나를 사용한다. 기존
+            수동 제출 요청과의 호환을 위해 생략하면 ``manual_button``으로
+            정규화한다.
+
         silence_duration_seconds:
-            자동 제출을 발생시킨 연속 침묵 시간. 수동 제출에서는 생략한다.
+            제출 직전에 관찰된 연속 침묵 시간. 자동 제출의 필수 조건이 아닌
+            선택적 관찰 값이며, 제출 방식과 관계없이 생략할 수 있다.
 
         metrics:
             음성 답변에서만 사용하는 선택적 전달 지표. 채팅 답변에서는
@@ -151,6 +156,12 @@ class SubmitEventPayload(BaseModel):
     action: Literal["submit"]
     text: str
     submission_type: Literal["manual", "auto"] = "manual"
+    completion_reason: Literal[
+        "manual_button",
+        "semantic_complete",
+        "explicit_finish",
+        "user_confirmed",
+    ] | None = None
     silence_duration_seconds: float | None = Field(
         default=None,
         ge=0,
@@ -180,24 +191,41 @@ class SubmitEventPayload(BaseModel):
         return normalized_text
 
     @model_validator(mode="after")
-    def validate_auto_submission(self) -> "SubmitEventPayload":
-        """자동 제출에 충분한 종료 침묵 시간이 포함됐는지 확인한다.
+    def validate_submission_reason(self) -> "SubmitEventPayload":
+        """제출 방식과 답변 완료 사유가 서로 일치하는지 확인한다.
+
+        기존 수동 제출 요청은 completion_reason을 보내지 않아도
+        ``manual_button``으로 정규화한다. 자동 제출은 문맥 기반 완료 판단,
+        명시적인 종료 표현 또는 사용자 확인 중 하나를 반드시 포함해야 한다.
+        silence_duration_seconds는 선택적인 관찰 값이므로 제출 조건으로
+        검사하지 않는다.
 
         Returns:
-            자동 제출 조건이 검증된 현재 payload.
+            제출 방식에 맞는 완료 사유가 검증된 현재 payload.
 
         Raises:
             ValueError:
-                자동 제출인데 침묵 시간이 없거나 2초보다 짧은 경우.
+                수동 제출에 자동 완료 사유가 지정됐거나 자동 제출에 유효한
+                자동 완료 사유가 없는 경우.
         """
-        if self.submission_type != "auto":
+        if self.submission_type == "manual":
+            if self.completion_reason is None:
+                self.completion_reason = "manual_button"
+                return self
+            if self.completion_reason != "manual_button":
+                raise ValueError(
+                    "수동 제출의 completion_reason은 manual_button이어야 합니다."
+                )
             return self
 
-        if (
-            self.silence_duration_seconds is None
-            or self.silence_duration_seconds < _AUTO_SUBMIT_MIN_SILENCE_SECONDS
-        ):
-            raise ValueError("자동 제출에는 2초 이상의 종료 침묵이 필요합니다.")
+        if self.completion_reason not in {
+            "semantic_complete",
+            "explicit_finish",
+            "user_confirmed",
+        }:
+            raise ValueError(
+                "자동 제출에는 유효한 completion_reason이 필요합니다."
+            )
         return self
 
 
@@ -268,8 +296,9 @@ class EventRequest(BaseModel):
         단계에서 사용할 수 있도록 보존한다.
 
         Returns:
-            submit 텍스트 또는 침묵 지속 시간이 정규화된 이벤트 payload.
-            검증 대상 action이 아니면 원본 payload의 복사본.
+            submit 텍스트, 제출 방식과 완료 사유 또는 침묵 지속 시간이
+            정규화된 이벤트 payload. 검증 대상 action이 아니면 원본
+            payload의 복사본.
 
         Raises:
             ValueError:
@@ -302,6 +331,7 @@ class EventRequest(BaseModel):
             normalized_payload["action"] = submitted.action
             normalized_payload["text"] = submitted.text
             normalized_payload["submission_type"] = submitted.submission_type
+            normalized_payload["completion_reason"] = submitted.completion_reason
             if submitted.silence_duration_seconds is not None:
                 normalized_payload["silence_duration_seconds"] = (
                     submitted.silence_duration_seconds
