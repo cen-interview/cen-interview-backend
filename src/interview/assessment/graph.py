@@ -30,6 +30,9 @@ from interview.schemas.question import Question, QuestionCategory
 from interview.schemas.signals import AnswerQualitySignal
 from functools import lru_cache
 
+ASSESSMENT_EVIDENCE_TOP_K = 5
+ASSESSMENT_EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
+
 class AssessmentState(BaseModel):
     """답변 1회 평가 과정에서 그래프 노드들이 공유하는 상태를 관리한다."""
     question: Question | None = None
@@ -82,8 +85,9 @@ def _build_same_topic_history_summary(history: list[AnswerAttempt]) -> str:
     )
 
 # 프로젝트 질문이면 관련 Evidence를 조회해 평가 상태에 저장한다.
-def retrieve_evidence(state: AssessmentState) -> AssessmentState:
-
+def retrieve_evidence(
+    state: AssessmentState,
+) -> AssessmentState:
     question = state.question
 
     if question is None:
@@ -93,12 +97,29 @@ def retrieve_evidence(state: AssessmentState) -> AssessmentState:
         state.evidence_chunks = []
         return state
 
-    state.evidence_chunks = search_evidence(
-        query=f"{question.text}\n{state.answer_text}",
+    search_query = (
+        f"[질문]\n{question.text}\n\n"
+        f"[지원자 답변]\n{state.answer_text}"
+    )
+
+
+    evidence_chunks = search_evidence(
+        query=search_query,
         topic=question.topic,
+        k=ASSESSMENT_EVIDENCE_TOP_K,
         user_id=state.user_id,
     )
+
+    reliable_chunks = [
+        chunk
+        for chunk in evidence_chunks
+        if chunk.confidence
+        >= ASSESSMENT_EVIDENCE_CONFIDENCE_THRESHOLD
+    ]
+
+    state.evidence_chunks = reliable_chunks
     return state
+
 
 # 답변을 LLM으로 1차 평가하고 JudgeResult를 상태에 저장한다.
 def judge(state: AssessmentState) -> AssessmentState:
@@ -296,8 +317,4 @@ rationale: {state.judge_result.rationale}
 accuracy: {state.judge_result.accuracy}
 sufficiency: {state.judge_result.sufficiency}
 
-[판단 요청]
-현재 답변이 이전 답변 또는 Evidence와 명확히 충돌하는지 판단하라.
-충돌이 명확하면 quality=confirm_negative로 반환하라.
-충돌이 명확하지 않으면 기존 1차 judge 결과를 유지할 수 있도록 conflict_suspected=false로 반환하라.
 """
