@@ -82,8 +82,9 @@ def _build_same_topic_history_summary(history: list[AnswerAttempt]) -> str:
     )
 
 # 프로젝트 질문이면 관련 Evidence를 조회해 평가 상태에 저장한다.
-def retrieve_evidence(state: AssessmentState) -> AssessmentState:
-
+def retrieve_evidence(
+    state: AssessmentState,
+) -> AssessmentState:
     question = state.question
 
     if question is None:
@@ -93,11 +94,44 @@ def retrieve_evidence(state: AssessmentState) -> AssessmentState:
         state.evidence_chunks = []
         return state
 
-    state.evidence_chunks = search_evidence(
-        query=f"{question.text}\n{state.answer_text}",
+    search_query = (
+        f"[질문]\n{question.text}\n\n"
+        f"[지원자 답변]\n{state.answer_text}"
+    )
+
+    # 검색에 전달되는 값
+    print("\n===== ASSESSMENT EVIDENCE SEARCH INPUT =====")
+    print("user_id:", state.user_id)
+    print("category:", question.category.value)
+    print("topic:", question.topic)
+    print("query:")
+    print(search_query)
+
+    evidence_chunks = search_evidence(
+        query=search_query,
         topic=question.topic,
         user_id=state.user_id,
     )
+
+    # 검색 결과
+    print("\n===== ASSESSMENT EVIDENCE SEARCH RESULT =====")
+    print("result_count:", len(evidence_chunks))
+
+    for index, chunk in enumerate(
+        evidence_chunks,
+        start=1,
+    ):
+        print(f"\n--- chunk {index} ---")
+        print("chunk_id:", chunk.chunk_id)
+        print("topic:", chunk.topic)
+        print("source_type:", chunk.source_type)
+        print("source_url:", chunk.source_url)
+        print("confidence:", chunk.confidence)
+
+        # 터미널이 너무 길어지지 않도록 앞부분만 출력
+        print("text:", chunk.text[:300])
+
+    state.evidence_chunks = evidence_chunks
     return state
 
 # 답변을 LLM으로 1차 평가하고 JudgeResult를 상태에 저장한다.
