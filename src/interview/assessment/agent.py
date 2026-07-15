@@ -60,7 +60,7 @@ from interview.schemas.report import (
     FinalReport,
     QualityTrace,
 )
-from interview.schemas.signals import AnswerQualitySignal
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.assessment.graph import AssessmentState, get_compiled_graph
 
 class AssessmentAgent:
@@ -143,6 +143,9 @@ class AssessmentAgent:
         result_state = get_compiled_graph().invoke(state)
 
         signal = result_state["final_signal"]
+
+        if signal.quality == AnswerQuality.OFF_TOPIC:
+            return signal
 
         # AnswerAttempt는 "질문 1개에 대한 답변 시도 1건"을 기록하는 객체다.
         # 이후 질문 세트 단위 점수 산정(score_question_set)에 사용된다.

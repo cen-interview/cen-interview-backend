@@ -89,6 +89,7 @@ class AnswerQuality(str, Enum):
     CONFIRM_NEGATIVE = "confirm_negative"
     TRAP_AVAILABLE = "trap_available"
     UNKNOWN = "unknown"
+    OFF_TOPIC = "off_topic"
 
 
 class ConflictType(str, Enum):

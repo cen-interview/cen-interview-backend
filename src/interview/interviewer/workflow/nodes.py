@@ -269,6 +269,19 @@ def evaluate_answer(state: SessionState, runtime: Any) -> dict[str, Any]:
     }
 
 
+def handle_off_topic(
+    state: SessionState | dict[str, Any],
+) -> dict[str, Any]:
+    """관련 없는 답변 이후 현재 질문을 다시 제시하도록 준비한다."""
+
+    return {
+        "turn_type": "off_topic",
+        "pending_event": None,
+        "pending_delivery_metrics": None,
+        "error": None,
+    }
+
+
 def ask_follow_up(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, Any]:
     """평가 신호의 추가 확인 대상을 바탕으로 꼬리 질문을 생성한다.
 

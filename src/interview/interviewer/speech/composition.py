@@ -273,6 +273,9 @@ def _select_utterance_preamble(
         return utterance_templates.greeting()
     if turn_type == "replay":
         return utterance_templates.replay()
+    if turn_type == "off_topic":
+        return utterance_templates.off_topic()
+
     if turn_type == "pause_prompt":
         return utterance_templates.pause_prompt()
     if turn_type == "closing":
