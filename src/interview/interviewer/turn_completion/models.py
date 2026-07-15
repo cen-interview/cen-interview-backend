@@ -204,3 +204,49 @@ class TurnCompletionResult(BaseModel):
     question_id: str = Field(min_length=1)
     revision: int = Field(ge=0)
     decision: TurnCompletionDecision
+
+
+class ConfirmationIntentDecision(BaseModel):
+    """답변 종료 확인에 대한 사용자의 응답 의도를 나타낸다.
+
+    Attributes:
+        intent:
+            현재 답변을 제출하려는 ``finish``, 계속 생각하거나 말하려는
+            ``continue``, 실질적인 추가 설명인 ``answer_content`` 또는
+            해석할 수 없는 ``unknown`` 중 하나.
+
+        answer_content:
+            intent가 ``answer_content``일 때 기존 답변에 이어 붙일 원문 기반
+            추가 내용. 그 외 intent에서는 None이어야 한다.
+
+        confidence:
+            확인 응답 의도 판단의 확신도. 0 이상 1 이하의 값이다.
+    """
+
+    intent: Literal["finish", "continue", "answer_content", "unknown"]
+    answer_content: str | None = None
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_answer_content(self) -> "ConfirmationIntentDecision":
+        """의도와 추가 답변 내용이 서로 일치하는지 확인한다.
+
+        Returns:
+            의도에 맞는 answer_content가 검증된 현재 판단 결과.
+
+        Raises:
+            ValueError:
+                answer_content 의도에 실질적인 내용이 없거나, 다른 의도에
+                answer_content가 포함된 경우.
+        """
+        if self.intent == "answer_content":
+            if self.answer_content is None or not self.answer_content.strip():
+                raise ValueError("추가 답변 의도에는 answer_content가 필요합니다.")
+            self.answer_content = self.answer_content.strip()
+            return self
+
+        if self.answer_content is not None:
+            raise ValueError(
+                "finish, continue, unknown 의도에는 answer_content를 포함할 수 없습니다."
+            )
+        return self
