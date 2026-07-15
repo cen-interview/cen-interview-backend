@@ -14,6 +14,7 @@ from interview.interviewer.session import SessionState
 from interview.interviewer.turn_completion.buffer import (
     VoiceTurnBuffer,
     VoiceTurnCompletionReason,
+    VoiceTurnRevisionConflictError,
 )
 from interview.interviewer.turn_completion.confirmation import (
     ConfirmationIntentClassifier,
@@ -321,6 +322,7 @@ class VoiceTurnCoordinator:
         self._confirmation_task: asyncio.Task[None] | None = None
         self._commit_task: asyncio.Task[None] | None = None
         self._invalid_confirmation_ids: set[str] = set()
+        self._accept_equal_reconnect_snapshot = False
         self._closed = False
         self._worker = LatestWinsTurnCompletionWorker(
             judge=judge or TurnCompletionJudge(),
@@ -335,21 +337,35 @@ class VoiceTurnCoordinator:
         return self._worker
 
     async def prepare_connection(self) -> VoiceTurnBuffer:
-        """재연결에 남은 이전 confirmation 상태를 안전하게 정리한다.
+        """재연결에 남은 이전 임시 판단·확인 상태를 안전하게 정리한다.
 
         WebSocket 단절 이후에는 확인 TTS 재생 상태를 신뢰할 수 없으므로 준비
-        또는 응답 대기 상태를 listening으로 되돌린다. 실제 시작된 확인 횟수와
-        현재 답변 텍스트는 유지한다.
+        또는 응답 대기 상태와 미실행 완료 후보를 listening으로 되돌린다. 실제
+        시작된 확인 횟수, 현재 답변 텍스트와 revision은 유지하고 같은 revision의
+        보존 snapshot을 연결 직후 한 번 다시 받을 수 있게 한다.
 
         Returns:
             재연결 정리 이후의 VoiceTurnBuffer 복사본.
         """
         self._cancel_confirmation_task()
+        self._cancel_commit_task()
         async with self._entry.lock:
-            confirmation_id = self._entry.buffer.cancel_confirmation()
+            buffer = self._entry.buffer
+            confirmation_id = buffer.cancel_confirmation()
             if confirmation_id is not None:
                 self._remember_invalid_confirmation(confirmation_id)
-            return self._entry.buffer.model_copy(deep=True)
+            if buffer.state == "complete_candidate":
+                buffer.resume_listening()
+            elif buffer.state == "listening" and (
+                buffer.latest_decision is not None
+                or buffer.pending_completion_reason is not None
+            ):
+                buffer.resume_listening()
+            self._accept_equal_reconnect_snapshot = (
+                buffer.state == "listening"
+                and (buffer.revision > 0 or bool(buffer.answer_text))
+            )
+            return buffer.model_copy(deep=True)
 
     async def handle_transcript_updated(
         self,
@@ -405,15 +421,41 @@ class VoiceTurnCoordinator:
         async with self._entry.lock:
             previous_state = self._entry.buffer.state
             cancelled_confirmation_id = self._entry.buffer.active_confirmation_id
-            updated = self._entry.buffer.update_transcript(
-                question_id=question_id,
-                revision=revision,
-                text=text,
-                speech_active=speech_active,
-                segment_final=segment_final,
-                answer_duration_seconds=answer_duration_seconds,
-                delivery_metrics=delivery_metrics,
+            reconnect_snapshot = (
+                self._accept_equal_reconnect_snapshot
+                and revision == self._entry.buffer.revision
             )
+            if reconnect_snapshot:
+                try:
+                    self._entry.buffer.synchronize_reconnect_snapshot(
+                        question_id=question_id,
+                        revision=revision,
+                        text=text,
+                        speech_active=speech_active,
+                        segment_final=segment_final,
+                        answer_duration_seconds=answer_duration_seconds,
+                        delivery_metrics=delivery_metrics,
+                    )
+                except VoiceTurnRevisionConflictError as exc:
+                    raise VoiceTurnCoordinatorError(
+                        "revision_conflict",
+                        str(exc),
+                        recoverable=True,
+                    ) from exc
+                updated = True
+                self._accept_equal_reconnect_snapshot = False
+            else:
+                updated = self._entry.buffer.update_transcript(
+                    question_id=question_id,
+                    revision=revision,
+                    text=text,
+                    speech_active=speech_active,
+                    segment_final=segment_final,
+                    answer_duration_seconds=answer_duration_seconds,
+                    delivery_metrics=delivery_metrics,
+                )
+                if updated:
+                    self._accept_equal_reconnect_snapshot = False
             if not updated:
                 raise VoiceTurnCoordinatorError(
                     "stale_revision",
@@ -629,7 +671,11 @@ class VoiceTurnCoordinator:
 
             decision = result.decision
             if decision.recommended_action == "keep_listening":
-                listening_reason = decision.reason_code
+                listening_reason = (
+                    "completion_judge_failed"
+                    if result.fallback_used
+                    else decision.reason_code
+                )
             elif decision.recommended_action == "auto_submit":
                 if self._can_start_auto_submit(buffer, decision):
                     completion_reason: VoiceTurnCompletionReason = (

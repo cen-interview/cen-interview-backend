@@ -414,10 +414,21 @@ async def voice_turn_websocket(
             )
 
         coordinator = build_coordinator(entry)
-        registry.attach_worker(
-            session_id=session_id,
-            worker=coordinator.worker,
-        )
+        async with entry.lock:
+            if entry.buffer.state == "committing":
+                await _send_fatal_error(
+                    websocket=websocket,
+                    send_model=send_model,
+                    code="turn_commit_in_progress",
+                    message=(
+                        "음성 답변 제출이 진행 중입니다. 잠시 후 다시 연결해 주세요."
+                    ),
+                )
+                return
+            registry.attach_worker(
+                session_id=session_id,
+                worker=coordinator.worker,
+            )
         await coordinator.prepare_connection()
         await send_model(
             ConnectionReadyMessage(

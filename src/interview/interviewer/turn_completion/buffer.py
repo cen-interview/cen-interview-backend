@@ -47,6 +47,10 @@ class VoiceTurnAlreadyCommittedError(VoiceTurnBufferError):
     """이미 제출된 음성 턴을 다시 변경하려 할 때 발생하는 오류."""
 
 
+class VoiceTurnRevisionConflictError(VoiceTurnBufferError):
+    """같은 revision에 서로 다른 전사문이 전달됐을 때 발생하는 오류."""
+
+
 class VoiceTurnBuffer(BaseModel):
     """아직 제출되지 않은 현재 음성 답변의 실시간 상태를 보관한다.
 
@@ -255,6 +259,90 @@ class VoiceTurnBuffer(BaseModel):
         self.pending_completion_reason = None
         self.state = "listening"
         return True
+
+    def synchronize_reconnect_snapshot(
+        self,
+        *,
+        question_id: str,
+        revision: int,
+        text: str,
+        speech_active: bool,
+        segment_final: bool,
+        answer_duration_seconds: float | None = None,
+        delivery_metrics: DeliveryMetrics | None = None,
+    ) -> None:
+        """재연결 직후 같은 revision의 보존된 전사 snapshot을 동기화한다.
+
+        일반 전사 갱신과 달리 같은 revision을 한 번 허용한다. revision이 같다는
+        것은 답변 내용도 동일하다는 뜻이므로 text가 다르면 충돌로 거절한다.
+        연결에 종속됐던 판단·확인·완료 후보 상태는 제거하고 listening으로
+        복구하되 답변과 확인 질문 사용 횟수는 유지한다.
+
+        Args:
+            question_id:
+                재연결한 현재 질문 ID.
+
+            revision:
+                프론트가 보존한 최신 누적 전사문 revision.
+
+            text:
+                프론트가 보존한 해당 revision의 누적 답변 원문.
+
+            speech_active:
+                재연결 snapshot 시점의 사용자 발화 여부.
+
+            segment_final:
+                재연결 snapshot의 STT 안정화 여부.
+
+            answer_duration_seconds:
+                답변 시작 후 경과한 선택적 시간.
+
+            delivery_metrics:
+                프론트가 보존한 선택적 음성 전달 지표.
+
+        Raises:
+            VoiceTurnQuestionMismatchError:
+                현재 buffer와 다른 질문 ID인 경우.
+
+            VoiceTurnRevisionConflictError:
+                revision이 현재값과 다르거나 같은 revision의 text가 다른 경우.
+
+            VoiceTurnAlreadyCommittedError:
+                이미 제출된 질문을 다시 동기화하려는 경우.
+
+            VoiceTurnBufferError:
+                답변 경과 시간이 음수이거나 유한하지 않은 경우.
+        """
+        self._validate_question_id(question_id)
+        self._ensure_not_committed()
+        self._ensure_not_committing()
+        if revision != self.revision:
+            raise VoiceTurnRevisionConflictError(
+                "재연결 snapshot revision이 서버 최신값과 다릅니다."
+            )
+        if text != self.answer_text:
+            raise VoiceTurnRevisionConflictError(
+                "같은 revision에 서로 다른 전사문을 적용할 수 없습니다."
+            )
+        if answer_duration_seconds is not None and (
+            answer_duration_seconds < 0 or not isfinite(answer_duration_seconds)
+        ):
+            raise VoiceTurnBufferError(
+                "답변 경과 시간은 0 이상의 유한한 값이어야 합니다."
+            )
+
+        self.speech_active = speech_active
+        self.segment_final = segment_final
+        if answer_duration_seconds is not None:
+            self.answer_duration_seconds = answer_duration_seconds
+        if delivery_metrics is not None:
+            self.latest_delivery_metrics = delivery_metrics
+        self.latest_decision_revision = None
+        self.latest_decision = None
+        self.active_confirmation_id = None
+        self.active_confirmation_revision = None
+        self.pending_completion_reason = None
+        self.state = "listening"
 
     def update_speech_activity(
         self,

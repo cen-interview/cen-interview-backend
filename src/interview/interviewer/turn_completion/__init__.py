@@ -17,6 +17,7 @@ from interview.interviewer.turn_completion.buffer import (
     VoiceTurnBufferError,
     VoiceTurnInvalidTransitionError,
     VoiceTurnQuestionMismatchError,
+    VoiceTurnRevisionConflictError,
     VoiceTurnCompletionReason,
     VoiceTurnState,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "VoiceTurnCommitResult",
     "VoiceTurnInvalidTransitionError",
     "VoiceTurnQuestionMismatchError",
+    "VoiceTurnRevisionConflictError",
     "VoiceTurnRegistry",
     "VoiceTurnRegistryEntry",
     "VoiceTurnState",

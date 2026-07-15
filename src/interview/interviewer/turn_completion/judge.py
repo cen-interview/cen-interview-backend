@@ -87,6 +87,7 @@ class TurnCompletionJudge:
             },
         ]
 
+        fallback_used = False
         try:
             structured_llm = self._llm.with_structured_output(
                 TurnCompletionDecision
@@ -102,11 +103,13 @@ class TurnCompletionJudge:
             )
         except Exception:
             decision = _keep_listening_fallback()
+            fallback_used = True
 
         return TurnCompletionResult(
             question_id=snapshot.question_id,
             revision=snapshot.revision,
             decision=decision,
+            fallback_used=fallback_used,
         )
 
 

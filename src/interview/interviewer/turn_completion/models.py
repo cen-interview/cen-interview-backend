@@ -204,11 +204,16 @@ class TurnCompletionResult(BaseModel):
 
         decision:
             LLM 구조화 출력 또는 안전한 fallback으로 만든 완료 판단.
+
+        fallback_used:
+            LLM timeout, 호출 오류 또는 구조화 출력 검증 실패로 안전한 계속
+            듣기 fallback을 사용했는지 여부.
     """
 
     question_id: str = Field(min_length=1)
     revision: int = Field(ge=0)
     decision: TurnCompletionDecision
+    fallback_used: bool = False
 
 
 class ConfirmationIntentDecision(BaseModel):
