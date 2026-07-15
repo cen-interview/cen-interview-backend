@@ -1,11 +1,16 @@
 """Notion/GitHub source가 등록된 링크 목록을 모두 순회하는지 검증한다."""
 
+from contextlib import asynccontextmanager
+
+import anyio
 import pytest
 
+from interview.evidence.mcp_client import EvidenceMcpClient, _extract_github_commit_shas
 from interview.evidence.sources import (
     GitHubSource,
     NotionSource,
     RawDoc,
+    _extract_added_patch_hunks,
     _extract_github_file_paths,
     _normalize_notion_link,
     _parse_github_repo_url,
@@ -69,15 +74,25 @@ class FakeMcpClient:
             },
             "commit_details": [
                 {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "commit abcdefabcdefabcdefabcdefabcdefabcdefabcd\n"
-                                "modified src/service.py"
-                            ),
-                        }
-                    ]
+                    "structuredContent": {
+                        "sha": "a" * 40,
+                        "author": {"login": "octocat"},
+                        "parents": [{"sha": "b" * 40}],
+                        "files": [
+                            {
+                                "filename": "src/service.py",
+                                "status": "modified",
+                                "patch": (
+                                    "@@ -1,2 +1,4 @@\n"
+                                    "-def send():\n"
+                                    "+def send_message(message):\n"
+                                    "+    websocket.send(message)\n"
+                                    "+    return message\n"
+                                    " context_line()"
+                                ),
+                            }
+                        ],
+                    }
                 }
             ],
         }
@@ -108,6 +123,158 @@ class FakeMcpClient:
             }
             for path in paths
         }
+
+
+def test_github_file_contents_respect_concurrency_limit(monkeypatch) -> None:
+    """파일 본문 조회는 설정된 한도 안에서 병렬 실행하고 입력 순서를 보존한다."""
+    active = 0
+    peak = 0
+
+    class FakeResult:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def model_dump(self, mode: str) -> dict:
+            _ = mode
+            return {"path": self.path}
+
+    class FakeSession:
+        async def call_tool(self, tool_name: str, arguments: dict) -> FakeResult:
+            nonlocal active, peak
+            _ = tool_name
+            active += 1
+            peak = max(peak, active)
+            await anyio.sleep(0.01)
+            active -= 1
+            return FakeResult(arguments["path"])
+
+    session = FakeSession()
+
+    @asynccontextmanager
+    async def fake_github_session():
+        yield session
+
+    monkeypatch.setattr(
+        "interview.evidence.mcp_client.settings.evidence_mcp_concurrency",
+        2,
+    )
+    client = EvidenceMcpClient(
+        github_mcp_url="https://example.com/mcp",
+        github_access_token="token",
+    )
+    monkeypatch.setattr(client, "_github_session", fake_github_session)
+    paths = ["src/a.py", "src/b.py", "src/c.py", "src/d.py"]
+
+    result = client.fetch_github_file_contents("owner", "repo", paths)
+
+    assert list(result) == paths
+    assert peak == 2
+
+
+def test_github_commit_details_request_full_patch() -> None:
+    """사용자 실제 변경 코드를 얻기 위해 commit detail은 full_patch를 요청한다."""
+    calls: list[tuple[str, dict]] = []
+
+    class FakeResult:
+        def model_dump(self, mode: str) -> dict:
+            _ = mode
+            return {"structuredContent": {"sha": "a" * 40}}
+
+    class FakeSession:
+        async def call_tool(self, tool_name: str, arguments: dict) -> FakeResult:
+            calls.append((tool_name, arguments))
+            return FakeResult()
+
+    client = EvidenceMcpClient(
+        github_mcp_url="https://example.com/mcp",
+        github_access_token="token",
+    )
+
+    async def fetch() -> list[dict]:
+        return await client._fetch_github_commit_details(
+            FakeSession(),
+            "owner",
+            "repo",
+            ["a" * 40],
+        )
+
+    result = anyio.run(fetch)
+
+    assert result
+    assert calls[0][1]["detail"] == "full_patch"
+
+
+def test_github_mcp_retries_nested_rate_limit_errors(monkeypatch) -> None:
+    """TaskGroup 내부 429도 설정된 백오프를 적용해 재시도한다."""
+    attempts = 0
+    delays: list[float] = []
+
+    async def rate_limited_then_success() -> dict:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise ExceptionGroup("mcp", [RuntimeError("429 Too Many Requests")])
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "interview.evidence.mcp_client.settings.evidence_mcp_max_attempts",
+        3,
+    )
+    monkeypatch.setattr(
+        "interview.evidence.mcp_client.settings.evidence_mcp_retry_base_seconds",
+        0.5,
+    )
+    monkeypatch.setattr("interview.evidence.mcp_client.time.sleep", delays.append)
+    client = EvidenceMcpClient(
+        github_mcp_url="https://example.com/mcp",
+        github_access_token="token",
+    )
+
+    result = client._run_github_with_retry(rate_limited_then_success)
+
+    assert result == {"ok": True}
+    assert attempts == 3
+    assert delays == [0.5, 1.0]
+
+
+def test_extract_github_commit_shas_ignores_parent_and_tree_shas() -> None:
+    """list 응답에서는 commit 레코드의 sha만 수집해야 한다."""
+    commit_sha = "a" * 40
+    parent_sha = "b" * 40
+    tree_sha = "c" * 40
+    response = {
+        "structuredContent": {
+            "commits": [
+                {
+                    "sha": commit_sha,
+                    "parents": [{"sha": parent_sha}],
+                    "commit": {"tree": {"sha": tree_sha}},
+                }
+            ]
+        }
+    }
+
+    assert _extract_github_commit_shas(response) == [commit_sha]
+
+
+def test_extract_added_patch_hunks_separates_changes_across_context() -> None:
+    """같은 diff hunk에서도 unchanged context로 떨어진 추가 코드는 분리한다."""
+    contributions = _extract_added_patch_hunks(
+        "a" * 40,
+        "src/service.py",
+        (
+            "@@ -10,4 +10,6 @@\n"
+            "+first_added()\n"
+            " existing_line()\n"
+            "+second_added()"
+        ),
+    )
+
+    assert [item.text for item in contributions] == ["first_added()", "second_added()"]
+    assert [(item.start_line, item.end_line) for item in contributions] == [
+        (10, 10),
+        (12, 12),
+    ]
 
 
 def test_notion_source_fetches_all_registered_links(monkeypatch) -> None:
@@ -328,7 +495,7 @@ def test_github_response_to_raw_docs_skips_download_status_readme() -> None:
 
 
 def test_github_source_creates_code_docs_with_ownership() -> None:
-    """선별된 코드 파일 RawDoc에 사용자 기여 여부 meta를 표시한다."""
+    """현재 파일은 context로, 검증된 추가 코드는 별도 user_touched로 만든다."""
     client = FakeMcpClient()
 
     docs = GitHubSource(mcp_client=client).fetch_repos(
@@ -337,17 +504,109 @@ def test_github_source_creates_code_docs_with_ownership() -> None:
     )
 
     code_docs = [doc for doc in docs if doc.meta.get("doc_type") == "code"]
+    context_docs = [doc for doc in code_docs if doc.meta["ownership"] == "repo_context"]
+    contribution_docs = [doc for doc in code_docs if doc.meta["ownership"] == "user_touched"]
+    context_by_path = {doc.meta["file_path"]: doc for doc in context_docs}
 
-    assert [doc.meta["file_path"] for doc in code_docs] == [
+    assert set(context_by_path) == {
         "src/service.py",
         "src/main.py",
-    ]
-    assert code_docs[0].meta["ownership"] == "user_touched"
-    assert code_docs[0].meta["author_login"] == "octocat"
-    assert code_docs[0].meta["commit_count"] == 1
-    assert code_docs[0].raw_text.startswith("// contents for example/project/src/service.py")
-    assert code_docs[1].meta["ownership"] == "repo_context"
-    assert "tests/test_service.py" not in [doc.meta["file_path"] for doc in code_docs]
+        "tests/test_service.py",
+    }
+    assert context_by_path["src/service.py"].raw_text.startswith(
+        "// contents for example/project/src/service.py"
+    )
+    assert len(contribution_docs) == 1
+    contribution = contribution_docs[0]
+    assert contribution.meta["file_path"] == "src/service.py"
+    assert contribution.meta["author_login"] == "octocat"
+    assert contribution.meta["commit_count"] == 1
+    assert contribution.meta["last_commit_sha"] == "a" * 40
+    assert contribution.raw_text == (
+        "def send_message(message):\n"
+        "    websocket.send(message)\n"
+        "    return message"
+    )
+    assert "/blob/" + "a" * 40 in contribution.source_url
+    assert contribution.source_url.endswith("#L1-L3")
+
+
+def test_github_source_excludes_other_author_and_merge_contributions() -> None:
+    """다른 작성자와 merge commit은 user_touched 근거로 저장하지 않는다."""
+
+    class UnverifiedCommitClient(FakeMcpClient):
+        def call_github_tool(self, *args, **kwargs) -> dict:
+            response = super().call_github_tool(*args, **kwargs)
+            base_file = {
+                "filename": "src/service.py",
+                "status": "modified",
+                "patch": "@@ -1 +1 @@\n-old\n+def changed_by_commit(): return True",
+            }
+            response["commit_details"] = [
+                {
+                    "structuredContent": {
+                        "sha": "c" * 40,
+                        "author": {"login": "someone-else"},
+                        "parents": [{"sha": "d" * 40}],
+                        "files": [base_file],
+                    }
+                },
+                {
+                    "structuredContent": {
+                        "sha": "e" * 40,
+                        "author": {"login": "octocat"},
+                        "parents": [{"sha": "f" * 40}, {"sha": "1" * 40}],
+                        "files": [base_file],
+                    }
+                },
+            ]
+            return response
+
+    docs = GitHubSource(mcp_client=UnverifiedCommitClient()).fetch_repos(
+        ["https://github.com/example/project"],
+        github_login="octocat",
+    )
+
+    assert not [doc for doc in docs if doc.meta.get("ownership") == "user_touched"]
+    assert [doc for doc in docs if doc.meta.get("ownership") == "repo_context"]
+
+
+def test_github_source_accepts_verified_commit_when_mcp_omits_parents() -> None:
+    """실제 GitHub MCP처럼 parents가 없어도 작성자와 patch가 검증되면 저장한다."""
+
+    class ParentlessCommitClient(FakeMcpClient):
+        def call_github_tool(self, *args, **kwargs) -> dict:
+            response = super().call_github_tool(*args, **kwargs)
+            record = response["commit_details"][0]["structuredContent"]
+            record.pop("parents")
+            record["commit"] = {"message": "feat: implement websocket message send"}
+            return response
+
+    docs = GitHubSource(mcp_client=ParentlessCommitClient()).fetch_repos(
+        ["https://github.com/example/project"],
+        github_login="octocat",
+    )
+
+    assert [doc for doc in docs if doc.meta.get("ownership") == "user_touched"]
+
+
+def test_github_source_excludes_merge_message_when_mcp_omits_parents() -> None:
+    """parents가 없는 응답은 merge commit 메시지로 병합 기록을 제외한다."""
+
+    class ParentlessMergeClient(FakeMcpClient):
+        def call_github_tool(self, *args, **kwargs) -> dict:
+            response = super().call_github_tool(*args, **kwargs)
+            record = response["commit_details"][0]["structuredContent"]
+            record.pop("parents")
+            record["commit"] = {"message": "Merge pull request #10 from feature/chat"}
+            return response
+
+    docs = GitHubSource(mcp_client=ParentlessMergeClient()).fetch_repos(
+        ["https://github.com/example/project"],
+        github_login="octocat",
+    )
+
+    assert not [doc for doc in docs if doc.meta.get("ownership") == "user_touched"]
 
 
 def test_extract_github_file_paths_restores_directory_context() -> None:
@@ -396,3 +655,25 @@ def test_select_github_code_paths_excludes_seed_and_dummy_sql() -> None:
     assert _select_github_code_paths(paths, touched_files={}, max_files=10) == [
         "bugbug/src/main/java/com/example/bugbug/user/UserService.java",
     ]
+
+
+def test_select_github_code_paths_uses_zero_as_unlimited() -> None:
+    """파일 제한이 0이면 테스트를 포함한 모든 유효 소스를 반환한다."""
+    paths = [
+        "src/main.py",
+        "src/pipeline.py",
+        "src/model.py",
+        "tests/test_pipeline.py",
+        "node_modules/library/index.js",
+    ]
+    touched = {"src/pipeline.py": ["a" * 40]}
+
+    selected = _select_github_code_paths(paths, touched_files=touched, max_files=0)
+
+    assert selected[0] == "src/pipeline.py"
+    assert set(selected) == {
+        "src/pipeline.py",
+        "src/main.py",
+        "src/model.py",
+        "tests/test_pipeline.py",
+    }
