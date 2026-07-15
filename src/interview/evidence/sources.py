@@ -9,7 +9,7 @@ import base64
 import json
 import re
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from interview.config import settings
 from interview.evidence.mcp_client import EvidenceMcpClient
@@ -24,6 +24,17 @@ class RawDoc:
     title: str
     raw_text: str
     meta: dict                # 주차/날짜/파일경로 등 소스가 아는 정보
+
+
+@dataclass(frozen=True)
+class _GitHubContribution:
+    """검증된 사용자 commit에서 추출한 단일 diff hunk."""
+
+    commit_sha: str
+    file_path: str
+    text: str
+    start_line: int
+    end_line: int
 
 
 def _notion_response_to_raw_docs(response: dict, root_link: str) -> list[RawDoc]:
@@ -271,6 +282,7 @@ def _github_response_to_raw_docs(response: dict, repo_link: str) -> list[RawDoc]
                     "repo": repo_name,
                     "doc_type": "README",
                     "file_path": "README.md",
+                    "ownership": "repo_context",
                 },
             )
         )
@@ -287,7 +299,11 @@ def _github_code_response_to_raw_docs(
     touched_files: dict[str, list[str]],
     github_login: str | None,
 ) -> list[RawDoc]:
-    """선별된 GitHub 코드 파일 응답을 code RawDoc 목록으로 변환한다."""
+    """현재 repository 코드 파일을 프로젝트 문맥 RawDoc으로 변환한다.
+
+    파일이 사용자 commit에 등장했더라도 현재 파일 전체를 사용자가 작성했다고
+    볼 수 없다. 실제 사용자 기여는 full patch에서 별도 RawDoc으로 생성한다.
+    """
     repo_name = f"{owner}/{repo}"
     docs: list[RawDoc] = []
 
@@ -296,7 +312,6 @@ def _github_code_response_to_raw_docs(
         if not raw_text or len(raw_text) > settings.evidence_github_max_file_chars:
             continue
 
-        commit_shas = touched_files.get(file_path, [])
         docs.append(
             RawDoc(
                 source_url=f"{repo_link}/blob/HEAD/{file_path}",
@@ -308,11 +323,8 @@ def _github_code_response_to_raw_docs(
                     "doc_type": "code",
                     "file_path": file_path,
                     "language": _infer_github_language(file_path),
-                    "ownership": "user_touched" if commit_shas else "repo_context",
-                    "author_login": github_login,
-                    "commit_shas": commit_shas,
-                    "commit_count": len(commit_shas),
-                    "last_commit_sha": commit_shas[0] if commit_shas else None,
+                    "ownership": "repo_context",
+                    "related_user_commit_shas": touched_files.get(file_path, []),
                 },
             )
         )
@@ -496,14 +508,11 @@ EXCLUDED_PATH_PARTS = {
     ".idea",
     ".vscode",
     "__pycache__",
-    "__tests__",
     "build",
     "dist",
     "generated",
     "node_modules",
     "target",
-    "test",
-    "tests",
 }
 
 EXCLUDED_FILENAMES = {
@@ -548,38 +557,215 @@ def _infer_github_language(path: str) -> str | None:
     return None
 
 
-def _build_github_touched_file_map(commit_details: object) -> dict[str, list[str]]:
-    """get_commit detail 응답에서 파일별 commit sha 목록을 만든다."""
+def _github_contributions_to_raw_docs(
+    *,
+    repo_link: str,
+    owner: str,
+    repo: str,
+    commit_details: object,
+    github_login: str | None,
+) -> tuple[list[RawDoc], dict[str, list[str]]]:
+    """검증된 사용자 commit의 추가 코드만 RawDoc과 파일 map으로 만든다."""
+    contributions = _extract_github_contributions(commit_details, github_login)
+    repo_name = f"{owner}/{repo}"
+    docs: list[RawDoc] = []
     touched: dict[str, list[str]] = {}
-    for detail in commit_details if isinstance(commit_details, list) else []:
-        if not isinstance(detail, dict) or detail.get("isError"):
-            continue
-        text = _extract_mcp_text(detail)
-        sha = _extract_first_sha(text)
-        for file_path in _extract_github_file_paths_from_commit_text(text):
-            if not _is_github_source_file(file_path):
+    for contribution in contributions:
+        shas = touched.setdefault(contribution.file_path, [])
+        if contribution.commit_sha not in shas:
+            shas.append(contribution.commit_sha)
+
+        encoded_path = quote(contribution.file_path, safe="/")
+        source_url = (
+            f"{repo_link}/blob/{contribution.commit_sha}/{encoded_path}"
+            f"#L{contribution.start_line}-L{contribution.end_line}"
+        )
+        docs.append(
+            RawDoc(
+                source_url=source_url,
+                source_type="github",
+                title=(
+                    f"{repo_name} {contribution.file_path} "
+                    f"user contribution {contribution.commit_sha[:7]}"
+                ),
+                raw_text=contribution.text,
+                meta={
+                    "repo": repo_name,
+                    "doc_type": "code",
+                    "file_path": contribution.file_path,
+                    "language": _infer_github_language(contribution.file_path),
+                    "ownership": "user_touched",
+                    "author_login": github_login,
+                    "commit_shas": [contribution.commit_sha],
+                    "commit_count": 1,
+                    "last_commit_sha": contribution.commit_sha,
+                    "start_line": contribution.start_line,
+                    "end_line": contribution.end_line,
+                },
+            )
+        )
+    return docs, touched
+
+
+def _extract_github_contributions(
+    commit_details: object,
+    github_login: str | None,
+) -> list[_GitHubContribution]:
+    """작성자 일치·비병합 commit의 patch에서 추가 코드 hunk를 추출한다."""
+    if not github_login:
+        return []
+
+    contributions: list[_GitHubContribution] = []
+    details = commit_details if isinstance(commit_details, list) else []
+    for detail in details:
+        for record in _extract_github_commit_records(detail):
+            sha = _full_sha(record.get("sha"))
+            author = record.get("author")
+            author_login = author.get("login") if isinstance(author, dict) else None
+            parents = record.get("parents")
+            files = record.get("files")
+            if (
+                sha is None
+                or not isinstance(author_login, str)
+                or author_login.casefold() != github_login.casefold()
+                or (isinstance(parents, list) and len(parents) > 1)
+                or _looks_like_merge_commit(record)
+                or not isinstance(files, list)
+            ):
                 continue
-            touched.setdefault(file_path, [])
-            if sha and sha not in touched[file_path]:
-                touched[file_path].append(sha)
-    return touched
+
+            for file_info in files:
+                if not isinstance(file_info, dict):
+                    continue
+                file_path = file_info.get("filename") or file_info.get("path")
+                patch = file_info.get("patch")
+                status = str(file_info.get("status") or "").lower()
+                if (
+                    not isinstance(file_path, str)
+                    or not _is_github_source_file(file_path)
+                    or not isinstance(patch, str)
+                    or status in {"removed", "deleted"}
+                ):
+                    continue
+                contributions.extend(_extract_added_patch_hunks(sha, file_path, patch))
+    return contributions
 
 
-def _extract_first_sha(text: str) -> str | None:
-    match = re.search(r"\b[0-9a-f]{40}\b", text, re.IGNORECASE)
-    return match.group(0) if match else None
+def _extract_github_commit_records(response: object) -> list[dict]:
+    """MCP structuredContent 또는 JSON text에서 commit detail 레코드를 찾는다."""
+    if not isinstance(response, dict) or response.get("isError"):
+        return []
+
+    payloads: list[object] = []
+    structured = response.get("structuredContent")
+    if structured is not None:
+        payloads.append(structured)
+    for item in response.get("content", []):
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        try:
+            payloads.append(json.loads(item["text"]))
+        except json.JSONDecodeError:
+            continue
+
+    records: list[dict] = []
+    for payload in payloads:
+        records.extend(_find_commit_detail_records(payload))
+    return records
 
 
-def _extract_github_file_paths_from_commit_text(text: str) -> list[str]:
-    """commit detail 텍스트에서 변경 파일 경로를 추출한다."""
-    paths: list[str] = []
-    seen: set[str] = set()
-    for match in re.finditer(r"[\w./@+\-=]+(?:\.[A-Za-z0-9]+)", text):
-        path = match.group(0).strip("./")
-        if _is_github_source_file(path) and path not in seen:
-            seen.add(path)
-            paths.append(path)
-    return paths
+def _find_commit_detail_records(value: object) -> list[dict]:
+    """알려진 wrapper 안에서 files를 포함한 commit detail 객체를 찾는다."""
+    if isinstance(value, list):
+        return [record for item in value for record in _find_commit_detail_records(item)]
+    if not isinstance(value, dict):
+        return []
+    if "sha" in value and "files" in value:
+        return [value]
+
+    records: list[dict] = []
+    for key in ("data", "result", "commit", "commits", "items"):
+        child = value.get(key)
+        if isinstance(child, (dict, list)):
+            records.extend(_find_commit_detail_records(child))
+    return records
+
+
+def _looks_like_merge_commit(record: dict) -> bool:
+    """parents 미제공 MCP 응답에서도 일반적인 merge commit을 제외한다."""
+    commit = record.get("commit")
+    message = commit.get("message") if isinstance(commit, dict) else None
+    if not isinstance(message, str):
+        return False
+    first_line = message.strip().splitlines()[0] if message.strip() else ""
+    return bool(
+        re.match(
+            r"^(?:merge\b|merged\b|merge pull request\b)",
+            first_line,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _extract_added_patch_hunks(
+    commit_sha: str,
+    file_path: str,
+    patch: str,
+) -> list[_GitHubContribution]:
+    """unified diff의 각 hunk에서 추가·수정 후 코드만 추출한다."""
+    contributions: list[_GitHubContribution] = []
+    lines: list[str] = []
+    start_line = 0
+    current_line = 0
+    last_added_line = 0
+
+    def flush() -> None:
+        nonlocal lines, start_line, last_added_line
+        text = "\n".join(lines).strip()
+        if text:
+            contributions.append(
+                _GitHubContribution(
+                    commit_sha=commit_sha,
+                    file_path=file_path,
+                    text=text,
+                    start_line=start_line,
+                    end_line=max(start_line, last_added_line),
+                )
+            )
+        lines = []
+        start_line = 0
+        last_added_line = 0
+
+    for line in patch.replace("\r\n", "\n").splitlines():
+        header = re.match(r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@", line)
+        if header:
+            flush()
+            current_line = int(header.group(1))
+            continue
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            if not lines:
+                start_line = current_line
+            lines.append(line[1:])
+            last_added_line = current_line
+            current_line += 1
+            continue
+        if line.startswith(" "):
+            flush()
+            current_line += 1
+            continue
+        if line.startswith("-") or line.startswith("\\ No newline"):
+            continue
+
+    flush()
+    return contributions
+
+
+def _full_sha(value: object) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value, re.IGNORECASE):
+        return None
+    return value.lower()
 
 
 def _select_github_code_paths(
@@ -587,8 +773,13 @@ def _select_github_code_paths(
     touched_files: dict[str, list[str]],
     max_files: int | None = None,
 ) -> list[str]:
-    """전체 핵심 소스와 사용자 touched 파일을 함께 고려해 코드 파일을 선별한다."""
-    max_files = max_files or settings.evidence_github_max_code_files
+    """전체 소스와 사용자 touched 파일을 함께 고려해 코드 파일을 선별한다.
+
+    ``max_files``가 0 이하이면 지원 확장자와 제외 정책을 통과한 파일을 모두
+    반환한다. 순서는 사용자 변경 파일을 먼저 두고 나머지 repository 문맥을
+    우선순위에 따라 이어 붙인다.
+    """
+    limit = settings.evidence_github_max_code_files if max_files is None else max_files
     candidates = [path for path in tree_paths if _is_github_source_file(path)]
     touched_candidates = [path for path in touched_files if path in candidates]
 
@@ -598,12 +789,12 @@ def _select_github_code_paths(
             selected.append(path)
 
     for path in sorted(candidates, key=_github_path_priority):
-        if len(selected) >= max_files:
+        if limit > 0 and len(selected) >= limit:
             break
         if path not in selected:
             selected.append(path)
 
-    return selected[:max_files]
+    return selected if limit <= 0 else selected[:limit]
 
 
 def _github_path_priority(path: str) -> tuple[int, int, int, int, int, str]:
@@ -896,13 +1087,20 @@ class GitHubSource:
             )
             raw_docs.extend(_github_response_to_raw_docs(response, canonical_url))
 
-            touched_files = _build_github_touched_file_map(response.get("commit_details"))
+            contribution_docs, touched_files = _github_contributions_to_raw_docs(
+                repo_link=canonical_url,
+                owner=owner,
+                repo=repo,
+                commit_details=response.get("commit_details"),
+                github_login=github_login,
+            )
             tree_paths = _extract_github_file_paths(response.get("tree"))
             selected_paths = _select_github_code_paths(
                 tree_paths,
                 touched_files,
                 max_files=settings.evidence_github_max_code_files,
             )
+            raw_docs.extend(contribution_docs)
             if not selected_paths:
                 continue
 
