@@ -20,6 +20,9 @@
     GET /api/interview-results:
         list[InterviewResultSummary] 반환.
 
+    GET /api/interview-results/history:
+        마이페이지용 InterviewHistoryResponse 반환.
+
     GET /api/interview-results/latest:
         InterviewResultResponse 반환.
 
@@ -42,6 +45,34 @@ class InterviewResultSummary(BaseModel):
     session_id: int
     overall_score: float
     created_at: datetime
+
+
+class InterviewHistorySummary(BaseModel):
+    """마이페이지에 표시할 완료 면접 요약 통계."""
+
+    total_practice_count: int = Field(ge=0)
+    average_score: int | None = Field(default=None, ge=0, le=100)
+
+
+class InterviewHistoryItem(BaseModel):
+    """마이페이지 면접 연습 기록 한 건."""
+
+    result_id: int
+    session_id: str
+    completed_at: datetime
+    mode: str
+    overall_score: float = Field(ge=0.0, le=100.0)
+
+
+class InterviewHistoryResponse(BaseModel):
+    """요약 통계와 페이지 단위 면접 기록을 함께 반환하는 응답."""
+
+    summary: InterviewHistorySummary
+    items: list[InterviewHistoryItem] = Field(default_factory=list)
+    page: int = Field(ge=1)
+    size: int = Field(ge=1)
+    total: int = Field(ge=0)
+
 
 # 특정 면접의 최종 리포트를 포함하는 상세 응답.
 class InterviewResultResponse(BaseModel):
