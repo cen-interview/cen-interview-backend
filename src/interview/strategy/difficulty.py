@@ -13,7 +13,7 @@ _DIFFICULTY_ORDER = [Difficulty.EASY, Difficulty.MEDIUM, Difficulty.HARD]
 # 연속 판단 기준 횟수. EASY 난이도 연속 출제 or SUFFICIENT 신호 연속 감지 시 상승.
 _CONSECUTIVE_THRESHOLD = 2
 # 해당 값 이상 메인 질문이 진행됐는데 HARD가 한 번도 안 나왔으면 강제로 HARD를 출제
-_MIN_QUESTIONS_BEFORE_FORCE_HARD = 5
+_MIN_QUESTIONS_BEFORE_FORCE_HARD = 4
 
 def _step_up(current: Difficulty) -> Difficulty:
     """난이도를 한 단계 올린다 (HARD면 유지)."""
