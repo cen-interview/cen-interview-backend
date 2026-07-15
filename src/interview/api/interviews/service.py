@@ -60,6 +60,7 @@ from interview.api.interviews.model import (
     InterviewSessionStatus,
 )
 from interview.schemas.events import Mode
+from sqlalchemy.dialects.postgresql import insert
 
 # 런타임 세션 ID와 사용자 ID로 DB 면접 세션을 조회한다.
 def get_interview_session_by_runtime_id(
@@ -86,8 +87,23 @@ def create_interview_session_record(
     user_id: int,
     mode: Mode,
 ) -> InterviewSession:
-    """면접 시작 시 DB 세션을 생성하고 발급된 정수 ID를 반환한다."""
+    now = datetime.now(timezone.utc)
 
+    # 기존 진행 세션 종료
+    db.query(InterviewSession).filter(
+        InterviewSession.user_id == user_id,
+        InterviewSession.status
+        == InterviewSessionStatus.IN_PROGRESS,
+    ).update(
+        {
+            InterviewSession.status:
+                InterviewSessionStatus.CANCELLED,
+            InterviewSession.ended_at: now,
+        },
+        synchronize_session=False,
+    )
+
+    # 새 세션 생성
     session = InterviewSession(
         runtime_session_id=runtime_session_id,
         user_id=user_id,
@@ -141,22 +157,38 @@ def save_interview_result(
     if existing is not None:
         return existing
 
-    result = InterviewResult(
-        session_id=interview_session.session_id,
-        overall_score=report.overall_score,
-        final_report_json=report.model_dump(mode="json"),
-        topic_scores_json=topic_scores,
+    statement = (
+        insert(InterviewResult)
+        .values(
+            session_id=interview_session.session_id,
+            overall_score=report.overall_score,
+            final_report_json=report.model_dump(mode="json"),
+            topic_scores_json=topic_scores,
+        )
+        .on_conflict_do_nothing(
+            index_elements=[InterviewResult.session_id],
+        )
     )
 
     try:
         interview_session.status = InterviewSessionStatus.COMPLETED
         interview_session.ended_at = datetime.now(timezone.utc)
-        db.add(result)
+
+        db.execute(statement)
         db.commit()
-        db.refresh(result)
+
     except Exception:
         db.rollback()
         raise
+
+    result = (
+        db.query(InterviewResult)
+        .filter(
+            InterviewResult.session_id
+            == interview_session.session_id
+        )
+        .one()
+    )
 
     return result
 

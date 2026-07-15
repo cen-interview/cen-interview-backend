@@ -180,9 +180,13 @@ def _decide_sections_with_llm(
                     "RawDoc 한 건에서 면접 질문 생성에 가치 있는 섹션만 고릅니다.",
                     "목차, 빈 템플릿, 단순 체크리스트, 잡담은 제외합니다.",
                     "각 selected section마다 sections에 section_id, topic, confidence를 반환합니다.",
-                    "topic은 제공한 topic_candidates 중 하나를 우선 사용합니다.",
-                    "후보가 맞지 않을 때만 2~4단어의 일반적인 기술 주제를 사용합니다.",
+                    "topic은 언어·프레임워크 이름이 아니라 해당 섹션이 구현한 기능과 목적을 나타냅니다.",
+                    "java, python, javascript, spring 같은 언어·도구 이름만 topic으로 반환하지 않습니다.",
+                    "예: '웹소켓 실시간 통신', 'crud 데이터 처리', 'langchain 에이전트 워크플로', 'jwt 인증'.",
+                    "제공한 topic_candidates가 본문과 맞으면 우선 사용하고, 더 정확한 경우 2~6단어의 기능 중심 topic을 만듭니다.",
                     "문서 전체에 하나의 topic을 재사용하지 말고 각 섹션 본문을 기준으로 판단합니다.",
+                    "ownership이 user_touched이면 검증된 사용자 commit의 추가 코드입니다.",
+                    "이 경우 짧은 diff 조각의 문법보다 함수·클래스와 호출 대상이 수행하는 목적을 topic으로 정합니다.",
                     "doc_type은 code, README, troubleshooting, retrospective, weekly_note, repository_meta 중 가장 가까운 값을 사용합니다.",
                     "반드시 제공된 section_id만 valuable_section_ids에 넣습니다.",
                 ]
@@ -334,6 +338,7 @@ def _preview(text: str, max_chars: int = 900) -> str:
 
 MIN_TEXT_CHARS = 50
 MIN_CODE_CHARS = 40
+MIN_USER_CONTRIBUTION_CHARS = 20
 EXCLUDED_DOC_TYPES = {
     "directory_tree",
 }
@@ -354,32 +359,37 @@ NOISE_LINE_PATTERNS = [
     re.compile(r"^-?\s*실행 결과\s*:?\s*$"),
 ]
 
-TECH_KEYWORDS = [
-    ("spring security", "spring security"),
-    ("spring boot", "spring boot"),
-    ("websocket", "websocket"),
-    ("oauth", "oauth"),
-    ("jwt", "jwt"),
-    ("n+1", "jpa n+1"),
-    ("jpa", "jpa"),
-    ("redis", "redis"),
-    ("docker", "docker"),
-    ("kubernetes", "kubernetes"),
-    ("sql", "sql"),
-    ("mysql", "mysql"),
-    ("postgres", "postgresql"),
-    ("java", "java"),
-    ("python", "python"),
-    ("typescript", "typescript"),
-    ("javascript", "javascript"),
-    ("rag", "rag"),
-    ("mcp", "mcp"),
-    ("troubleshooting", "troubleshooting"),
-    ("트러블슈팅", "troubleshooting"),
-    ("인증", "auth"),
-    ("시큐리티", "spring security"),
-    ("웹소켓", "websocket"),
-]
+LANGUAGE_ONLY_TOPICS = {
+    "c",
+    "c++",
+    "csharp",
+    "css",
+    "go",
+    "html",
+    "java",
+    "javascript",
+    "kotlin",
+    "python",
+    "rust",
+    "scss",
+    "sql",
+    "typescript",
+}
+
+GENERIC_TOPICS = {"code", "general", "project", "구현", "프로젝트", "프로젝트 구현"}
+
+BARE_TOPIC_ALIASES = {
+    "jwt": "jwt 인증",
+    "oauth": "oauth 인증 연동",
+    "websocket": "웹소켓 실시간 통신",
+    "웹소켓": "웹소켓 실시간 통신",
+    "jpa": "jpa 데이터 접근",
+    "jpa n+1": "jpa 조회 최적화",
+    "langchain": "langchain 워크플로",
+    "rag": "rag 검색 증강 생성",
+    "mcp": "mcp 도구 연동",
+    "spring security": "spring security 인증",
+}
 
 
 def _clean_evidence_text(raw_text: str) -> str:
@@ -440,7 +450,10 @@ def _has_interview_value(text: str, doc: RawDoc) -> bool:
     if _is_image_only_result(text):
         return False
 
-    min_chars = MIN_CODE_CHARS if doc.meta.get("doc_type") == "code" else MIN_TEXT_CHARS
+    if doc.meta.get("ownership") == "user_touched":
+        min_chars = MIN_USER_CONTRIBUTION_CHARS
+    else:
+        min_chars = MIN_CODE_CHARS if doc.meta.get("doc_type") == "code" else MIN_TEXT_CHARS
     if len(text.strip()) < min_chars:
         return False
 
@@ -464,12 +477,11 @@ def _is_image_only_result(text: str) -> bool:
 
 
 def _infer_topic(doc: RawDoc, text: str) -> str:
-    """RawDoc 메타데이터와 본문에서 검색 필터에 쓸 topic을 추정한다."""
+    """본문에서 구현 기능을 나타내는 검색 topic을 추정한다."""
     candidates = [
-        doc.meta.get("topic"),
-        _topic_from_keywords(f"{doc.title}\n{text}"),
+        *_semantic_topic_candidates(f"{doc.title}\n{text}"),
+        _meaningful_meta_topic(doc.meta.get("topic")),
         _topic_from_github_meta(doc),
-        doc.title,
     ]
 
     for candidate in candidates:
@@ -477,21 +489,21 @@ def _infer_topic(doc: RawDoc, text: str) -> str:
         if topic:
             return topic
 
-    return "general"
+    return "프로젝트 구현"
 
 
 def _topic_candidates(doc: RawDoc, text: str) -> list[str]:
-    """LLM이 임의의 topic을 만들지 않도록 섹션별 후보를 제공한다."""
+    """LLM에 언어명이 아닌 구현 기능 중심의 섹션별 후보를 제공한다."""
     candidates: list[str] = []
     for candidate in (
-        doc.meta.get("topic"),
-        _topic_from_keywords(f"{doc.title}\n{text}"),
+        *_semantic_topic_candidates(f"{doc.title}\n{text}"),
+        _meaningful_meta_topic(doc.meta.get("topic")),
         _topic_from_github_meta(doc),
     ):
         normalized = _normalize_topic(candidate)
         if normalized and normalized not in candidates:
             candidates.append(normalized)
-    return candidates or ["general"]
+    return candidates or ["프로젝트 구현"]
 
 
 def _topic_from_github_meta(doc: RawDoc) -> str | None:
@@ -499,35 +511,97 @@ def _topic_from_github_meta(doc: RawDoc) -> str | None:
         return None
 
     file_path = str(doc.meta.get("file_path") or "")
-    language = str(doc.meta.get("language") or "")
     lower_path = file_path.lower()
 
-    for keyword, topic in TECH_KEYWORDS:
-        if keyword in lower_path:
-            return topic
-    if language:
-        return language
-    return None
+    semantic_topics = _semantic_topic_candidates(lower_path)
+    if semantic_topics:
+        return semantic_topics[0]
+
+    filename = file_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    words = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", filename)
+    words = re.sub(r"[_\-]+", " ", words).strip().lower()
+    if not words or words in {"main", "app", "application", "index"}:
+        return None
+    return f"{words} 구현"
 
 
 def _topic_from_keywords(text: str) -> str | None:
-    lower_text = text.lower()
-    for keyword, topic in TECH_KEYWORDS:
-        if keyword in lower_text:
-            return topic
-    return None
+    topics = _semantic_topic_candidates(text)
+    return topics[0] if topics else None
+
+
+def _semantic_topic_candidates(text: str) -> list[str]:
+    """본문 단서로 구현 기능과 목적을 나타내는 topic 후보를 만든다."""
+    lower = text.lower()
+    topics: list[str] = []
+
+    def add(topic: str) -> None:
+        if topic not in topics:
+            topics.append(topic)
+
+    if any(token in lower for token in ("websocket", "sockjs", "stomp", "웹소켓")):
+        add("웹소켓 실시간 통신")
+    if "langchain" in lower:
+        if "agent" in lower or "에이전트" in lower:
+            add("langchain 에이전트 워크플로")
+        else:
+            add("langchain 워크플로")
+    if "n+1" in lower or "entitygraph" in lower or "fetch join" in lower:
+        add("jpa 조회 최적화")
+    if "jwt" in lower or "access token" in lower or "refresh token" in lower:
+        add("jwt 인증")
+    if "oauth" in lower:
+        add("oauth 인증 연동")
+    if "spring security" in lower or "시큐리티" in lower:
+        add("spring security 인증")
+    if "rag" in lower or "retrieval augmented" in lower or "검색 증강" in lower:
+        add("rag 검색 증강 생성")
+    if "mcp" in lower or "model context protocol" in lower:
+        add("mcp 도구 연동")
+    if "redis" in lower:
+        if "cache" in lower or "캐시" in lower:
+            add("redis 캐시")
+        else:
+            add("redis 데이터 처리")
+    if "docker" in lower or "dockerfile" in lower or "docker compose" in lower:
+        add("docker 컨테이너 구성")
+    if "kubernetes" in lower or "k8s" in lower:
+        add("kubernetes 배포 구성")
+
+    crud_markers = (
+        "create",
+        "findbyid",
+        "findall",
+        "insert",
+        "select",
+        "save(",
+        "update",
+        "delete",
+    )
+    if "crud" in lower or sum(marker in lower for marker in crud_markers) >= 3:
+        add("crud 데이터 처리")
+
+    return topics
+
+
+def _meaningful_meta_topic(value: object) -> str | None:
+    topic = _normalize_topic(value)
+    if not topic or topic in LANGUAGE_ONLY_TOPICS or topic in GENERIC_TOPICS:
+        return None
+    return BARE_TOPIC_ALIASES.get(topic, topic)
 
 
 def _validated_llm_topic(value: object, doc: RawDoc, text: str) -> str:
-    """LLM topic을 정규화하고 섹션 본문과 무관한 값은 규칙 기반 값으로 바꾼다."""
+    """LLM topic을 정규화하고 언어명·포괄어는 기능 중심 후보로 바꾼다."""
     topic = _normalize_topic(value)
-    candidates = _topic_candidates(doc, text)
-    if topic and (
-        topic in candidates
-        or topic == "general"
-        or _topic_from_keywords(topic) == topic
-    ):
+    semantic_candidates = _semantic_topic_candidates(f"{doc.title}\n{text}")
+    if topic in BARE_TOPIC_ALIASES:
+        expanded = BARE_TOPIC_ALIASES[topic]
+        topic = expanded if expanded in semantic_candidates else None
+    if topic and topic not in LANGUAGE_ONLY_TOPICS and topic not in GENERIC_TOPICS:
         return topic
+    if semantic_candidates:
+        return semantic_candidates[0]
     return _infer_topic(doc, text)
 
 

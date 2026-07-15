@@ -2,14 +2,19 @@ import anyio
 import httpx
 import json
 import re
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from typing import Any, TypeVar
 
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from interview.config import settings
+
+
+T = TypeVar("T")
 
 
 class EvidenceMcpClient:
@@ -153,7 +158,13 @@ class EvidenceMcpClient:
         if owner is None or repo is None:
             raise ValueError("GitHub owner/repo가 필요합니다.")
 
-        return anyio.run(self._call_github_repo_async, repo_link, owner, repo, github_login)
+        return self._run_github_with_retry(
+            self._call_github_repo_async,
+            repo_link,
+            owner,
+            repo,
+            github_login,
+        )
 
     @asynccontextmanager
     async def _github_session(self) -> AsyncIterator[ClientSession]:
@@ -245,7 +256,32 @@ class EvidenceMcpClient:
         if not self.github_access_token:
             raise ValueError("GitHub MCP 토큰이 필요합니다.")
 
-        return anyio.run(self._fetch_github_file_contents_async, owner, repo, paths)
+        return self._run_github_with_retry(
+            self._fetch_github_file_contents_async,
+            owner,
+            repo,
+            paths,
+        )
+
+    def _run_github_with_retry(
+        self,
+        async_call: Callable[..., Awaitable[T]],
+        *args: Any,
+    ) -> T:
+        """GitHub MCP 429 응답을 지수 백오프로 재시도한다."""
+        max_attempts = max(1, settings.evidence_mcp_max_attempts)
+        for attempt in range(max_attempts):
+            try:
+                return anyio.run(async_call, *args)
+            except Exception as exc:
+                if not _is_rate_limit_error(exc) or attempt == max_attempts - 1:
+                    raise
+                time.sleep(
+                    max(0.0, settings.evidence_mcp_retry_base_seconds)
+                    * (2**attempt)
+                )
+
+        raise RuntimeError("GitHub MCP 재시도 상태가 올바르지 않습니다.")
 
     async def _fetch_github_file_contents_async(
         self,
@@ -255,14 +291,26 @@ class EvidenceMcpClient:
     ) -> dict[str, dict]:
         """초기화된 GitHub MCP session으로 지정 파일 내용을 비동기 조회한다."""
         async with self._github_session() as session:
-            results: dict[str, dict] = {}
-            for path in paths:
-                results[path] = await self._safe_call_github_tool(
-                    session,
-                    settings.github_mcp_contents_tool,
-                    {"owner": owner, "repo": repo, "path": path},
-                )
-            return results
+            responses: list[dict | None] = [None] * len(paths)
+            limiter = anyio.Semaphore(max(1, settings.evidence_mcp_concurrency))
+
+            async def fetch_one(index: int, path: str) -> None:
+                async with limiter:
+                    responses[index] = await self._safe_call_github_tool(
+                        session,
+                        settings.github_mcp_contents_tool,
+                        {"owner": owner, "repo": repo, "path": path},
+                    )
+
+            async with anyio.create_task_group() as task_group:
+                for index, path in enumerate(paths):
+                    task_group.start_soon(fetch_one, index, path)
+
+            return {
+                path: response
+                for path, response in zip(paths, responses, strict=True)
+                if response is not None
+            }
 
     async def _fetch_github_commit_details(
         self,
@@ -272,21 +320,27 @@ class EvidenceMcpClient:
         commit_shas: list[str],
     ) -> list[dict]:
         """list_commits 응답의 sha들을 get_commit detail 응답 목록으로 확장한다."""
-        details: list[dict] = []
-        for sha in commit_shas:
-            details.append(
-                await self._safe_call_github_tool(
+        details: list[dict | None] = [None] * len(commit_shas)
+        limiter = anyio.Semaphore(max(1, settings.evidence_mcp_concurrency))
+
+        async def fetch_one(index: int, sha: str) -> None:
+            async with limiter:
+                details[index] = await self._safe_call_github_tool(
                     session,
                     settings.github_mcp_commit_tool,
                     {
                         "owner": owner,
                         "repo": repo,
                         "sha": sha,
-                        "detail": "stats",
+                        "detail": "full_patch",
                     },
                 )
-            )
-        return details
+
+        async with anyio.create_task_group() as task_group:
+            for index, sha in enumerate(commit_shas):
+                task_group.start_soon(fetch_one, index, sha)
+
+        return [detail for detail in details if detail is not None]
 
     async def _fetch_github_commits(
         self,
@@ -347,22 +401,45 @@ class EvidenceMcpClient:
         queue = _extract_github_directory_paths(root, parent_path="")
         visited: set[str] = set()
 
+        concurrency = max(1, settings.evidence_mcp_concurrency)
         while queue and len(visited) < max_dirs:
-            path = queue.pop(0)
-            if path in visited or path.count("/") >= max_depth:
+            batch: list[str] = []
+            while queue and len(batch) < concurrency and len(visited) + len(batch) < max_dirs:
+                path = queue.pop(0)
+                if (
+                    path in visited
+                    or path in batch
+                    or path.count("/") >= max_depth
+                ):
+                    continue
+                batch.append(path)
+
+            if not batch:
                 continue
 
-            visited.add(path)
-            response = await self._safe_call_github_tool(
-                session,
-                settings.github_mcp_contents_tool,
-                {"owner": owner, "repo": repo, "path": path},
-            )
-            directory_responses[path] = response
+            responses: dict[str, dict] = {}
 
-            for child_path in _extract_github_directory_paths(response, parent_path=path):
-                if child_path not in visited and child_path not in queue:
-                    queue.append(child_path)
+            async def fetch_directory(path: str) -> None:
+                responses[path] = await self._safe_call_github_tool(
+                    session,
+                    settings.github_mcp_contents_tool,
+                    {"owner": owner, "repo": repo, "path": path},
+                )
+
+            async with anyio.create_task_group() as task_group:
+                for path in batch:
+                    task_group.start_soon(fetch_directory, path)
+
+            for path in batch:
+                visited.add(path)
+                response = responses[path]
+                directory_responses[path] = response
+                for child_path in _extract_github_directory_paths(
+                    response,
+                    parent_path=path,
+                ):
+                    if child_path not in visited and child_path not in queue:
+                        queue.append(child_path)
 
         return _combine_github_tree_response(root, directory_responses)
 
@@ -383,53 +460,96 @@ class EvidenceMcpClient:
         return result.model_dump(mode="json")
 
 
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """중첩 비동기 예외를 포함해 GitHub MCP 429 응답인지 확인한다."""
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_is_rate_limit_error(child) for child in exc.exceptions)
+    message = str(exc)
+    return "429" in message or "Too Many Requests" in message
+
+
 def _extract_github_commit_shas(commits: dict) -> list[str]:
-    """GitHub MCP list_commits 응답에서 commit sha 목록을 추출한다."""
+    """GitHub MCP list_commits 응답에서 최상위 commit sha만 추출한다.
+
+    응답 전체를 재귀 순회하면 parent/tree SHA가 사용자 commit으로 섞일 수 있다.
+    따라서 구조화된 commit 레코드의 ``sha`` 필드와 텍스트 응답의 명시적인
+    commit/sha 필드만 허용한다.
+    """
     if commits.get("isError"):
         return []
 
-    candidates: list[object] = []
+    candidates: list[str] = []
     structured = commits.get("structuredContent")
-    if isinstance(structured, dict):
-        candidates.extend(_walk_github_values(structured))
+    if structured is not None:
+        candidates.extend(_extract_commit_record_shas(structured))
 
     for item in commits.get("content", []):
         if isinstance(item, dict):
             text = item.get("text")
             if isinstance(text, str):
-                candidates.append(text)
+                candidates.extend(_extract_commit_shas_from_text(text))
 
     shas: list[str] = []
     seen: set[str] = set()
-    for candidate in candidates:
-        for sha in _extract_sha_strings(candidate):
-            if sha not in seen:
-                seen.add(sha)
-                shas.append(sha)
+    for sha in candidates:
+        if sha not in seen:
+            seen.add(sha)
+            shas.append(sha)
     return shas
 
 
-def _walk_github_values(value: object) -> list[object]:
-    """중첩 dict/list에서 leaf 값을 순회한다."""
-    if isinstance(value, dict):
-        values: list[object] = []
-        for child in value.values():
-            values.extend(_walk_github_values(child))
-        return values
+def _extract_commit_record_shas(value: object) -> list[str]:
+    """알려진 list 응답 컨테이너에서 commit 레코드의 sha만 읽는다."""
     if isinstance(value, list):
-        values = []
-        for child in value:
-            values.extend(_walk_github_values(child))
-        return values
-    return [value]
+        return [
+            sha
+            for item in value
+            if isinstance(item, dict)
+            for sha in [_valid_full_sha(item.get("sha"))]
+            if sha is not None
+        ]
 
-
-def _extract_sha_strings(value: object) -> list[str]:
-    """문자열 또는 dict leaf에서 SHA 후보를 추출한다."""
-    if not isinstance(value, str):
+    if not isinstance(value, dict):
         return []
 
-    return re.findall(r"\b[0-9a-f]{40}\b", value, re.IGNORECASE)
+    direct_sha = _valid_full_sha(value.get("sha"))
+    if direct_sha is not None:
+        return [direct_sha]
+
+    for key in ("commits", "items", "results", "result", "data"):
+        child = value.get(key)
+        if isinstance(child, (dict, list)):
+            shas = _extract_commit_record_shas(child)
+            if shas:
+                return shas
+    return []
+
+
+def _extract_commit_shas_from_text(text: str) -> list[str]:
+    """JSON 또는 줄 단위 텍스트에서 명시적인 commit SHA만 추출한다."""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+
+    if payload is not None:
+        shas = _extract_commit_record_shas(payload)
+        if shas:
+            return shas
+
+    patterns = (
+        r'(?im)^\s*commit\s+([0-9a-f]{40})\b',
+        r'(?im)^\s*sha\s*[:=]\s*["\']?([0-9a-f]{40})\b',
+        r'(?im)^\s*["\']sha["\']\s*:\s*["\']([0-9a-f]{40})["\']',
+    )
+    return [match.group(1) for pattern in patterns for match in re.finditer(pattern, text)]
+
+
+def _valid_full_sha(value: object) -> str | None:
+    """값이 40자리 Git SHA일 때만 정규화해 반환한다."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value, re.IGNORECASE):
+        return None
+    return value.lower()
 
 
 def _combine_github_tree_response(root: dict, directory_responses: dict[str, dict]) -> dict:
@@ -582,7 +702,5 @@ def _is_allowed_github_directory(path: str) -> bool:
         "generated",
         "node_modules",
         "target",
-        "test",
-        "tests",
     }
     return not bool(parts & excluded)
