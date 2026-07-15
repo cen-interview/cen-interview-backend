@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from interview.evidence.retrieval import search_evidence
 from interview.llm.client import get_llm
 from interview.llm.logging import log_llm_error, log_llm_output
+from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import Difficulty, Question, QuestionCategory,QuestionKind
 from interview.strategy.prompts import (
     QUESTION_GEN_SYSTEM,
@@ -21,7 +22,12 @@ from interview.strategy.prompts import (
     TRAP_SYSTEM,
     HINT_SYSTEM
 )
-_EVIDENCE_CONFIDENCE_THRESHOLD = 0.4
+_EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
+
+
+def filter_reliable_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
+    """confidence 기준을 통과한 근거만 남긴다."""
+    return [c for c in chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
 
 _DERIVED_DIFFICULTY: dict[QuestionKind, Difficulty] = {
     QuestionKind.FOLLOW_UP: Difficulty.EASY,
@@ -47,7 +53,7 @@ class GeneratedQuestion(BaseModel):
 
 class GeneratedDerivedQuestion(BaseModel):
     """LLM이 생성하는 파생 질문의 구조화 출력."""
-    text: str = Field(description="생성된 질문 문장. 반드시 하나의 질문만 담는다.")
+    text: str = Field(description="생성된 질문 문장. 한 문장으로 간결하게, 반드시 하나의 질문만 담는다.")
     category: QuestionCategory = Field(
         description="질문 카테고리: technical(기술개념), project(프로젝트구현) 중 하나. "
         "부모 질문의 맥락과 다를 수 있다 (예: 프로젝트 질문에서 파생된 기술개념 확인 질문)."
@@ -69,7 +75,7 @@ def _generate_derived_question(
     """파생 질문(follow_up/challenge/confirm_positive/confirm_negative/trap) 공통 생성 로직."""
     probe = target or "답변에서 더 확인이 필요한 부분"
     evidence_chunks = search_evidence(query=probe, topic=topic, k=5, user_id=user_id)
-    reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
+    reliable_chunks = filter_reliable_chunks(evidence_chunks)
 
     context = (
         "\n".join(f"- {c.text}" for c in reliable_chunks)
@@ -188,7 +194,7 @@ def generate_question(
     """
     evidence_chunks = search_evidence(query=topic, topic=topic, user_id=user_id)
 
-    reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
+    reliable_chunks = filter_reliable_chunks(evidence_chunks)
 
     context = (
         "\n".join(f"- {c.text}" for c in reliable_chunks)
@@ -356,7 +362,7 @@ def generate_hint(
 
     probe = target or "질문의 핵심 개념"
     evidence_chunks = search_evidence(query=probe, topic=question.topic, k=5, user_id=user_id)
-    reliable_chunks = [c for c in evidence_chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
+    reliable_chunks = filter_reliable_chunks(evidence_chunks)
 
     context = (
         "\n".join(f"- {c.text}" for c in reliable_chunks)

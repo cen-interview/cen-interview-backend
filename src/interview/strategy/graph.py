@@ -28,14 +28,11 @@ from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.evidence import CoverageMap, EvidenceChunk, TopicCoverage
 from interview.schemas.question import Difficulty, Question, QuestionKind
 from interview.strategy.prompts import QUESTION_GEN_SYSTEM
-from interview.strategy.question_gen import GeneratedQuestion
+from interview.strategy.question_gen import GeneratedQuestion, filter_reliable_chunks
 from interview.strategy.state import StrategyState
 
 # 주제 선택 시 confidence 상위 몇 개를 후보 풀로 삼을지 (agent.py에서 그대로 가져옴)
 _TOP_N_POOL = 3
-
-# 근거 청크 중 신뢰도(confidence)가 이 값 미만이면 프롬프트/evidence_ids에서 제외
-_EVIDENCE_CONFIDENCE_THRESHOLD = 0.4
 
 # 근거 부족으로 pick_topic을 다시 시도하는 최대 횟수 (무한 루프 방지)
 _MAX_RETRY = 3
@@ -194,7 +191,7 @@ def pick_topic(state: QuestionGenState) -> dict:
 def retrieve_evidence(state: QuestionGenState) -> dict:
     """현재 topic으로 근거를 검색한다."""
     chunks = search_evidence(query=state.topic, topic=state.topic, k=5, user_id=state.user_id)
-    reliable = [c for c in chunks if c.confidence >= _EVIDENCE_CONFIDENCE_THRESHOLD]
+    reliable = filter_reliable_chunks(chunks)
     return {"evidence_chunks": reliable}
 
 def generate(state: QuestionGenState) -> dict:
