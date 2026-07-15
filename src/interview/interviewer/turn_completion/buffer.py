@@ -160,11 +160,11 @@ class VoiceTurnBuffer(BaseModel):
                 raise ValueError("활성 confirmation revision은 현재 revision과 같아야 합니다.")
         elif self.active_confirmation_id is not None:
             raise ValueError("confirming_end 상태가 아니면 활성 confirmation을 가질 수 없습니다.")
-        if (
-            self.pending_completion_reason is not None
-            and self.state != "complete_candidate"
-        ):
-            raise ValueError("완료 후보 상태가 아니면 제출 완료 사유를 가질 수 없습니다.")
+        if self.state in {"complete_candidate", "committing"}:
+            if self.pending_completion_reason is None:
+                raise ValueError("제출 후보와 제출 중 상태에는 완료 사유가 필요합니다.")
+        elif self.pending_completion_reason is not None:
+            raise ValueError("제출 후보 또는 제출 중 상태만 완료 사유를 가질 수 있습니다.")
         if self.state == "committed":
             if self.committed_revision != self.revision:
                 raise ValueError("committed 상태는 현재 revision의 제출 기록이 필요합니다.")
@@ -230,6 +230,7 @@ class VoiceTurnBuffer(BaseModel):
         """
         self._validate_question_id(question_id)
         self._ensure_not_committed()
+        self._ensure_not_committing()
         if revision <= self.revision:
             return False
         if answer_duration_seconds is not None and (
@@ -290,6 +291,7 @@ class VoiceTurnBuffer(BaseModel):
         """
         self._validate_question_id(question_id)
         self._ensure_not_committed()
+        self._ensure_not_committing()
         if revision != self.revision:
             return False
 
@@ -329,12 +331,20 @@ class VoiceTurnBuffer(BaseModel):
         self.latest_decision = result.decision
         return True
 
-    def mark_complete_candidate(self, *, expected_revision: int) -> None:
+    def mark_complete_candidate(
+        self,
+        *,
+        expected_revision: int,
+        completion_reason: VoiceTurnCompletionReason,
+    ) -> None:
         """현재 완료 판단을 자동 제출 전 완료 후보 상태로 전환한다.
 
         Args:
             expected_revision:
                 완료 후보로 지정할 최신 전사문 revision.
+
+            completion_reason:
+                semantic_complete 또는 explicit_finish 자동 제출 사유.
 
         Raises:
             VoiceTurnInvalidTransitionError:
@@ -352,6 +362,11 @@ class VoiceTurnBuffer(BaseModel):
             )
         if not self.answer_text.strip():
             raise VoiceTurnInvalidTransitionError("빈 답변은 완료 후보가 될 수 없습니다.")
+        if completion_reason == "user_confirmed":
+            raise VoiceTurnInvalidTransitionError(
+                "user_confirmed 완료 후보는 확인 응답 경로에서만 만들 수 있습니다."
+            )
+        self.pending_completion_reason = completion_reason
         self.state = "complete_candidate"
 
     def mark_confirmation_pending(
@@ -622,17 +637,17 @@ class VoiceTurnBuffer(BaseModel):
         """
         self._validate_question_id(question_id)
         self._ensure_not_committed()
-        if self.state not in {"complete_candidate", "confirming_end"}:
-            raise VoiceTurnInvalidTransitionError(
-                f"{self.state} 상태에서는 commit을 시작할 수 없습니다."
-            )
+        self._require_state("complete_candidate")
         if expected_revision != self.revision:
             raise VoiceTurnInvalidTransitionError("제출 대상 revision이 최신값이 아닙니다.")
+        if self.speech_active:
+            raise VoiceTurnInvalidTransitionError("발화 중에는 답변을 제출할 수 없습니다.")
+        if self.pending_completion_reason is None:
+            raise VoiceTurnInvalidTransitionError("자동 제출 완료 사유가 없습니다.")
 
         answer_text = self.answer_text.strip()
         if not answer_text:
             raise VoiceTurnInvalidTransitionError("빈 답변은 제출할 수 없습니다.")
-        self.speech_active = False
         self.state = "committing"
         return answer_text
 
@@ -657,7 +672,7 @@ class VoiceTurnBuffer(BaseModel):
         self._require_state("committing")
         if expected_revision != self.revision:
             raise VoiceTurnInvalidTransitionError("취소 대상 revision이 현재값과 다릅니다.")
-        self.state = "listening"
+        self.resume_listening()
 
     def mark_committed(self, *, question_id: str, expected_revision: int) -> None:
         """기존 제출 경로의 성공 결과를 현재 buffer에 확정한다.
@@ -681,6 +696,9 @@ class VoiceTurnBuffer(BaseModel):
         if expected_revision != self.revision:
             raise VoiceTurnInvalidTransitionError("제출 완료 revision이 현재값과 다릅니다.")
         self.speech_active = False
+        self.latest_decision_revision = None
+        self.latest_decision = None
+        self.pending_completion_reason = None
         self.committed_revision = expected_revision
         self.state = "committed"
 
@@ -709,6 +727,17 @@ class VoiceTurnBuffer(BaseModel):
         """
         if self.state == "committed":
             raise VoiceTurnAlreadyCommittedError("이미 제출된 음성 답변입니다.")
+
+    def _ensure_not_committing(self) -> None:
+        """현재 buffer가 기존 제출 경로를 실행 중이지 않은지 확인한다.
+
+        Raises:
+            VoiceTurnInvalidTransitionError:
+                state가 committing이라 늦은 입력으로 제출 snapshot을 바꿀 수
+                없는 경우.
+        """
+        if self.state == "committing":
+            raise VoiceTurnInvalidTransitionError("음성 답변 제출이 진행 중입니다.")
 
     def _require_state(self, expected_state: VoiceTurnState) -> None:
         """현재 상태가 요청한 전이의 시작 상태인지 확인한다.

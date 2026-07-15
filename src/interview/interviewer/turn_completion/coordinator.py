@@ -5,12 +5,16 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Any
 
 from interview.config import settings
 from interview.interviewer.facade import InterviewSession
 from interview.interviewer.models import DeliveryMetrics
 from interview.interviewer.session import SessionState
-from interview.interviewer.turn_completion.buffer import VoiceTurnBuffer
+from interview.interviewer.turn_completion.buffer import (
+    VoiceTurnBuffer,
+    VoiceTurnCompletionReason,
+)
 from interview.interviewer.turn_completion.confirmation import (
     ConfirmationIntentClassifier,
 )
@@ -42,6 +46,71 @@ ConfirmationCancelledCallback = Callable[[str, str, str], Awaitable[None]]
 
 TurnStateChangedCallback = Callable[[str, int, str], Awaitable[None]]
 """질문 ID, revision과 계속 듣기 사유를 전달하는 비동기 callback."""
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceTurnCommitRequest:
+    """기존 음성 제출 경로에 전달할 확정 답변 snapshot.
+
+    Attributes:
+        session_id:
+            답변을 제출할 면접 세션 ID.
+
+        question_id:
+            제출 대상인 현재 질문 ID.
+
+        revision:
+            제출 직전 검증을 통과한 전사문 revision.
+
+        answer_text:
+            앞뒤 공백을 제거한 최종 답변 원문.
+
+        completion_reason:
+            자동 제출 후보를 만든 문맥 기반 사유.
+
+        delivery_metrics:
+            기존 from_voice()로 전달할 최신 음성 전달 지표.
+
+        client_event_id:
+            같은 자동 제출의 그래프 중복 실행을 막는 결정적 멱등성 ID.
+    """
+
+    session_id: str
+    question_id: str
+    revision: int
+    answer_text: str
+    completion_reason: VoiceTurnCompletionReason
+    delivery_metrics: DeliveryMetrics | None
+    client_event_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceTurnCommitResult:
+    """기존 제출 경로 실행 결과와 WebSocket 세션 payload를 묶는다.
+
+    Attributes:
+        request:
+            제출에 사용한 불변 답변 snapshot.
+
+        session:
+            기존 세션 events API와 같은 JSON 직렬화 가능 응답.
+    """
+
+    request: VoiceTurnCommitRequest
+    session: dict[str, Any]
+
+
+CommitAnswerCallback = Callable[
+    [VoiceTurnCommitRequest],
+    Awaitable[dict[str, Any]],
+]
+"""확정 답변을 기존 제출 경로로 보내고 세션 payload를 반환하는 callback."""
+
+AnswerCommittedCallback = Callable[[VoiceTurnCommitResult], Awaitable[None]]
+"""buffer 확정 후 answer.committed 메시지를 전달하는 callback."""
+
+CommitFailedCallback = Callable[[VoiceTurnCommitRequest, str], Awaitable[None]]
+"""기존 제출 경로 실패를 transport 오류로 전달하는 callback."""
 
 
 @dataclass(slots=True)
@@ -110,6 +179,9 @@ class VoiceTurnCoordinator:
         _confirmation_task:
             확인 질문을 시작하기 전 자연스러운 대화 간격을 기다리는 task.
 
+        _commit_task:
+            완료 후보 이후 경합 방지 구간과 기존 제출 경로를 실행하는 task.
+
         _invalid_confirmation_ids:
             취소되거나 이미 처리돼 늦은 응답을 거절할 confirmation ID 집합.
     """
@@ -125,8 +197,13 @@ class VoiceTurnCoordinator:
         on_state_changed: TurnStateChangedCallback | None = None,
         on_confirmation_requested: ConfirmationRequestedCallback | None = None,
         on_confirmation_cancelled: ConfirmationCancelledCallback | None = None,
+        on_commit_answer: CommitAnswerCallback | None = None,
+        on_answer_committed: AnswerCommittedCallback | None = None,
+        on_commit_failed: CommitFailedCallback | None = None,
         confirmation_pause_seconds: float | None = None,
         confirmation_confidence: float | None = None,
+        commit_grace_milliseconds: int | None = None,
+        auto_submit_confidence: float | None = None,
         max_confirmations: int | None = None,
     ) -> None:
         """현재 세션과 질문의 음성 턴 coordinator를 생성한다.
@@ -159,11 +236,26 @@ class VoiceTurnCoordinator:
             on_confirmation_cancelled:
                 프론트가 진행 중인 확인 TTS를 중단하도록 알릴 callback.
 
+            on_commit_answer:
+                확정 답변을 기존 from_voice와 submit_event 경로로 전달할 callback.
+
+            on_answer_committed:
+                buffer commit 성공 이후 WebSocket 결과를 전달할 callback.
+
+            on_commit_failed:
+                기존 제출 경로 실패를 WebSocket 오류로 전달할 callback.
+
             confirmation_pause_seconds:
                 확인 질문 시작 전 기다릴 자연스러운 대화 간격.
 
             confirmation_confidence:
                 ambiguous 판단으로 확인 질문을 시작할 최소 확신도.
+
+            commit_grace_milliseconds:
+                완료 후보 이후 늦은 전사·발화 패킷을 기다릴 짧은 유예 시간.
+
+            auto_submit_confidence:
+                complete 판단을 자동 제출 후보로 만들 최소 확신도.
 
             max_confirmations:
                 질문 하나에서 실제 시작할 수 있는 최대 확인 질문 횟수.
@@ -188,12 +280,26 @@ class VoiceTurnCoordinator:
             if max_confirmations is None
             else max_confirmations
         )
+        configured_commit_grace = (
+            settings.turn_commit_grace_milliseconds
+            if commit_grace_milliseconds is None
+            else commit_grace_milliseconds
+        )
+        configured_auto_submit_confidence = (
+            settings.turn_completion_auto_submit_confidence
+            if auto_submit_confidence is None
+            else auto_submit_confidence
+        )
         if configured_pause < 0:
             raise ValueError("확인 질문 대화 간격은 음수일 수 없습니다.")
         if not 0 <= configured_confidence <= 1:
             raise ValueError("확인 질문 confidence는 0 이상 1 이하여야 합니다.")
         if configured_max_confirmations <= 0:
             raise ValueError("질문당 확인 횟수는 0보다 커야 합니다.")
+        if configured_commit_grace < 0:
+            raise ValueError("자동 제출 유예 시간은 음수일 수 없습니다.")
+        if not 0 <= configured_auto_submit_confidence <= 1:
+            raise ValueError("자동 제출 confidence는 0 이상 1 이하여야 합니다.")
 
         self._session = session
         self._entry = entry
@@ -204,10 +310,16 @@ class VoiceTurnCoordinator:
         self._on_state_changed = on_state_changed
         self._on_confirmation_requested = on_confirmation_requested
         self._on_confirmation_cancelled = on_confirmation_cancelled
+        self._on_commit_answer = on_commit_answer
+        self._on_answer_committed = on_answer_committed
+        self._on_commit_failed = on_commit_failed
         self._confirmation_pause_seconds = configured_pause
         self._confirmation_confidence = configured_confidence
         self._max_confirmations = configured_max_confirmations
+        self._commit_grace_seconds = configured_commit_grace / 1000
+        self._auto_submit_confidence = configured_auto_submit_confidence
         self._confirmation_task: asyncio.Task[None] | None = None
+        self._commit_task: asyncio.Task[None] | None = None
         self._invalid_confirmation_ids: set[str] = set()
         self._closed = False
         self._worker = LatestWinsTurnCompletionWorker(
@@ -320,6 +432,8 @@ class VoiceTurnCoordinator:
                     question_id=question_id,
                     reason="candidate_resumed_speaking",
                 )
+        if previous_state == "complete_candidate":
+            self._cancel_commit_task()
 
         await self._worker.submit(snapshot)
         return buffer_snapshot
@@ -382,6 +496,8 @@ class VoiceTurnCoordinator:
                     question_id=question_id,
                     reason="candidate_resumed_speaking",
                 )
+        if speech_active and previous_state == "complete_candidate":
+            self._cancel_commit_task()
         return buffer_snapshot
 
     async def handle_confirmation_response(
@@ -462,19 +578,32 @@ class VoiceTurnCoordinator:
 
         if snapshot is not None:
             await self._worker.submit(snapshot)
+        elif decision.intent == "finish":
+            self._schedule_commit(
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+            )
         return ConfirmationResponseResult(
             buffer=buffer_snapshot,
             decision=decision,
         )
 
     async def aclose(self) -> None:
-        """확인 대기 task와 현재 연결의 완료 판단 worker를 종료한다."""
+        """확인·제출 대기 task와 현재 연결의 완료 판단 worker를 종료한다."""
         self._closed = True
-        task = self._confirmation_task
+        confirmation_task = self._confirmation_task
+        commit_task = self._commit_task
         self._cancel_confirmation_task()
-        if task is not None and task is not asyncio.current_task():
+        self._cancel_commit_task()
+        if (
+            confirmation_task is not None
+            and confirmation_task is not asyncio.current_task()
+        ):
             with suppress(asyncio.CancelledError):
-                await task
+                await confirmation_task
+        if commit_task is not None and commit_task is not asyncio.current_task():
+            with suppress(asyncio.CancelledError):
+                await commit_task
         await self._worker.aclose()
 
     async def _handle_worker_result(self, result: TurnCompletionResult) -> None:
@@ -485,6 +614,7 @@ class VoiceTurnCoordinator:
                 worker가 현재 buffer에 실제 기록한 최신 완료 판단.
         """
         schedule_confirmation = False
+        schedule_commit = False
         listening_reason: str | None = None
         async with self._entry.lock:
             buffer = self._entry.buffer
@@ -500,6 +630,20 @@ class VoiceTurnCoordinator:
             decision = result.decision
             if decision.recommended_action == "keep_listening":
                 listening_reason = decision.reason_code
+            elif decision.recommended_action == "auto_submit":
+                if self._can_start_auto_submit(buffer, decision):
+                    completion_reason: VoiceTurnCompletionReason = (
+                        "explicit_finish"
+                        if decision.explicit_completion
+                        else "semantic_complete"
+                    )
+                    buffer.mark_complete_candidate(
+                        expected_revision=result.revision,
+                        completion_reason=completion_reason,
+                    )
+                    schedule_commit = True
+                else:
+                    listening_reason = "auto_submit_not_available"
             elif decision.recommended_action == "ask_confirmation":
                 if self._can_start_confirmation(buffer, decision):
                     schedule_confirmation = buffer.mark_confirmation_pending(
@@ -509,7 +653,12 @@ class VoiceTurnCoordinator:
                 if not schedule_confirmation:
                     listening_reason = "confirmation_not_available"
 
-        if schedule_confirmation:
+        if schedule_commit:
+            self._schedule_commit(
+                question_id=result.question_id,
+                revision=result.revision,
+            )
+        elif schedule_confirmation:
             self._schedule_confirmation(
                 question_id=result.question_id,
                 revision=result.revision,
@@ -523,6 +672,37 @@ class VoiceTurnCoordinator:
 
         if self._external_on_result is not None:
             await self._external_on_result(result)
+
+    def _can_start_auto_submit(
+        self,
+        buffer: VoiceTurnBuffer,
+        decision: TurnCompletionDecision,
+    ) -> bool:
+        """현재 최신 완료 판단을 자동 제출 후보로 만들 수 있는지 확인한다.
+
+        Args:
+            buffer:
+                최신 판단이 기록된 현재 VoiceTurnBuffer.
+
+            decision:
+                현재 revision의 TurnCompletionDecision.
+
+        Returns:
+            답변, 발화, STT 안정화, 의미 완료와 confidence 조건을 모두
+            만족하면 True.
+        """
+        return (
+            bool(buffer.answer_text.strip())
+            and not buffer.speech_active
+            and buffer.segment_final
+            and decision.semantic_state == "complete"
+            and decision.recommended_action == "auto_submit"
+            and decision.linguistically_closed
+            and decision.question_satisfied
+            and decision.continuation_expected == "low"
+            and decision.confidence >= self._auto_submit_confidence
+            and decision.reason_code != "insufficient_context"
+        )
 
     def _can_start_confirmation(
         self,
@@ -553,6 +733,214 @@ class VoiceTurnCoordinator:
             and decision.reason_code != "insufficient_context"
             and buffer.confirmation_count < self._max_confirmations
         )
+
+    def _schedule_commit(self, *, question_id: str, revision: int) -> None:
+        """최신 완료 후보의 제출 유예 task를 하나만 예약한다.
+
+        Args:
+            question_id:
+                제출 후보가 속한 현재 질문 ID.
+
+            revision:
+                제출 후보를 만든 최신 답변 revision.
+        """
+        self._cancel_commit_task()
+        self._commit_task = asyncio.create_task(
+            self._run_commit_delay(
+                question_id=question_id,
+                revision=revision,
+            )
+        )
+
+    async def _run_commit_delay(
+        self,
+        *,
+        question_id: str,
+        revision: int,
+    ) -> None:
+        """짧은 경합 방지 구간 후 기존 답변 제출 경로를 실행한다.
+
+        Args:
+            question_id:
+                제출 후보가 속한 현재 질문 ID.
+
+            revision:
+                제출 후보를 만든 최신 답변 revision.
+        """
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self._commit_grace_seconds)
+            try:
+                session_state = await self._get_active_voice_state()
+                self._validate_current_question(session_state, question_id)
+            except VoiceTurnCoordinatorError:
+                await self._rollback_complete_candidate(
+                    question_id=question_id,
+                    revision=revision,
+                )
+                return
+
+            async with self._entry.lock:
+                buffer = self._entry.buffer
+                current_question = session_state.current_question
+                if (
+                    self._closed
+                    or self._worker.closed
+                    or buffer.state != "complete_candidate"
+                    or buffer.question_id != question_id
+                    or buffer.revision != revision
+                    or buffer.speech_active
+                    or not buffer.answer_text.strip()
+                    or buffer.pending_completion_reason is None
+                    or current_question is None
+                    or current_question.question_id != question_id
+                ):
+                    return
+
+                completion_reason = buffer.pending_completion_reason
+                answer_text = buffer.begin_commit(
+                    question_id=question_id,
+                    expected_revision=revision,
+                )
+                request = VoiceTurnCommitRequest(
+                    session_id=buffer.session_id,
+                    question_id=question_id,
+                    revision=revision,
+                    answer_text=answer_text,
+                    completion_reason=completion_reason,
+                    delivery_metrics=(
+                        buffer.latest_delivery_metrics.model_copy(deep=True)
+                        if buffer.latest_delivery_metrics is not None
+                        else None
+                    ),
+                    client_event_id=(
+                        f"voice:{buffer.session_id}:{question_id}:"
+                        f"{revision}:{completion_reason}"
+                    ),
+                )
+
+            if self._on_commit_answer is None:
+                await self._abort_commit(request=request)
+                await self._notify_state_changed(
+                    question_id=question_id,
+                    revision=revision,
+                    reason="auto_submit_not_available",
+                )
+                return
+
+            try:
+                session_payload = await self._on_commit_answer(request)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await self._abort_commit(request=request)
+                await self._notify_commit_failed(
+                    request=request,
+                    reason="commit_failed",
+                )
+                return
+
+            async with self._entry.lock:
+                self._entry.buffer.mark_committed(
+                    question_id=question_id,
+                    expected_revision=revision,
+                )
+
+            self._worker.cancel()
+            if self._on_answer_committed is not None:
+                try:
+                    await self._on_answer_committed(
+                        VoiceTurnCommitResult(
+                            request=request,
+                            session=session_payload,
+                        )
+                    )
+                except Exception:
+                    return
+        finally:
+            if self._commit_task is current_task:
+                self._commit_task = None
+
+    async def _rollback_complete_candidate(
+        self,
+        *,
+        question_id: str,
+        revision: int,
+    ) -> None:
+        """제출 전 세션 검증 실패 시 완료 후보를 listening으로 되돌린다.
+
+        Args:
+            question_id:
+                되돌릴 완료 후보의 질문 ID.
+
+            revision:
+                되돌릴 완료 후보의 답변 revision.
+        """
+        async with self._entry.lock:
+            buffer = self._entry.buffer
+            if (
+                buffer.state == "complete_candidate"
+                and buffer.question_id == question_id
+                and buffer.revision == revision
+            ):
+                buffer.resume_listening()
+
+    async def _abort_commit(self, *, request: VoiceTurnCommitRequest) -> None:
+        """기존 제출 경로 실패 후 committing 상태를 listening으로 복구한다.
+
+        Args:
+            request:
+                실패한 제출에 사용한 불변 답변 snapshot.
+        """
+        async with self._entry.lock:
+            buffer = self._entry.buffer
+            if (
+                buffer.state == "committing"
+                and buffer.question_id == request.question_id
+                and buffer.revision == request.revision
+            ):
+                buffer.abort_commit(
+                    question_id=request.question_id,
+                    expected_revision=request.revision,
+                )
+
+    async def _notify_commit_failed(
+        self,
+        *,
+        request: VoiceTurnCommitRequest,
+        reason: str,
+    ) -> None:
+        """선택적 callback으로 기존 제출 경로 실패를 전달한다.
+
+        Args:
+            request:
+                실패한 제출에 사용한 불변 답변 snapshot.
+
+            reason:
+                클라이언트 오류로 변환할 안정적인 실패 사유.
+        """
+        if self._on_commit_failed is None:
+            return
+        try:
+            await self._on_commit_failed(request, reason)
+        except Exception:
+            return
+
+    def _cancel_commit_task(self) -> None:
+        """아직 facade 호출 전인 자동 제출 유예 task를 취소한다.
+
+        committing 상태에서 worker thread 호출을 취소하면 실제 그래프 제출은
+        계속되면서 coroutine만 중단될 수 있으므로, 제출 진입 이후에는 취소하지
+        않는다.
+        """
+        task = self._commit_task
+        if (
+            task is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+            and self._entry.buffer.state != "committing"
+        ):
+            task.cancel()
 
     def _schedule_confirmation(self, *, question_id: str, revision: int) -> None:
         """최신 확인 후보의 대화 간격 대기 task를 하나만 예약한다.

@@ -6,6 +6,8 @@ from interview.interviewer.turn_completion.confirmation import (
 from interview.interviewer.turn_completion.coordinator import (
     CONFIRMATION_PROMPT_TEXT,
     ConfirmationResponseResult,
+    VoiceTurnCommitRequest,
+    VoiceTurnCommitResult,
     VoiceTurnCoordinator,
     VoiceTurnCoordinatorError,
 )
@@ -56,6 +58,8 @@ __all__ = [
     "VoiceTurnCoordinator",
     "VoiceTurnCoordinatorError",
     "VoiceTurnCompletionReason",
+    "VoiceTurnCommitRequest",
+    "VoiceTurnCommitResult",
     "VoiceTurnInvalidTransitionError",
     "VoiceTurnQuestionMismatchError",
     "VoiceTurnRegistry",

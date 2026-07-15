@@ -1,6 +1,7 @@
 """실시간 음성 전사문과 턴 상태를 연결하는 WebSocket 라우터."""
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -10,9 +11,11 @@ from sqlalchemy.orm import Session
 from interview.api.auth.dependency import authenticate_access_token
 from interview.api.database import get_db
 from interview.api.interviews.service import get_interview_session_by_runtime_id
+from interview.api.sessions.router import _save_finished_result, _session_response
 from interview.api.users.model import User
 from interview.api.voice.schema import (
     VOICE_TURN_CLIENT_MESSAGE_ADAPTER,
+    AnswerCommittedMessage,
     AnswerTranscriptUpdatedMessage,
     ConnectionAuthenticateMessage,
     ConnectionReadyMessage,
@@ -24,6 +27,7 @@ from interview.api.voice.schema import (
     VoiceTurnErrorMessage,
 )
 from interview.config import settings
+from interview.interviewer.adapters import from_voice
 from interview.interviewer.facade import get_session
 from interview.interviewer.models import DeliveryMetrics
 from interview.interviewer.turn_completion.buffer import (
@@ -32,14 +36,20 @@ from interview.interviewer.turn_completion.buffer import (
     VoiceTurnQuestionMismatchError,
 )
 from interview.interviewer.turn_completion.coordinator import (
+    VoiceTurnCommitRequest,
+    VoiceTurnCommitResult,
     VoiceTurnCoordinator,
     VoiceTurnCoordinatorError,
 )
-from interview.interviewer.turn_completion.registry import get_voice_turn_registry
+from interview.interviewer.turn_completion.registry import (
+    VoiceTurnRegistryEntry,
+    get_voice_turn_registry,
+)
 from interview.schemas.events import Mode
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _POLICY_VIOLATION_CLOSE_CODE = 1008
 
@@ -255,13 +265,155 @@ async def voice_turn_websocket(
                 )
             )
 
-        coordinator = VoiceTurnCoordinator(
-            session=session,
-            entry=entry,
-            on_state_changed=on_state_changed,
-            on_confirmation_requested=on_confirmation_requested,
-            on_confirmation_cancelled=on_confirmation_cancelled,
-        )
+        async def on_commit_answer(
+            request: VoiceTurnCommitRequest,
+        ) -> dict:
+            """확정 답변을 기존 음성 제출 경로로 전달한다.
+
+            동기 InterviewSession facade와 그래프 실행은 worker thread에서
+            처리해 WebSocket event loop를 막지 않는다. 면접이 종료된 경우에는
+            기존 sessions API와 동일하게 결과를 저장하고 응답 payload에
+            result_id를 포함한다.
+
+            Args:
+                request:
+                    coordinator가 제출 직전 검증한 불변 답변 snapshot.
+
+            Returns:
+                기존 sessions events API와 같은 JSON 직렬화 가능 세션 응답.
+            """
+            metrics_payload = (
+                request.delivery_metrics.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+                if request.delivery_metrics is not None
+                else None
+            )
+            adapted_input = from_voice(
+                request.session_id,
+                request.question_id,
+                {
+                    "action": "submit",
+                    "text": request.answer_text,
+                    "metrics": metrics_payload,
+                },
+            )
+            committed_state = await asyncio.to_thread(
+                session.submit_event,
+                adapted_input,
+                client_event_id=request.client_event_id,
+            )
+
+            result_id = None
+            if committed_state.finished:
+                try:
+                    result = _save_finished_result(
+                        db=db,
+                        current_user=current_user,
+                        runtime_session_id=session_id,
+                        session=session,
+                    )
+                    result_id = result.id
+                except Exception:
+                    logger.exception(
+                        "자동 제출 후 면접 결과 저장에 실패했습니다.",
+                        extra={"session_id": session_id},
+                    )
+            return _session_response(
+                committed_state,
+                result_id=result_id,
+            )
+
+        async def on_answer_committed(
+            result: VoiceTurnCommitResult,
+        ) -> None:
+            """자동 제출 완료와 최신 세션 상태를 현재 WebSocket에 전달한다.
+
+            메시지 전송 뒤에는 완료된 질문의 임시 buffer를 다음 질문용으로
+            교체한다. 면접이 끝났으면 세션의 음성 턴 항목을 제거한다.
+
+            Args:
+                result:
+                    제출에 사용한 snapshot과 최신 세션 응답.
+            """
+            nonlocal connection_open, coordinator
+            if not owns_current_worker():
+                return
+            await send_model(
+                AnswerCommittedMessage(
+                    question_id=result.request.question_id,
+                    revision=result.request.revision,
+                    completion_reason=result.request.completion_reason,
+                    session=result.session,
+                )
+            )
+
+            next_question = result.session.get("question")
+            if result.session.get("finished"):
+                registry.remove(session_id)
+                connection_open = False
+                await websocket.close()
+            elif isinstance(next_question, dict) and next_question.get("question_id"):
+                next_entry = registry.replace_question(
+                    session_id=session_id,
+                    question_id=str(next_question["question_id"]),
+                )
+                next_coordinator = build_coordinator(next_entry)
+                registry.attach_worker(
+                    session_id=session_id,
+                    worker=next_coordinator.worker,
+                )
+                coordinator = next_coordinator
+                await next_coordinator.prepare_connection()
+
+        async def on_commit_failed(
+            request: VoiceTurnCommitRequest,
+            reason: str,
+        ) -> None:
+            """자동 제출 실패를 복구 가능한 WebSocket 오류로 전달한다.
+
+            Args:
+                request:
+                    실패한 자동 제출 snapshot.
+
+                reason:
+                    coordinator가 전달한 안정적인 오류 코드.
+            """
+            if not owns_current_worker():
+                return
+            await send_model(
+                VoiceTurnErrorMessage(
+                    code=reason,
+                    recoverable=True,
+                    message="음성 답변을 자동 제출하지 못했습니다.",
+                )
+            )
+
+        def build_coordinator(
+            entry: VoiceTurnRegistryEntry,
+        ) -> VoiceTurnCoordinator:
+            """현재 연결 callback을 사용하는 질문 단위 coordinator를 만든다.
+
+            Args:
+                entry:
+                    현재 질문의 buffer와 lock을 보유한 registry 항목.
+
+            Returns:
+                현재 WebSocket 출력과 기존 제출 경로에 연결된 coordinator.
+            """
+            return VoiceTurnCoordinator(
+                session=session,
+                entry=entry,
+                on_state_changed=on_state_changed,
+                on_confirmation_requested=on_confirmation_requested,
+                on_confirmation_cancelled=on_confirmation_cancelled,
+                on_commit_answer=on_commit_answer,
+                on_answer_committed=on_answer_committed,
+                on_commit_failed=on_commit_failed,
+            )
+
+        coordinator = build_coordinator(entry)
         registry.attach_worker(
             session_id=session_id,
             worker=coordinator.worker,
