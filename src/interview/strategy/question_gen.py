@@ -14,7 +14,6 @@ from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import Difficulty, Question, QuestionCategory,QuestionKind
 from interview.strategy.prompts import (
-    QUESTION_GEN_SYSTEM,
     FOLLOW_UP_SYSTEM,
     CHALLENGE_SYSTEM,
     CONFIRM_POSITIVE_SYSTEM,
@@ -165,112 +164,6 @@ def _generate_derived_question(
         evidence_ids=[c.chunk_id for c in reliable_chunks],
         parent_question_id=parent_question_id,
     )
-
-def generate_question(
-    topic: str,
-    difficulty: Difficulty,
-    asked_question_texts: list[str] | None = None,
-    user_id: str | None = None,
-) -> Question:
-    """주제 + 난이도로 일반 질문 생성.
-
-    근거를 조회해 QUESTION_GEN_SYSTEM 프롬프트와 함께 LLM에 전달하고,
-    구조화된 출력(text, category)을 받아 Question으로 구성한다.
-
-    Args:
-        topic: 질문 주제.
-        difficulty: 질문 난이도.
-        asked_question_texts: 이미 출제된 질문 문장들 (중복 방지용).
-            LLM에게 "이런 질문은 이미 했으니 겹치지 않게 하라"고 전달한다.
-        user_id: 사용자 id. 현재는 None 가능.
-
-
-    Returns:
-        kind=MAIN인 Question. evidence_ids에 실제 조회된 근거 chunk_id가 담긴다.
-
-    TODO(담당 B):
-      - prompts.QUESTION_GEN_SYSTEM + 근거로 LLM 호출
-      - linked_evidence 에 사용한 chunk_id 기록
-    """
-    evidence_chunks = search_evidence(query=topic, topic=topic, user_id=user_id)
-
-    reliable_chunks = filter_reliable_chunks(evidence_chunks)
-
-    context = (
-        "\n".join(f"- {c.text}" for c in reliable_chunks)
-        if reliable_chunks
-        else "(관련 근거 없음. 근거를 인용하지 말고 일반적인 개념 질문으로 만들 것)"
-    )
-
-    asked_block = (
-        "\n".join(f"- {t}" for t in asked_question_texts)
-        if asked_question_texts
-        else "(없음)"
-    )
-
-    user_prompt = f"""\
-주제: {topic}
-난이도: {difficulty.value}
-
-근거:
-{context}
-
-이미 출제한 질문 (아래와 겹치지 않는 새로운 질문을 만들 것):
-{asked_block}
-"""
-
-    llm = get_llm(temperature=0.6)
-    structured_llm = llm.with_structured_output(GeneratedQuestion)
-    try :
-
-        result = structured_llm.invoke(
-            [
-                {"role": "system", "content": QUESTION_GEN_SYSTEM},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-        log_llm_output(
-            "MAIN_QUESTION_GENERATION",
-            result,
-            metadata={
-                "topic": topic,
-                "difficulty": difficulty.value,
-                "question_kind": QuestionKind.MAIN.value,
-                "evidence_ids": [chunk.chunk_id for chunk in reliable_chunks],
-            },
-            input_data={"user_prompt": user_prompt},
-        )
-    except Exception as exc:
-        fallback = _fallback_question(
-            topic,
-            difficulty,
-            [chunk.chunk_id for chunk in reliable_chunks],
-        )
-        log_llm_error(
-            "MAIN_QUESTION_GENERATION",
-            exc,
-            metadata={
-                "topic": topic,
-                "difficulty": difficulty.value,
-                "question_kind": QuestionKind.MAIN.value,
-                "evidence_ids": fallback.evidence_ids,
-            },
-            fallback=fallback,
-            input_data={"user_prompt": user_prompt},
-        )
-        return fallback
-
-    return Question(
-        question_id=str(uuid4()),
-        text=result.text,
-        topic=topic,
-        difficulty=difficulty,
-        kind=QuestionKind.MAIN,
-        category=result.category,
-        evidence_ids=[chunk.chunk_id for chunk in reliable_chunks],
-        parent_question_id=None,
-    )
-
 
 def generate_follow_up(
         topic: str,
@@ -436,16 +329,4 @@ def generate_hint(
         kind=QuestionKind.HINT,
         evidence_ids=[chunk.chunk_id for chunk in reliable_chunks],
         parent_question_id=question.question_id,
-    )
-
-def _fallback_question(topic: str, difficulty: Difficulty, evidence_ids: list[str]) -> Question:
-    """LLM 호출 실패 시 사용하는 템플릿 질문."""
-    return Question(
-        question_id=str(uuid4()),
-        text=f"{topic}에 대해 설명해 주세요.",
-        topic=topic,
-        difficulty=difficulty,
-        kind=QuestionKind.MAIN,
-        evidence_ids=evidence_ids,
-        parent_question_id=None,
     )
