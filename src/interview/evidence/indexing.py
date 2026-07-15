@@ -9,12 +9,14 @@ chunking → store 순서를 배선만 한다.
 일부 source/chunk/store 구현은 외부 저장소 연동 전까지 단순 구현으로 유지한다.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from interview.config import settings
 from interview.evidence.chunking import chunk
 from interview.evidence.extract import extract_evidence, refine_evidence_chunks
 from interview.evidence.sources import GitHubSource, NotionSource, RawDoc
 from interview.evidence.store import get_store
-from interview.schemas.evidence import IndexBuildResult, IndexFailure
+from interview.schemas.evidence import EvidenceChunk, IndexBuildResult, IndexFailure
 
 
 def build_index(
@@ -81,22 +83,7 @@ def build_index(
                 )
             )
 
-    all_chunks = []
-    for doc in raw_docs:
-        try:
-            all_chunks += extract_evidence(
-                doc,
-                use_llm=settings.evidence_llm_extract_enabled,
-            )
-        except Exception as exc:
-            failures.append(
-                _failure(
-                    source_type=doc.source_type,
-                    source_url=doc.source_url,
-                    stage="extract",
-                    exc=exc,
-                )
-            )
+    all_chunks = _extract_documents(raw_docs, failures)
 
     try:
         all_chunks = chunk(all_chunks)
@@ -123,6 +110,46 @@ def build_index(
         chunk_count=len(all_chunks),
         failures=failures,
     )
+
+
+def _extract_documents(
+    raw_docs: list[RawDoc],
+    failures: list[IndexFailure],
+) -> list[EvidenceChunk]:
+    """RawDoc 추출을 제한된 worker 수로 병렬 실행하고 입력 순서를 보존한다."""
+    if not raw_docs:
+        return []
+
+    max_workers = max(1, min(settings.evidence_llm_concurrency, len(raw_docs)))
+    chunks_by_index: dict[int, list[EvidenceChunk]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                extract_evidence,
+                doc,
+                use_llm=settings.evidence_llm_extract_enabled,
+            ): (index, doc)
+            for index, doc in enumerate(raw_docs)
+        }
+        for future in as_completed(futures):
+            index, doc = futures[future]
+            try:
+                chunks_by_index[index] = future.result()
+            except Exception as exc:
+                failures.append(
+                    _failure(
+                        source_type=doc.source_type,
+                        source_url=doc.source_url,
+                        stage="extract",
+                        exc=exc,
+                    )
+                )
+
+    return [
+        evidence_chunk
+        for index in range(len(raw_docs))
+        for evidence_chunk in chunks_by_index.get(index, [])
+    ]
 
 
 def _failure(
