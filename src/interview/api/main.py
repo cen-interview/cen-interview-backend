@@ -12,9 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from interview.api.auth.router import router as auth_router
 from interview.api.database import create_missing_tables
+from interview.config import settings
 from interview.api.evidence.router import router as evidence_router
 from interview.api.sessions.router import (
-    get_interview_session_factory,
     router as sessions_router,
 )
 from interview.api.users.router import router as users_router
@@ -34,7 +34,8 @@ async def lifespan(app: FastAPI):
         app:
             수명주기를 적용할 FastAPI 애플리케이션.
     """
-    create_missing_tables()
+    if settings.database_auto_create_tables:
+        create_missing_tables()
     yield
 
 
