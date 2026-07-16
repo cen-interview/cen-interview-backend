@@ -112,6 +112,9 @@ CommitAnswerCallback = Callable[
 ]
 """확정 답변을 기존 제출 경로로 보내고 세션 payload를 반환하는 callback."""
 
+CommitStartedCallback = Callable[[VoiceTurnCommitRequest], Awaitable[None]]
+"""제출이 확정돼 되돌릴 수 없는 시점을 그래프 실행 전에 전달하는 callback."""
+
 AnswerCommittedCallback = Callable[[VoiceTurnCommitResult], Awaitable[None]]
 """buffer 확정 후 answer.committed 메시지를 전달하는 callback."""
 
@@ -229,6 +232,7 @@ class VoiceTurnCoordinator:
         on_state_changed: TurnStateChangedCallback | None = None,
         on_confirmation_requested: ConfirmationRequestedCallback | None = None,
         on_confirmation_cancelled: ConfirmationCancelledCallback | None = None,
+        on_commit_started: CommitStartedCallback | None = None,
         on_commit_answer: CommitAnswerCallback | None = None,
         on_answer_committed: AnswerCommittedCallback | None = None,
         on_commit_failed: CommitFailedCallback | None = None,
@@ -267,6 +271,11 @@ class VoiceTurnCoordinator:
 
             on_confirmation_cancelled:
                 프론트가 진행 중인 확인 TTS를 중단하도록 알릴 callback.
+
+            on_commit_started:
+                제출이 확정돼 취소할 수 없는 시점을 그래프 실행 전에 전달할
+                callback. 리액션 발화처럼 제출 완료를 기다리지 않는 즉시
+                알림에 사용한다.
 
             on_commit_answer:
                 확정 답변을 기존 from_voice와 submit_event 경로로 전달할 callback.
@@ -342,6 +351,7 @@ class VoiceTurnCoordinator:
         self._on_state_changed = on_state_changed
         self._on_confirmation_requested = on_confirmation_requested
         self._on_confirmation_cancelled = on_confirmation_cancelled
+        self._on_commit_started = on_commit_started
         self._on_commit_answer = on_commit_answer
         self._on_answer_committed = on_answer_committed
         self._on_commit_failed = on_commit_failed
@@ -1179,6 +1189,8 @@ class VoiceTurnCoordinator:
                 )
                 return
 
+            await self._notify_commit_started(request=request)
+
             try:
                 session_payload = await self._on_commit_answer(request)
             except asyncio.CancelledError:
@@ -1283,6 +1295,29 @@ class VoiceTurnCoordinator:
                     question_id=request.question_id,
                     expected_revision=request.revision,
                 )
+
+    async def _notify_commit_started(
+        self,
+        *,
+        request: VoiceTurnCommitRequest,
+    ) -> None:
+        """선택적 callback으로 제출 확정 시점을 그래프 실행 전에 전달한다.
+
+        리액션 발화 같은 즉시 알림이 실패해도 실제 제출은 계속돼야 하므로
+        CancelledError를 제외한 예외는 삼킨다.
+
+        Args:
+            request:
+                제출이 확정된 불변 답변 snapshot.
+        """
+        if self._on_commit_started is None:
+            return
+        try:
+            await self._on_commit_started(request)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
 
     async def _notify_commit_failed(
         self,

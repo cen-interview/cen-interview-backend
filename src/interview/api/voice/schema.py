@@ -311,6 +311,35 @@ class TurnConfirmationCancelledMessage(BaseModel):
     reason: str
 
 
+class AnswerReactionMessage(BaseModel):
+    """자동 제출 확정 직후 즉시 재생할 면접관 리액션을 전달한다.
+
+    다음 질문 생성이 끝나기 전에 프론트가 리액션 TTS 재생을 시작할 수 있도록
+    answer.committed보다 먼저 전송한다. 이 메시지를 받은 제출 건의
+    answer.committed 세션 응답에서는 utterance_queue의 리액션 문장이 제거되고
+    transcript의 마지막 면접관 발화와 last_utterance도 질문 본문으로 교체되므로
+    음성과 화면 어느 쪽에서도 리액션이 두 번 나오지 않는다.
+
+    Attributes:
+        type:
+            제출 확정 리액션을 나타내는 고정 discriminator.
+
+        question_id:
+            제출이 확정된, 방금 답변한 질문 ID.
+
+        revision:
+            제출에 사용한 최종 전사문 revision.
+
+        text:
+            프론트가 즉시 TTS로 재생할 중립 리액션 문구.
+    """
+
+    type: Literal["answer.reaction"] = "answer.reaction"
+    question_id: str
+    revision: int = Field(ge=0)
+    text: str
+
+
 class AnswerCommittedMessage(BaseModel):
     """현재 음성 답변 제출과 세션 진행 결과를 알리는 메시지.
 
