@@ -8,10 +8,17 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Difficulty, Question, QuestionKind
-from interview.schemas.signals import AnswerQualitySignal
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.strategy import difficulty, question_gen  # noqa: F401 (TODO 담당 B: question_gen 연결 시 사용)
 from interview.strategy.graph import QuestionGenState, _too_similar, get_compiled_graph
 from interview.strategy.state import StrategyState
+
+# 프리페치 난이도 추정에 쓰는 "중립" quality. difficulty.next_difficulty()의 규칙 중
+# 이 값으로는 걸리지 않는 것(MISCONCEPTION/CONFIRM_NEGATIVE 하강, 연속 SUFFICIENT 상승)만
+# 실제 last_signal이 나와야 아는 것이고, 나머지 규칙(연속 EASY 강제 상승, N문항 이상 HARD
+# 강제)은 last_signal 없이 state만으로도 이미 확정되므로 이 값으로 next_difficulty()를
+# 그대로 호출하면 정확히 맞힌다.
+_NEUTRAL_GUESS_QUALITY = AnswerQuality.UNKNOWN
 
 
 class StrategyAgent:
@@ -113,17 +120,34 @@ class StrategyAgent:
             self.state.recent_qualities.append(last_signal.quality)
 
         self._record(question)
-        self._start_prefetch(guessed_difficulty=diff)
+        self._start_prefetch(guessed_difficulty=self._guess_next_difficulty())
 
         return question
+
+    def _guess_next_difficulty(self) -> Difficulty:
+        """다음 메인 질문의 난이도를 프리페치 시점에 최대한 정확히 추정한다.
+
+        difficulty.next_difficulty()의 규칙 중 "연속 2회 EASY 강제 상승"과
+        "N문항 이상인데 HARD 없음 강제 상승"은 last_signal 없이 self.state만
+        보고도 이미 확정된다 - 이 두 규칙이 실전에서 프리페치 불일치의 주된
+        원인이었다. 아직 알 수 없는 건 "오개념 하강"과 "연속 2회 SUFFICIENT
+        상승" 뿐이므로, 이 둘에는 걸리지 않는 중립 quality(_NEUTRAL_GUESS_QUALITY)로
+        실제 next_difficulty()를 그대로 호출해 앞의 두 규칙은 정확히 맞히고
+        나머지는 기존처럼 "직전 난이도 유지"로 추정한다.
+        """
+        placeholder_signal = AnswerQualitySignal(
+            answer_id="_prefetch_guess",
+            question_id="_prefetch_guess",
+            quality=_NEUTRAL_GUESS_QUALITY,
+        )
+        return difficulty.next_difficulty(self.state, placeholder_signal)
 
     def _start_prefetch(self, guessed_difficulty: Difficulty) -> None:
         """다음 메인 질문 생성을 백그라운드 스레드에서 미리 시작한다.
 
         지원자가 현재 질문에 답하는 동안(다음 next_question() 호출까지의
         유휴 시간) 미리 LLM 생성을 끝내두기 위함이다. guessed_difficulty는
-        방금 낸 질문의 난이도를 그대로 재사용한다 - difficulty.next_difficulty의
-        기본 분기가 "직전 난이도 유지"라 대부분 실제 난이도와 일치한다.
+        _guess_next_difficulty()가 계산한 추정값이다.
 
         self.state를 백그라운드 스레드가 그대로 참조하면 그 사이 파생 질문
         기록(_record) 등으로 메인 스레드가 동시에 수정할 수 있어 deep copy로

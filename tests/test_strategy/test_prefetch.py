@@ -13,13 +13,26 @@ from interview.strategy.agent import StrategyAgent
 # 백그라운드 프리페치가 끝날 시간을 기다려주는 여유 시간
 _SETTLE = 0.05
 
+# 서로 어휘가 겹치지 않는 가짜 질문 문장들. 숫자 하나만 다른 문장("질문 0는?" vs
+# "질문 1는?")을 쓰면 그래프가 재사용하는 문자집합 기반 유사도 검사(_too_similar)가
+# 이걸 "이미 나온 질문과 중복"으로 오판해 프리페치 캐시를 계속 버리게 되므로,
+# 완전히 다른 주제 문장을 인덱스로 순환시킨다.
+_FAKE_QUESTION_TEXTS = [
+    "FastAPI의 Depends는 무엇을 위한 기능인가요?",
+    "Docker 이미지와 컨테이너의 차이는 무엇인가요?",
+    "JPA의 영속성 컨텍스트는 어떤 역할을 하나요?",
+    "Redis를 캐시로 쓸 때 만료 전략은 어떻게 정하나요?",
+    "Kafka에서 파티션은 왜 필요한가요?",
+    "JWT 토큰의 서명은 무엇을 보장하나요?",
+]
+
 
 class FakeGraph:
     """StrategyAgent._graph 대체용 가짜 그래프.
 
-    실제 QuestionGenState 그래프 대신 호출 순서대로 "가짜 질문 N" 텍스트를
-    돌려준다. delay를 주면 invoke()가 그 시간만큼 블로킹해 "아직 프리페치가
-    끝나지 않은 상황"을 재현할 수 있다.
+    실제 QuestionGenState 그래프 대신 호출 순서대로 서로 다른 문장을 돌려준다.
+    delay를 주면 invoke()가 그 시간만큼 블로킹해 "아직 프리페치가 끝나지 않은
+    상황"을 재현할 수 있다.
     """
 
     def __init__(self, delay: float = 0.0) -> None:
@@ -34,7 +47,7 @@ class FakeGraph:
         return {
             "result": Question(
                 question_id=f"q-{index}",
-                text=f"가짜 질문 {index}는 무엇입니까?",
+                text=_FAKE_QUESTION_TEXTS[index % len(_FAKE_QUESTION_TEXTS)],
                 topic="FastAPI",
                 difficulty=state.difficulty,
                 kind=QuestionKind.MAIN,
@@ -53,8 +66,9 @@ def test_matching_guess_serves_prefetched_question_without_extra_call():
     fake = FakeGraph()
     strategy._graph = fake
 
+    # FakeGraph에 지연이 없어 q1 직후 시작되는 프리페치가 이 시점 전에 이미 끝나
+    # 있을 수도 있으므로(정상), 첫 호출 직후 호출 수를 단정하지 않는다.
     q1 = strategy.next_question(last_signal=None)
-    assert len(fake.calls) == 1  # 첫 질문은 프리페치가 없어 동기 생성
 
     time.sleep(_SETTLE)  # q1 직후 시작된 "다음 질문" 프리페치가 끝나길 기다림
     assert len(fake.calls) == 2
@@ -66,25 +80,40 @@ def test_matching_guess_serves_prefetched_question_without_extra_call():
     assert q1.question_id != q2.question_id
 
 
-def test_difficulty_guess_mismatch_falls_back_to_sync_generation():
-    """추정 난이도가 실제와 어긋나면 프리페치를 버리고 그 자리에서 새로 만든다."""
+def test_state_based_rule_is_predicted_but_signal_based_rule_still_mismatches():
+    """상태만으로 정해지는 규칙은 프리페치가 미리 맞히고, 답변이 나와야 아는
+    규칙은 여전히 어긋나 동기 폴백으로 이어진다.
+
+    difficulty.py의 "연속 2회 EASY -> 강제 상승" 규칙은 last_signal 없이
+    state만으로 이미 확정되므로 _guess_next_difficulty()가 정확히 예측한다
+    (Q3). 반면 "연속 2회 SUFFICIENT -> 상승" 규칙은 실제 답변 quality가
+    나와야만 알 수 있어 여전히 추정이 빗나갈 수 있다 (Q4).
+    """
     strategy = StrategyAgent()
     fake = FakeGraph()
     strategy._graph = fake
 
-    strategy.next_question(last_signal=None)  # EASY
+    strategy.next_question(last_signal=None)  # Q1: EASY
     time.sleep(_SETTLE)
-    strategy.next_question(last_signal=_signal(AnswerQuality.SUFFICIENT))  # 여전히 EASY (아직 연속 2회 아님)
+    strategy.next_question(last_signal=_signal(AnswerQuality.SUFFICIENT))  # Q2: 여전히 EASY
     time.sleep(_SETTLE)
 
-    calls_before = len(fake.calls)
-    # 직전 두 메인 질문이 모두 EASY라 difficulty.py 규칙 3(연속 2회 EASY -> 강제 상승)이
-    # 발동한다. 방금 시작해둔 프리페치는 "직전과 동일(EASY)"로 추정했으므로 실제
-    # 난이도(MEDIUM)와 어긋난다.
+    calls_before_q3 = len(fake.calls)
+    # 직전 두 메인 질문이 모두 EASY라 규칙 3(연속 2회 EASY -> 강제 MEDIUM)이
+    # 발동한다. 이 규칙은 last_signal 없이도 예측 가능해서 프리페치가 이미
+    # MEDIUM으로 정확히 맞혀뒀다 - 동기 호출이 추가되지 않는다.
     q3 = strategy.next_question(last_signal=_signal(AnswerQuality.SUFFICIENT))
-
     assert q3.difficulty == Difficulty.MEDIUM
-    assert len(fake.calls) == calls_before + 1  # 캐시를 버리고 동기 호출 1회 추가
+    assert len(fake.calls) == calls_before_q3
+    time.sleep(_SETTLE)
+
+    calls_before_q4 = len(fake.calls)
+    # Q2, Q3 답변이 모두 SUFFICIENT라 규칙 5(연속 2회 SUFFICIENT -> 상승)가
+    # 발동해 MEDIUM -> HARD로 오른다. 이건 실제 답변이 나와야 아는 규칙이라
+    # 프리페치는 "직전과 동일(MEDIUM)"로만 추정해뒀으므로 어긋난다.
+    q4 = strategy.next_question(last_signal=_signal(AnswerQuality.SUFFICIENT))
+    assert q4.difficulty == Difficulty.HARD
+    assert len(fake.calls) == calls_before_q4 + 1  # 캐시를 버리고 동기 호출 1회 추가
 
 
 def test_next_question_waits_for_inflight_prefetch_instead_of_duplicating_work():
@@ -115,9 +144,9 @@ def test_stale_prefetch_discarded_when_it_duplicates_a_question_asked_meanwhile(
     strategy.next_question(last_signal=None)
     time.sleep(_SETTLE)
 
-    # 프리페치가 만들어둔 "가짜 질문 1는 무엇입니까?"와 동일한 문구가 그 사이 다른
-    # 경로(꼬리질문 등)로 이미 나왔다고 가정한다.
-    strategy.state.asked_question_texts.append("가짜 질문 1는 무엇입니까?")
+    # 프리페치가 만들어둔 두 번째 문장과 동일한 문구가 그 사이 다른 경로(꼬리질문
+    # 등)로 이미 나왔다고 가정한다.
+    strategy.state.asked_question_texts.append(_FAKE_QUESTION_TEXTS[1])
 
     calls_before = len(fake.calls)
     strategy.next_question(last_signal=_signal(AnswerQuality.SUFFICIENT))

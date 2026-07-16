@@ -75,9 +75,11 @@ graph TD;
 질문을 낸 뒤 `wait_event`에서 지원자 응답을 기다리며 멈추므로(`interviewer/workflow/graph.py`), 그
 유휴 시간 동안 다음 질문 생성을 끝내두는 구조다.
 
-- **난이도 추정**: 다음 호출의 실제 `last_signal`은 아직 알 수 없으므로, 방금 낸 질문과 같은 난이도로
-  추정해서 미리 생성한다. `difficulty.next_difficulty()`의 기본 분기(우선순위 6, "직전 난이도 유지")가
-  가장 흔한 경우라 대부분 들어맞는다.
+- **난이도 추정**: 다음 호출의 실제 `last_signal`은 아직 알 수 없지만, `next_difficulty()`의 규칙 중
+  일부(연속 2회 EASY 강제 상승, N문항 이상인데 HARD 없음 강제 상승)는 `last_signal` 없이 `state`만으로
+  이미 확정된다. `_guess_next_difficulty()`는 이 두 규칙에는 걸리지 않는 중립 quality로 `next_difficulty()`를
+  그대로 호출해, 이 두 규칙은 정확히 맞히고 나머지(오개념 하강, 연속 2회 SUFFICIENT 상승처럼 실제 답변이
+  나와야 아는 규칙)만 "직전 난이도 유지"로 추정한다.
 - **소비 시점**: 다음 `next_question()` 호출에서 진짜 `last_signal`로 실제 난이도를 계산한 뒤 추정
   난이도와 비교한다.
   - 일치하면 프리페치 결과를 그대로 쓴다 (완료 전이면 `future.result()`로 대기 - 지금 새로 시작하는
