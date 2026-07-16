@@ -135,6 +135,32 @@ class ConfirmationResponseResult:
     decision: ConfirmationIntentDecision
 
 
+@dataclass(frozen=True, slots=True)
+class _DecisionPolicyResult:
+    """최신 완료 판단을 현재 buffer 상태에 적용한 결과.
+
+    발화 종료를 기다려야 하면 모든 필드가 기본값인 결과를 반환한다.
+
+    Attributes:
+        schedule_confirmation:
+            종료 확인 질문을 대화 간격 이후 시작해야 하는지 여부.
+
+        schedule_commit:
+            자동 제출 유예 task를 시작해야 하는지 여부.
+
+        completion_reason:
+            자동 제출 후보를 만든 문맥 기반 완료 사유.
+
+        listening_reason:
+            자동 제출이나 확인 질문을 시작하지 않고 계속 듣는 사유.
+    """
+
+    schedule_confirmation: bool = False
+    schedule_commit: bool = False
+    completion_reason: VoiceTurnCompletionReason | None = None
+    listening_reason: str | None = None
+
+
 class VoiceTurnCoordinatorError(ValueError):
     """음성 턴 입력을 현재 면접 상태에 적용할 수 없을 때 발생하는 오류.
 
@@ -544,7 +570,9 @@ class VoiceTurnCoordinator:
         """전사문을 변경하지 않고 현재 발화 상태를 우선 반영한다.
 
         speech_active가 True이면 준비 또는 재생 중인 confirmation을 취소해
-        프론트가 확인 TTS를 즉시 중단할 수 있게 한다.
+        프론트가 확인 TTS를 즉시 중단할 수 있게 한다. True에서 False로 바뀌면
+        같은 revision에 기록된 최신 완료 판단을 현재 발화 상태에 다시 적용해
+        LLM 판단과 발화 종료 이벤트의 도착 순서에 따른 자동 제출 누락을 막는다.
 
         Args:
             question_id:
@@ -564,10 +592,14 @@ class VoiceTurnCoordinator:
         self._validate_current_question(session_state, question_id)
 
         cancelled_confirmation_id: str | None = None
+        policy_result: _DecisionPolicyResult | None = None
+        policy_decision: TurnCompletionDecision | None = None
         async with self._entry.lock:
-            previous_state = self._entry.buffer.state
-            cancelled_confirmation_id = self._entry.buffer.active_confirmation_id
-            updated = self._entry.buffer.update_speech_activity(
+            buffer = self._entry.buffer
+            previous_state = buffer.state
+            previous_speech_active = buffer.speech_active
+            cancelled_confirmation_id = buffer.active_confirmation_id
+            updated = buffer.update_speech_activity(
                 question_id=question_id,
                 revision=revision,
                 speech_active=speech_active,
@@ -578,7 +610,25 @@ class VoiceTurnCoordinator:
                     "현재 전사문 revision과 다른 발화 상태 이벤트입니다.",
                     recoverable=True,
                 )
-            buffer_snapshot = self._entry.buffer.model_copy(deep=True)
+            if (
+                previous_speech_active
+                and not speech_active
+                and buffer.state == "listening"
+                and buffer.segment_final
+                and buffer.latest_decision_revision == revision
+                and buffer.latest_decision is not None
+                and (
+                    buffer.latest_decision.recommended_action
+                    in {"auto_submit", "ask_confirmation"}
+                )
+            ):
+                policy_decision = buffer.latest_decision
+                policy_result = self._apply_decision_policy(
+                    buffer=buffer,
+                    decision=policy_decision,
+                    revision=revision,
+                )
+            buffer_snapshot = buffer.model_copy(deep=True)
 
         if speech_active and previous_state in {
             "confirmation_pending",
@@ -602,6 +652,13 @@ class VoiceTurnCoordinator:
                 answer_text=buffer_snapshot.answer_text,
                 cancel_reason="candidate_resumed_speaking",
                 candidate_resumed_speaking=True,
+            )
+        if policy_result is not None and policy_decision is not None:
+            await self._dispatch_decision_policy(
+                policy_result=policy_result,
+                buffer_snapshot=buffer_snapshot,
+                decision=policy_decision,
+                decision_trigger="speech_inactive",
             )
         return buffer_snapshot
 
@@ -738,10 +795,6 @@ class VoiceTurnCoordinator:
             result:
                 worker가 현재 buffer에 실제 기록한 최신 완료 판단.
         """
-        schedule_confirmation = False
-        schedule_commit = False
-        completion_reason: VoiceTurnCompletionReason | None = None
-        listening_reason: str | None = None
         async with self._entry.lock:
             buffer = self._entry.buffer
             if (
@@ -753,77 +806,159 @@ class VoiceTurnCoordinator:
             ):
                 return
 
-            decision = result.decision
-            if decision.recommended_action == "keep_listening":
-                listening_reason = (
-                    "completion_judge_failed"
-                    if result.fallback_used
-                    else decision.reason_code
-                )
-            elif decision.recommended_action == "auto_submit":
-                if self._can_start_auto_submit(buffer, decision):
-                    completion_reason = (
-                        "explicit_finish"
-                        if decision.explicit_completion
-                        else "semantic_complete"
-                    )
-                    buffer.mark_complete_candidate(
-                        expected_revision=result.revision,
-                        completion_reason=completion_reason,
-                    )
-                    schedule_commit = True
-                else:
-                    listening_reason = "auto_submit_not_available"
-            elif decision.recommended_action == "ask_confirmation":
-                if self._can_start_confirmation(buffer, decision):
-                    schedule_confirmation = buffer.mark_confirmation_pending(
-                        expected_revision=result.revision,
-                        max_confirmations=self._max_confirmations,
-                    )
-                if not schedule_confirmation:
-                    listening_reason = "confirmation_not_available"
+            policy_result = self._apply_decision_policy(
+                buffer=buffer,
+                decision=result.decision,
+                revision=result.revision,
+                fallback_used=result.fallback_used,
+            )
+            buffer_snapshot = buffer.model_copy(deep=True)
 
-        if schedule_commit:
-            log_voice_turn_event(
-                "voice_turn.commit.candidate",
-                session_id=self._entry.buffer.session_id,
-                question_id=result.question_id,
-                revision=result.revision,
-                answer_text=self._entry.buffer.answer_text,
-                completion_reason=completion_reason,
-                semantic_state=result.decision.semantic_state,
-                confidence=result.decision.confidence,
-                grace_milliseconds=round(self._commit_grace_seconds * 1000),
-            )
-            self._schedule_commit(
-                question_id=result.question_id,
-                revision=result.revision,
-            )
-        elif schedule_confirmation:
-            log_voice_turn_event(
-                "voice_turn.confirmation.pending",
-                session_id=self._entry.buffer.session_id,
-                question_id=result.question_id,
-                revision=result.revision,
-                answer_text=self._entry.buffer.answer_text,
-                confidence=result.decision.confidence,
-                pause_milliseconds=round(
-                    self._confirmation_pause_seconds * 1000
-                ),
-            )
-            self._schedule_confirmation(
-                question_id=result.question_id,
-                revision=result.revision,
-            )
-        elif listening_reason is not None:
-            await self._notify_state_changed(
-                question_id=result.question_id,
-                revision=result.revision,
-                reason=listening_reason,
-            )
+        await self._dispatch_decision_policy(
+            policy_result=policy_result,
+            buffer_snapshot=buffer_snapshot,
+            decision=result.decision,
+            decision_trigger="judge_result",
+        )
 
         if self._external_on_result is not None:
             await self._external_on_result(result)
+
+    def _apply_decision_policy(
+        self,
+        *,
+        buffer: VoiceTurnBuffer,
+        decision: TurnCompletionDecision,
+        revision: int,
+        fallback_used: bool = False,
+    ) -> _DecisionPolicyResult:
+        """최신 완료 판단을 현재 발화 상태에 맞는 상태 전이로 적용한다.
+
+        호출자는 세션별 lock을 보유하고 buffer의 질문과 revision이 최신인지 먼저
+        확인해야 한다. LLM 판단 직후와 발화 종료 activity 이벤트가 같은 정책을
+        사용하게 해 두 이벤트의 도착 순서가 달라도 동일한 결과를 만든다.
+
+        Args:
+            buffer:
+                최신 판단과 현재 발화 상태를 보관한 음성 턴 buffer.
+
+            decision:
+                현재 revision에 기록된 완료 판단.
+
+            revision:
+                판단과 상태 전이를 연결할 최신 전사문 revision.
+
+            fallback_used:
+                LLM 실패로 안전한 계속 듣기 판단이 사용됐는지 여부.
+
+        Returns:
+            lock 밖에서 실행할 task 예약 또는 계속 듣기 알림 정보를 담은 결과.
+        """
+        if decision.recommended_action == "keep_listening":
+            return _DecisionPolicyResult(
+                listening_reason=(
+                    "completion_judge_failed"
+                    if fallback_used
+                    else decision.reason_code
+                )
+            )
+
+        if buffer.speech_active:
+            return _DecisionPolicyResult()
+
+        if decision.recommended_action == "auto_submit":
+            if not self._can_start_auto_submit(buffer, decision):
+                return _DecisionPolicyResult(
+                    listening_reason="auto_submit_not_available"
+                )
+            completion_reason: VoiceTurnCompletionReason = (
+                "explicit_finish"
+                if decision.explicit_completion
+                else "semantic_complete"
+            )
+            buffer.mark_complete_candidate(
+                expected_revision=revision,
+                completion_reason=completion_reason,
+            )
+            return _DecisionPolicyResult(
+                schedule_commit=True,
+                completion_reason=completion_reason,
+            )
+
+        if self._can_start_confirmation(buffer, decision):
+            schedule_confirmation = buffer.mark_confirmation_pending(
+                expected_revision=revision,
+                max_confirmations=self._max_confirmations,
+            )
+            if schedule_confirmation:
+                return _DecisionPolicyResult(schedule_confirmation=True)
+        return _DecisionPolicyResult(
+            listening_reason="confirmation_not_available"
+        )
+
+    async def _dispatch_decision_policy(
+        self,
+        *,
+        policy_result: _DecisionPolicyResult,
+        buffer_snapshot: VoiceTurnBuffer,
+        decision: TurnCompletionDecision,
+        decision_trigger: str,
+    ) -> None:
+        """판단 정책의 task 예약과 WebSocket 알림을 lock 밖에서 실행한다.
+
+        Args:
+            policy_result:
+                lock 안에서 현재 buffer에 적용한 판단 정책 결과.
+
+            buffer_snapshot:
+                정책 적용 직후 복사한 질문과 revision별 buffer 상태.
+
+            decision:
+                로그에 의미 상태와 confidence를 기록할 최신 완료 판단.
+
+            decision_trigger:
+                판단을 처음 적용했는지 발화 종료 후 재적용했는지 나타내는 값.
+        """
+        if policy_result.schedule_commit:
+            log_voice_turn_event(
+                "voice_turn.commit.candidate",
+                session_id=buffer_snapshot.session_id,
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+                answer_text=buffer_snapshot.answer_text,
+                completion_reason=policy_result.completion_reason,
+                semantic_state=decision.semantic_state,
+                confidence=decision.confidence,
+                grace_milliseconds=round(self._commit_grace_seconds * 1000),
+                decision_trigger=decision_trigger,
+            )
+            self._schedule_commit(
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+            )
+        elif policy_result.schedule_confirmation:
+            log_voice_turn_event(
+                "voice_turn.confirmation.pending",
+                session_id=buffer_snapshot.session_id,
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+                answer_text=buffer_snapshot.answer_text,
+                confidence=decision.confidence,
+                pause_milliseconds=round(
+                    self._confirmation_pause_seconds * 1000
+                ),
+                decision_trigger=decision_trigger,
+            )
+            self._schedule_confirmation(
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+            )
+        elif policy_result.listening_reason is not None:
+            await self._notify_state_changed(
+                question_id=buffer_snapshot.question_id,
+                revision=buffer_snapshot.revision,
+                reason=policy_result.listening_reason,
+            )
 
     def _can_start_auto_submit(
         self,
