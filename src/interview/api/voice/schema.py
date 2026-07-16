@@ -156,7 +156,67 @@ class VoiceActivityChangedMessage(_QuestionScopedClientMessage):
     speech_active: bool
 
 
-class TurnConfirmationRespondedMessage(_QuestionScopedClientMessage):
+class _ConfirmationScopedClientMessage(_QuestionScopedClientMessage):
+    """활성 확인 질문 ID까지 공통으로 전달하는 클라이언트 메시지."""
+
+    confirmation_id: str = Field(min_length=1, max_length=100)
+
+    @field_validator("confirmation_id")
+    @classmethod
+    def normalize_confirmation_id(cls, value: str) -> str:
+        """확인 질문 ID의 앞뒤 공백을 제거하고 빈 값을 거절한다.
+
+        Args:
+            value:
+                클라이언트가 보낸 확인 질문 ID.
+
+        Returns:
+            앞뒤 공백을 제거한 확인 질문 ID.
+
+        Raises:
+            ValueError:
+                공백 제거 후 confirmation ID가 비어 있는 경우.
+        """
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("confirmation_id는 비어 있을 수 없습니다.")
+        return normalized_value
+
+
+class TurnConfirmationResponseReadyMessage(_ConfirmationScopedClientMessage):
+    """프론트가 확인 응답 STT 수집 준비를 마쳤음을 전달한다.
+
+    Attributes:
+        type:
+            확인 응답 준비 완료를 나타내는 고정 discriminator.
+
+        playback_status:
+            확인 질문 TTS가 정상 완료됐으면 completed, 텍스트 안내 후 STT만
+            정상 준비됐으면 failed.
+    """
+
+    type: Literal["turn.confirmation.response.ready"]
+    playback_status: Literal["completed", "failed"]
+
+
+class TurnConfirmationResponseActivityChangedMessage(
+    _ConfirmationScopedClientMessage
+):
+    """확인 응답 수집 중인 지원자의 발화 상태를 전달한다.
+
+    Attributes:
+        type:
+            확인 응답 발화 상태 변경을 나타내는 고정 discriminator.
+
+        speech_active:
+            지원자가 확인 응답을 실제로 말하는 중이면 True.
+    """
+
+    type: Literal["turn.confirmation.response.activity.changed"]
+    speech_active: bool
+
+
+class TurnConfirmationRespondedMessage(_ConfirmationScopedClientMessage):
     """종료 확인 질문 이후의 지원자 응답 전사문을 전달한다.
 
     Attributes:
@@ -175,7 +235,6 @@ class TurnConfirmationRespondedMessage(_QuestionScopedClientMessage):
     """
 
     type: Literal["turn.confirmation.responded"]
-    confirmation_id: str = Field(min_length=1, max_length=100)
     response_revision: int = Field(ge=1)
     text: str = Field(min_length=1, max_length=5000)
 
@@ -198,6 +257,8 @@ class TurnConfirmationRespondedMessage(_QuestionScopedClientMessage):
 VoiceTurnClientMessage = Annotated[
     AnswerTranscriptUpdatedMessage
     | VoiceActivityChangedMessage
+    | TurnConfirmationResponseReadyMessage
+    | TurnConfirmationResponseActivityChangedMessage
     | TurnConfirmationRespondedMessage,
     Field(discriminator="type"),
 ]
@@ -279,6 +340,15 @@ class TurnConfirmationRequestedMessage(BaseModel):
 
         text:
             프론트가 TTS로 재생할 고정 확인 문구.
+
+        ready_timeout_milliseconds:
+            프론트가 확인 응답 수집 준비를 완료할 때까지의 제한 시간.
+
+        response_timeout_milliseconds:
+            준비 완료 후 실제 확인 응답을 기다리는 제한 시간.
+
+        requires_ready_ack:
+            응답 제한 시간을 시작하려면 ready 메시지가 필수인지 여부.
     """
 
     type: Literal["turn.confirmation.requested"] = "turn.confirmation.requested"
@@ -286,6 +356,9 @@ class TurnConfirmationRequestedMessage(BaseModel):
     question_id: str
     revision: int = Field(ge=0)
     text: str
+    ready_timeout_milliseconds: int = Field(gt=0)
+    response_timeout_milliseconds: int = Field(gt=0)
+    requires_ready_ack: bool = True
 
 
 class TurnConfirmationCancelledMessage(BaseModel):

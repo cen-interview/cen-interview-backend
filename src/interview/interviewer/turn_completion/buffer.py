@@ -17,6 +17,7 @@ VoiceTurnState = Literal[
     "listening",
     "complete_candidate",
     "confirmation_pending",
+    "confirmation_prompting",
     "confirming_end",
     "committing",
     "committed",
@@ -105,6 +106,11 @@ class VoiceTurnBuffer(BaseModel):
         active_confirmation_revision:
             활성 확인 질문이 대상으로 삼은 답변 revision.
 
+        confirmation_response_speech_active:
+            프론트가 확인 응답 수집을 시작한 뒤 지원자가 실제로 발화 중인지
+            여부. 기본 답변의 speech_active와 분리해 확인 응답을 원래 답변
+            재개로 오인하지 않게 한다.
+
         pending_completion_reason:
             아직 commit되지 않은 완료 후보를 만든 문맥 기반 사유.
 
@@ -130,6 +136,7 @@ class VoiceTurnBuffer(BaseModel):
     confirmation_count: int = Field(default=0, ge=0)
     active_confirmation_id: str | None = None
     active_confirmation_revision: int | None = Field(default=None, ge=0)
+    confirmation_response_speech_active: bool = False
     pending_completion_reason: VoiceTurnCompletionReason | None = None
     committed_revision: int | None = Field(default=None, ge=0)
 
@@ -158,13 +165,18 @@ class VoiceTurnBuffer(BaseModel):
             self.active_confirmation_revision is None
         ):
             raise ValueError("활성 confirmation ID와 revision은 함께 존재해야 합니다.")
-        if self.state == "confirming_end":
+        if self.state in {"confirmation_prompting", "confirming_end"}:
             if self.active_confirmation_id is None:
-                raise ValueError("confirming_end 상태에는 활성 confirmation이 필요합니다.")
+                raise ValueError("활성 confirmation 상태에는 confirmation ID가 필요합니다.")
             if self.active_confirmation_revision != self.revision:
                 raise ValueError("활성 confirmation revision은 현재 revision과 같아야 합니다.")
         elif self.active_confirmation_id is not None:
-            raise ValueError("confirming_end 상태가 아니면 활성 confirmation을 가질 수 없습니다.")
+            raise ValueError("confirmation 상태가 아니면 활성 confirmation을 가질 수 없습니다.")
+        if (
+            self.confirmation_response_speech_active
+            and self.state != "confirming_end"
+        ):
+            raise ValueError("확인 응답 발화 상태는 confirming_end에서만 활성화할 수 있습니다.")
         if self.state in {"complete_candidate", "committing"}:
             if self.pending_completion_reason is None:
                 raise ValueError("제출 후보와 제출 중 상태에는 완료 사유가 필요합니다.")
@@ -257,6 +269,7 @@ class VoiceTurnBuffer(BaseModel):
         self.latest_decision = None
         self.active_confirmation_id = None
         self.active_confirmation_revision = None
+        self.confirmation_response_speech_active = False
         self.pending_completion_reason = None
         self.state = "listening"
         return True
@@ -342,6 +355,7 @@ class VoiceTurnBuffer(BaseModel):
         self.latest_decision = None
         self.active_confirmation_id = None
         self.active_confirmation_revision = None
+        self.confirmation_response_speech_active = False
         self.pending_completion_reason = None
         self.state = "listening"
 
@@ -391,6 +405,7 @@ class VoiceTurnBuffer(BaseModel):
             self.latest_decision = None
             self.active_confirmation_id = None
             self.active_confirmation_revision = None
+            self.confirmation_response_speech_active = False
             self.pending_completion_reason = None
             self.state = "listening"
         return True
@@ -501,14 +516,14 @@ class VoiceTurnBuffer(BaseModel):
         self.state = "confirmation_pending"
         return True
 
-    def begin_confirmation(
+    def begin_confirmation_prompt(
         self,
         *,
         confirmation_id: str,
         expected_revision: int,
         max_confirmations: int,
     ) -> None:
-        """준비된 종료 확인 질문을 시작하고 사용 횟수를 증가시킨다.
+        """준비된 종료 확인 질문의 프론트 재생·응답 준비 단계를 시작한다.
 
         Args:
             confirmation_id:
@@ -536,7 +551,111 @@ class VoiceTurnBuffer(BaseModel):
         self.confirmation_count += 1
         self.active_confirmation_id = normalized_confirmation_id
         self.active_confirmation_revision = expected_revision
+        self.confirmation_response_speech_active = False
+        self.state = "confirmation_prompting"
+
+    def mark_confirmation_response_ready(
+        self,
+        *,
+        question_id: str,
+        confirmation_id: str,
+        expected_revision: int,
+    ) -> bool:
+        """프론트의 확인 응답 수집 준비 완료를 현재 상태에 반영한다.
+
+        동일한 활성 confirmation이 이미 confirming_end라면 중복 ready로 보고
+        상태를 바꾸지 않는다. 이 반환값을 사용하면 coordinator가 최초 ready에만
+        응답 timeout을 예약할 수 있다.
+
+        Args:
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            confirmation_id:
+                프론트가 응답 준비를 마친 활성 확인 질문 ID.
+
+            expected_revision:
+                확인 질문이 대상으로 삼은 기본 답변 revision.
+
+        Returns:
+            최초 ready를 반영해 confirming_end로 전환했으면 True. 동일 ready가
+            이미 반영돼 있으면 False.
+
+        Raises:
+            VoiceTurnQuestionMismatchError:
+                현재 질문과 다른 질문 ID가 전달된 경우.
+
+            VoiceTurnInvalidTransitionError:
+                활성 confirmation의 ID, revision 또는 상태가 다른 경우.
+        """
+        self._validate_question_id(question_id)
+        if (
+            confirmation_id != self.active_confirmation_id
+            or expected_revision != self.active_confirmation_revision
+            or expected_revision != self.revision
+        ):
+            raise VoiceTurnInvalidTransitionError(
+                "활성 confirmation과 준비 완료 대상이 일치하지 않습니다."
+            )
+        if self.state == "confirming_end":
+            return False
+        self._require_state("confirmation_prompting")
+        self.confirmation_response_speech_active = False
         self.state = "confirming_end"
+        return True
+
+    def update_confirmation_response_activity(
+        self,
+        *,
+        question_id: str,
+        confirmation_id: str,
+        expected_revision: int,
+        speech_active: bool,
+    ) -> bool:
+        """확인 응답 수집 단계의 발화 상태만 갱신한다.
+
+        기본 답변의 speech_active와 답변 revision은 변경하지 않는다. 동일한
+        발화 상태가 중복 수신되면 False를 반환해 timeout 시작 시각이 불필요하게
+        연장되지 않게 한다.
+
+        Args:
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            confirmation_id:
+                발화 상태가 속한 활성 확인 질문 ID.
+
+            expected_revision:
+                활성 확인 질문이 대상으로 삼은 기본 답변 revision.
+
+            speech_active:
+                지원자가 확인 응답을 말하는 중이면 True.
+
+        Returns:
+            발화 상태가 실제로 변경됐으면 True. 중복 상태면 False.
+
+        Raises:
+            VoiceTurnQuestionMismatchError:
+                현재 질문과 다른 질문 ID가 전달된 경우.
+
+            VoiceTurnInvalidTransitionError:
+                확인 응답 대기 상태가 아니거나 활성 confirmation 범위가 다른
+                경우.
+        """
+        self._validate_question_id(question_id)
+        self._require_state("confirming_end")
+        if (
+            confirmation_id != self.active_confirmation_id
+            or expected_revision != self.active_confirmation_revision
+            or expected_revision != self.revision
+        ):
+            raise VoiceTurnInvalidTransitionError(
+                "활성 confirmation과 발화 상태 대상이 일치하지 않습니다."
+            )
+        if self.confirmation_response_speech_active == speech_active:
+            return False
+        self.confirmation_response_speech_active = speech_active
+        return True
 
     def apply_confirmation_intent(
         self,
@@ -620,6 +739,7 @@ class VoiceTurnBuffer(BaseModel):
         self.latest_decision = None
         self.active_confirmation_id = None
         self.active_confirmation_revision = None
+        self.confirmation_response_speech_active = False
         self.pending_completion_reason = None
         self.state = "listening"
 
@@ -668,6 +788,7 @@ class VoiceTurnBuffer(BaseModel):
 
         self.active_confirmation_id = None
         self.active_confirmation_revision = None
+        self.confirmation_response_speech_active = False
         self.pending_completion_reason = "user_confirmed"
         self.speech_active = False
         self.state = "complete_candidate"
@@ -718,12 +839,17 @@ class VoiceTurnBuffer(BaseModel):
             raise VoiceTurnInvalidTransitionError(
                 "발화 중에는 답변 듣기를 중단할 수 없습니다."
             )
+        if self.confirmation_response_speech_active:
+            raise VoiceTurnInvalidTransitionError(
+                "확인 응답 발화 중에는 답변 듣기를 중단할 수 없습니다."
+            )
         if not self.answer_text.strip():
             raise VoiceTurnInvalidTransitionError("빈 답변은 완료 후보가 될 수 없습니다.")
 
         cancelled_confirmation_id = self.active_confirmation_id
         self.active_confirmation_id = None
         self.active_confirmation_revision = None
+        self.confirmation_response_speech_active = False
         self.pending_completion_reason = "listening_cutoff"
         self.state = "complete_candidate"
         return cancelled_confirmation_id
@@ -735,7 +861,11 @@ class VoiceTurnBuffer(BaseModel):
             프론트에 이미 전달된 활성 confirmation ID. 아직 대기 중이라 ID가
             없었거나 확인 상태가 아니면 None.
         """
-        if self.state not in {"confirmation_pending", "confirming_end"}:
+        if self.state not in {
+            "confirmation_pending",
+            "confirmation_prompting",
+            "confirming_end",
+        }:
             return None
         confirmation_id = self.active_confirmation_id
         self.resume_listening()
@@ -753,6 +883,7 @@ class VoiceTurnBuffer(BaseModel):
         self.latest_decision = None
         self.active_confirmation_id = None
         self.active_confirmation_revision = None
+        self.confirmation_response_speech_active = False
         self.pending_completion_reason = None
         self.state = "listening"
 

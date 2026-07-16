@@ -22,6 +22,8 @@ from interview.api.voice.schema import (
     ConnectionReadyMessage,
     TurnConfirmationCancelledMessage,
     TurnConfirmationRequestedMessage,
+    TurnConfirmationResponseActivityChangedMessage,
+    TurnConfirmationResponseReadyMessage,
     TurnConfirmationRespondedMessage,
     TurnStateChangedMessage,
     VoiceActivityChangedMessage,
@@ -243,6 +245,13 @@ async def voice_turn_websocket(
                     question_id=question_id,
                     revision=revision,
                     text=text,
+                    ready_timeout_milliseconds=round(
+                        settings.turn_confirmation_ready_timeout_seconds * 1000
+                    ),
+                    response_timeout_milliseconds=round(
+                        settings.turn_confirmation_response_timeout_seconds * 1000
+                    ),
+                    requires_ready_ack=True,
                 )
             )
 
@@ -577,6 +586,26 @@ async def voice_turn_websocket(
                                 reason="candidate_resumed_speaking",
                             )
                         )
+                elif isinstance(
+                    client_message,
+                    TurnConfirmationResponseReadyMessage,
+                ):
+                    await coordinator.handle_confirmation_response_ready(
+                        confirmation_id=client_message.confirmation_id,
+                        question_id=client_message.question_id,
+                        revision=client_message.revision,
+                        playback_status=client_message.playback_status,
+                    )
+                elif isinstance(
+                    client_message,
+                    TurnConfirmationResponseActivityChangedMessage,
+                ):
+                    await coordinator.handle_confirmation_response_activity_changed(
+                        confirmation_id=client_message.confirmation_id,
+                        question_id=client_message.question_id,
+                        revision=client_message.revision,
+                        speech_active=client_message.speech_active,
+                    )
                 elif isinstance(
                     client_message,
                     TurnConfirmationRespondedMessage,
