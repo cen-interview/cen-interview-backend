@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from interview.evidence.question_patterns import search_interview_question_signals
 from interview.evidence.retrieval import search_evidence
 from interview.llm.client import get_llm
 from interview.llm.logging import log_llm_error, log_llm_output
@@ -19,9 +20,11 @@ from interview.strategy.prompts import (
     CONFIRM_POSITIVE_SYSTEM,
     CONFIRM_NEGATIVE_SYSTEM,
     TRAP_SYSTEM,
-    HINT_SYSTEM
+    HINT_SYSTEM,
+    PATTERN_STYLE_SYSTEM,
 )
 _EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
+_PATTERN_STYLE_TOP_K = 3
 
 
 def filter_reliable_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
@@ -61,6 +64,85 @@ class GeneratedDerivedQuestion(BaseModel):
 class GeneratedHint(BaseModel):
     """LLM이 생성하는 힌트의 구조화 출력."""
     text: str = Field(description="정답을 직접 알려주지 않는 힌트 문장. 한두 문장으로 짧게.")
+
+class StyledQuestion(BaseModel):
+    """LLM이 생성하는 화법 폴리시 결과."""
+    text: str = Field(
+        description="원본 질문의 기술적 내용은 그대로 유지하되 말투·문장 구조만 다듬은 질문. "
+        "한 문장, 반드시 물음표로 끝난다."
+    )
+
+def apply_pattern_style(text: str) -> str:
+    """생성된 질문 문장에 실전 면접 패턴의 화법을 사후적으로 입힌다.
+
+    QuestionGenState 등 그래프 상태에 의존하지 않는 독립 함수다 (입력/출력이
+    text 하나뿐) — MAIN 질문(graph.py), 파생 질문(_generate_derived_question)
+    은 물론 이후 다른 흐름에서도 그대로 재사용할 수 있다.
+
+    패턴 검색은 topic이 아니라 완성된 질문 문장 자체(text)를 쿼리로 쓴다.
+    기술개념형/경험프레임형 어느 쪽이 더 비슷한지는 유사도가 자연히 정해주므로
+    미리 kind를 filter하지 않는다. 매칭되는 패턴이 없거나 호출이 실패하면
+    원본 text를 그대로 반환한다 (질문 생성 자체를 막지 않는다).
+    """
+    if not text.strip():
+        return text
+
+    try:
+        patterns = search_interview_question_signals(query=text, limit=_PATTERN_STYLE_TOP_K)
+    except Exception as exc:
+        log_llm_error(
+            "PATTERN_STYLE_SEARCH",
+            exc,
+            metadata={"original_text": text},
+            fallback={"text": text},
+        )
+        return text
+
+    if not patterns:
+        return text
+
+    pattern_block = "\n".join(f"- {p.pattern_text}" for p in patterns)
+    user_prompt = f"""\
+원본 질문:
+{text}
+
+실전 면접 질문 표현 예시 (말투·문장 구조만 참고, 예시의 기술적 소재는 절대 가져오지 말 것):
+{pattern_block}
+"""
+
+    llm = get_llm(temperature=0.4)
+    structured_llm = llm.with_structured_output(StyledQuestion)
+
+    try:
+        result = structured_llm.invoke(
+            [
+                {"role": "system", "content": PATTERN_STYLE_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+        log_llm_output(
+            "PATTERN_STYLE_APPLY",
+            result,
+            metadata={
+                "original_text": text,
+                "matched_pattern_ids": [p.pattern_id for p in patterns],
+                "matched_similarities": [p.similarity for p in patterns],
+            },
+            input_data={"user_prompt": user_prompt},
+        )
+        return result.text
+    except Exception as exc:
+        log_llm_error(
+            "PATTERN_STYLE_APPLY",
+            exc,
+            metadata={
+                "original_text": text,
+                "matched_pattern_ids": [p.pattern_id for p in patterns],
+            },
+            fallback={"text": text},
+            input_data={"user_prompt": user_prompt},
+        )
+        return text
 
 def _generate_derived_question(
     kind: QuestionKind,
@@ -153,6 +235,8 @@ def _generate_derived_question(
                 "answer_excerpt": answer_excerpt,
             },
         )
+
+    text = apply_pattern_style(text)
 
     return Question(
         question_id=str(uuid4()),

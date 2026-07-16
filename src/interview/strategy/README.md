@@ -30,6 +30,7 @@ graph TD;
         retrieve_evidence(retrieve_evidence)
         generate(generate)
         validate(validate)
+        polish_style(polish_style)
         build_result(build_result)
         __end__([<p>__end__</p>]):::last
         __start__ --> pick_topic;
@@ -37,8 +38,9 @@ graph TD;
         pick_topic --> retrieve_evidence;
         retrieve_evidence -.-> generate;
         retrieve_evidence -.-> pick_topic;
-        validate -.-> build_result;
+        validate -.-> polish_style;
         validate -.-> generate;
+        polish_style --> build_result;
         build_result --> __end__;
         classDef default fill:#f2f0ff,line-height:1.2
         classDef first fill-opacity:0
@@ -47,7 +49,14 @@ graph TD;
 
 - `retrieve_evidence` → `pick_topic`: 근거가 부족하면 대체 주제로 재시도 (최대 3회, `_MAX_RETRY`)
 - `validate` → `generate`: 검증 실패 시 재생성 (최대 1회, `_MAX_REGENERATE`)
-- LLM은 `generate` 노드에서만 호출된다. 최악의 경우에도 LLM 호출은 최대 2회(최초 1회 + 재생성 1회)로 제한된다.
+- `validate` 통과 후 `polish_style`: evidence 기반으로 완성된 질문 문장에, 전역 질문 패턴 스토어
+  (`evidence.question_patterns.search_interview_question_signals`)에서 의미적으로 가장 가까운 실전
+  질문을 찾아 화법·문장 구조만 입힌다. 쿼리는 topic이 아니라 완성된 질문 문장 자체 — 기술개념형/
+  경험프레임형 어느 쪽이 더 비슷한지는 유사도가 자연히 정하므로 미리 kind를 필터링하지 않는다. 매칭
+  실패/미스가 있어도 원본 문장을 그대로 쓰므로 이 단계가 실패해도 질문 생성 자체는 막히지 않는다.
+  같은 로직(`question_gen.apply_pattern_style`)을 파생 질문(`_generate_derived_question`)에도 재사용한다.
+- LLM은 `generate`/`polish_style` 노드에서 호출된다. 최악의 경우 LLM 호출은 최대 3회(생성 1회 + 재생성
+  1회 + 스타일 폴리시 1회)로 제한된다.
 
 ### 메인 질문만 그래프인 이유
 
@@ -58,6 +67,27 @@ graph TD;
 - 근거 부족 시 재시도할 대체 주제라는 개념 자체가 파생 질문에는 없다 (같은 topic 안에서 target만 다르게 검색할 뿐).
 - 검증(validate) 단계도 재생성 루프도 두지 않았다. 파생 질문은 답변 흐름 중간에 빠르게 나가야 해서, 메인 질문만큼 무겁게 다룰 필요가 없다고 판단했다.
 - 즉 메인 질문은 "대체 주제 탐색 + 재생성"이라는 분기/루프가 있어 그래프로 표현할 가치가 있지만, 파생 질문은 분기가 없어 그래프로 감싸면 오히려 불필요한 복잡도만 늘어난다.
+
+## 다음 메인 질문 프리페치 (agent.py)
+
+`next_question()`은 매번 그래프를 처음부터 동기 호출하는 대신, 반환 직전에 **다음** 메인 질문 생성을
+백그라운드 스레드(`ThreadPoolExecutor(max_workers=1)`)로 미리 시작해둔다. Interviewer 그래프는
+질문을 낸 뒤 `wait_event`에서 지원자 응답을 기다리며 멈추므로(`interviewer/workflow/graph.py`), 그
+유휴 시간 동안 다음 질문 생성을 끝내두는 구조다.
+
+- **난이도 추정**: 다음 호출의 실제 `last_signal`은 아직 알 수 없으므로, 방금 낸 질문과 같은 난이도로
+  추정해서 미리 생성한다. `difficulty.next_difficulty()`의 기본 분기(우선순위 6, "직전 난이도 유지")가
+  가장 흔한 경우라 대부분 들어맞는다.
+- **소비 시점**: 다음 `next_question()` 호출에서 진짜 `last_signal`로 실제 난이도를 계산한 뒤 추정
+  난이도와 비교한다.
+  - 일치하면 프리페치 결과를 그대로 쓴다 (완료 전이면 `future.result()`로 대기 - 지금 새로 시작하는
+    것보다 항상 빠르거나 같다).
+  - 불일치하면 프리페치 결과는 버리고 기존처럼 동기 생성한다. 이 경우도 기존 대비 느려지지 않는다.
+- **안전장치**: 백그라운드 스레드에는 `StrategyState`를 `model_copy(deep=True)`로 스냅샷을 떠서
+  넘긴다 - 그 사이 파생 질문(`_record()`)이 메인 스레드에서 실제 state를 계속 바꿀 수 있기 때문이다.
+  꺼내 쓰기 직전에는 `asked_question_texts`와의 중복 여부를 LLM 호출 없이 한 번 더 검사한다 - 프리페치
+  시작 이후 늘어난 질문 이력은 프리페치 시점의 `validate()`가 미처 반영하지 못했을 수 있어서다.
+- 첫 질문(`last_signal=None`)은 프리페치 대상이 아니라 항상 동기 생성이다.
 
 ## 주제 선택 규칙 (pick_topic)
 
