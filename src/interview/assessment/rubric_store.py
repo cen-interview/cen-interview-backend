@@ -1,8 +1,11 @@
 """공개 rubric의 저장과 답변-기준 유사도 검색."""
 
+from collections import OrderedDict
 from collections.abc import Callable
 from hashlib import sha1
 import re
+from threading import RLock
+from time import monotonic
 from typing import Any
 
 from langchain_openai import OpenAIEmbeddings
@@ -26,6 +29,8 @@ from interview.schemas.rubric import (
 QUESTION_DUPLICATE_THRESHOLD = 0.9
 QUESTION_SEARCH_TOP_K = 5
 CRITERION_DUPLICATE_THRESHOLD = 0.9
+QUESTION_CACHE_TTL_SECONDS = 900.0
+QUESTION_CACHE_MAX_SIZE = 512
 
 
 class RubricStore:
@@ -46,6 +51,14 @@ class RubricStore:
         self.backend = (backend or settings.evidence_store_backend).lower()
         self.embedding_client = embedding_client
         self._candidates: list[tuple[RubricCandidate, list[float]]] = []
+        self._cache_lock = RLock()
+        self._index_version = 0
+        self._question_embedding_cache: OrderedDict[
+            str, tuple[float, list[float]]
+        ] = OrderedDict()
+        self._question_candidate_cache: OrderedDict[
+            tuple[int, str, str], tuple[float, list[tuple[int, float]]]
+        ] = OrderedDict()
         if session_factory is not None:
             self._session_factory = session_factory
         elif database_url is not None and database_url != settings.database_url:
@@ -73,6 +86,7 @@ class RubricStore:
                     candidate.criteria, criterion_embeddings, strict=True
                 )
             )
+            self._invalidate_candidate_cache()
             return
 
         with self._session_factory() as db:
@@ -130,6 +144,7 @@ class RubricStore:
                     RubricVectorRecord.rubric_set_id == rubric_set.id
                 )
             ).all()
+            candidate_required_records: list[RubricVectorRecord] = []
             for criterion, embedding in zip(
                 candidate.criteria, criterion_embeddings, strict=True
             ):
@@ -168,11 +183,53 @@ class RubricStore:
                     db.add(record)
                     existing_records.append(record)
                 else:
-                    values["required"] = record.required or criterion.required
                     values["weight"] = max(record.weight, criterion.weight)
                     for key, value in values.items():
                         setattr(record, key, value)
+                if criterion.required:
+                    candidate_required_records.append(record)
+
+            # 과거의 required 플래그를 OR로 누적하지 않고,
+            # 검증된 최신 후보의 1~2개 필수 기준을 반영한다.
+            for record in existing_records:
+                record.required = any(
+                    record is required_record
+                    for required_record in candidate_required_records
+                )
             db.commit()
+        self._invalidate_candidate_cache()
+
+    def prefetch_question(
+        self,
+        question_id: str,
+        question_text: str,
+        topic: str,
+    ) -> None:
+        """질문 노출 시 임베딩과 Top-K 후보를 미리 캐시에 적재한다.
+
+        prefetch 실패는 실제 답변 평가에서 다시 조회할 수 있으므로 호출자가
+        면접 흐름을 중단하지 않도록 예외를 처리해야 한다.
+        """
+        if self.backend == "memory":
+            self._get_question_embedding(question_text)
+            return
+
+        with self._session_factory() as db:
+            exact = db.scalar(
+                select(RubricSetRecord.id).where(
+                    RubricSetRecord.question_id == question_id,
+                    RubricSetRecord.status == "verified",
+                )
+            )
+            if exact is not None:
+                return
+            question_embedding = self._get_question_embedding(question_text)
+            self._get_question_candidates_cached(
+                db,
+                question_embedding=question_embedding,
+                question_text=question_text,
+                topic=topic,
+            )
 
     def filter_novel_questions(
         self,
@@ -320,6 +377,8 @@ class RubricStore:
                 question_similarity=question_similarity,
             )
 
+        answer_segments = _answer_segments(answer_text)
+        answer_embeddings: list[list[float]] | None = None
         with self._session_factory() as db:
             exact_rubric_set = db.scalar(
                 select(RubricSetRecord).where(
@@ -331,22 +390,32 @@ class RubricStore:
             if exact_rubric_set is not None:
                 candidates = [(exact_rubric_set, 1.0)]
             elif question_text and topic:
-                question_embedding = self._embed_documents([question_text])[0]
+                question_embedding = self._question_embedding_from_cache(
+                    question_text
+                )
+                if question_embedding is None:
+                    embeddings = self._embed_documents(
+                        [question_text, *answer_segments]
+                    )
+                    question_embedding = embeddings[0]
+                    answer_embeddings = embeddings[1:]
+                    self._cache_question_embedding(
+                        question_text, question_embedding
+                    )
                 candidates = [
                     item
-                    for item in self._find_question_candidates(
+                    for item in self._get_question_candidates_cached(
                         db,
                         question_embedding=question_embedding,
+                        question_text=question_text,
                         topic=topic,
-                        top_k=QUESTION_SEARCH_TOP_K,
                     )
                     if item[1] >= question_threshold
                 ]
             if not candidates:
                 return None
-            answer_embeddings = self._embed_documents(
-                _answer_segments(answer_text)
-            )
+            if answer_embeddings is None:
+                answer_embeddings = self._embed_documents(answer_segments)
             matches = [
                 self._match_candidate(
                     db,
@@ -370,6 +439,101 @@ class RubricStore:
                 match.question_similarity or 0.0,
             ),
         )
+
+    def _get_question_candidates_cached(
+        self,
+        db: Session,
+        *,
+        question_embedding: list[float],
+        question_text: str,
+        topic: str,
+    ) -> list[tuple[RubricSetRecord, float]]:
+        cache_key = (
+            self._index_version,
+            _normalize_topic(topic),
+            _normalize_question(question_text),
+        )
+        now = monotonic()
+        with self._cache_lock:
+            cached = self._question_candidate_cache.get(cache_key)
+            if cached is not None and cached[0] > now:
+                self._question_candidate_cache.move_to_end(cache_key)
+                cached_rows = cached[1]
+            else:
+                if cached is not None:
+                    del self._question_candidate_cache[cache_key]
+                cached_rows = None
+        if cached_rows is None:
+            found = self._find_question_candidates(
+                db,
+                question_embedding=question_embedding,
+                topic=topic,
+                top_k=QUESTION_SEARCH_TOP_K,
+            )
+            cached_rows = [(rubric_set.id, score) for rubric_set, score in found]
+            with self._cache_lock:
+                self._question_candidate_cache[cache_key] = (
+                    now + QUESTION_CACHE_TTL_SECONDS,
+                    cached_rows,
+                )
+                self._trim_cache(self._question_candidate_cache)
+
+        if not cached_rows:
+            return []
+        ids = [rubric_set_id for rubric_set_id, _ in cached_rows]
+        rubric_sets = db.scalars(
+            select(RubricSetRecord).where(RubricSetRecord.id.in_(ids))
+        ).all()
+        by_id = {rubric_set.id: rubric_set for rubric_set in rubric_sets}
+        return [
+            (by_id[rubric_set_id], score)
+            for rubric_set_id, score in cached_rows
+            if rubric_set_id in by_id
+        ]
+
+    def _get_question_embedding(self, question_text: str) -> list[float]:
+        cached = self._question_embedding_from_cache(question_text)
+        if cached is not None:
+            return cached
+        embedding = self._embed_documents([question_text])[0]
+        self._cache_question_embedding(question_text, embedding)
+        return embedding
+
+    def _question_embedding_from_cache(
+        self, question_text: str
+    ) -> list[float] | None:
+        key = _normalize_question(question_text)
+        now = monotonic()
+        with self._cache_lock:
+            cached = self._question_embedding_cache.get(key)
+            if cached is None:
+                return None
+            if cached[0] <= now:
+                del self._question_embedding_cache[key]
+                return None
+            self._question_embedding_cache.move_to_end(key)
+            return cached[1]
+
+    def _cache_question_embedding(
+        self, question_text: str, embedding: list[float]
+    ) -> None:
+        key = _normalize_question(question_text)
+        with self._cache_lock:
+            self._question_embedding_cache[key] = (
+                monotonic() + QUESTION_CACHE_TTL_SECONDS,
+                embedding,
+            )
+            self._trim_cache(self._question_embedding_cache)
+
+    def _invalidate_candidate_cache(self) -> None:
+        with self._cache_lock:
+            self._index_version += 1
+            self._question_candidate_cache.clear()
+
+    @staticmethod
+    def _trim_cache(cache: OrderedDict[Any, Any]) -> None:
+        while len(cache) > QUESTION_CACHE_MAX_SIZE:
+            cache.popitem(last=False)
 
     def _find_question_candidates(
         self,
@@ -483,7 +647,9 @@ class RubricStore:
             ):
                 rubric_set.question_embedding = embedding
             db.commit()
-            return len(rubric_sets)
+            updated_count = len(rubric_sets)
+        self._invalidate_candidate_cache()
+        return updated_count
 
     def _embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self._get_embeddings().embed_documents(texts)
@@ -508,6 +674,11 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
 def _normalize_topic(topic: str) -> str:
     """Normalize topic spelling for comparisons within one interview."""
     return " ".join(topic.strip().casefold().split())
+
+
+def _normalize_question(question: str) -> str:
+    """표현 캐시 키가 공백과 대소문자 차이로 분리되지 않게 정규화한다."""
+    return " ".join(question.strip().casefold().split())
 
 
 def _duplicates_selected_source(

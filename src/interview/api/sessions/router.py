@@ -1,8 +1,9 @@
 """면접 세션 생성과 이벤트 처리를 제공하는 FastAPI 라우터."""
 
 from collections.abc import Callable
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from interview.api.auth.dependency import get_current_user
 from interview.api.sessions.schema import (
@@ -28,7 +29,8 @@ from interview.interviewer.turn_completion.telemetry import (
     monotonic_time,
 )
 from interview.schemas.events import Mode
-from interview.schemas.question import Question
+from interview.schemas.question import Question, QuestionCategory
+from interview.assessment.rubric_store import get_rubric_store
 from sqlalchemy.orm import Session
 
 from interview.api.database import get_db
@@ -44,6 +46,7 @@ from interview.api.interviews.model import (
 
 
 router = APIRouter(prefix="/sessions", tags=["Interview Sessions"])
+_logger = logging.getLogger("uvicorn.error")
 
 SessionFactory = Callable[..., tuple[InterviewSession, Question]]
 
@@ -63,6 +66,7 @@ def get_interview_session_factory() -> SessionFactory:
 @router.post("")
 def start_session(
     req: StartRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     session_factory: SessionFactory = Depends(get_interview_session_factory),
     db: Session = Depends(get_db),
@@ -116,6 +120,8 @@ def start_session(
         mode=mode,
     )
 
+    background_tasks.add_task(_prefetch_current_question, state)
+
     return _session_response(state)
 
 
@@ -123,6 +129,7 @@ def start_session(
 def post_event(
     session_id: str,                          # 진행할 면접
     req: EventRequest,                        # 제출한 답변
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -243,11 +250,33 @@ def post_event(
             session=session,
         )
         result_id = result.id
+    else:
+        background_tasks.add_task(_prefetch_current_question, state)
 
     return _session_response(
         state,
         result_id=result_id,
     )
+
+
+def _prefetch_current_question(state: SessionState) -> None:
+    """응답 전송 후 현재 기술 질문의 rubric 후보를 미리 조회한다."""
+    question = state.current_question
+    if question is None or question.category != QuestionCategory.TECHNICAL:
+        return
+    try:
+        get_rubric_store().prefetch_question(
+            question_id=question.question_id,
+            question_text=question.text,
+            topic=question.topic,
+        )
+    except Exception as exc:
+        # prefetch는 최적화일 뿐이므로 실패해도 실제 평가를 막지 않는다.
+        _logger.warning(
+            "[ASSESSMENT][RUBRIC][PREFETCH_FAILED] question_id=%s error=%s",
+            question.question_id,
+            exc,
+        )
 
 
 @router.post("/{session_id}/rubric-consent")

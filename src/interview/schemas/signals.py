@@ -111,8 +111,7 @@ class AnswerQualitySignal(BaseModel):
     sufficiency: float = Field(default=0.0, ge=0.0, le=1.0)
 
     delivery_note: str | None = None
-    evaluation_source: Literal["llm", "rubric"] = "llm"
+    evaluation_source: Literal["llm", "rubric", "rule"] = "llm"
     rubric_version: str | None = None
     rubric_question_similarity: float | None = None
-
 

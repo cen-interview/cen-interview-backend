@@ -49,6 +49,7 @@
 """
 
 import logging
+import re
 from uuid import uuid4
 
 from interview.assessment import report_builder
@@ -72,6 +73,19 @@ from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.assessment.graph import AssessmentState, get_compiled_graph
 
 _logger = logging.getLogger("uvicorn.error")
+
+_EXPLICIT_UNKNOWN_ANSWERS = {
+    "모르겠습니다",
+    "잘 모르겠습니다",
+    "모르겠어요",
+    "잘 모르겠어요",
+    "몰라요",
+    "몰라",
+    "기억이 나지 않습니다",
+    "기억이 안 납니다",
+    "패스하겠습니다",
+    "패스할게요",
+}
 
 class AssessmentAgent:
     """답변 평가 상태를 관리하는 Assessment Agent.
@@ -147,7 +161,9 @@ class AssessmentAgent:
                 quality 값에 따라 다음 메인 질문, 꼬리 질문, 압박 질문,
                 확인 질문, 함정 질문 등의 흐름이 결정된다.
         """
-        signal = self._evaluate_with_rubric(question, answer_text)
+        signal = self._evaluate_explicit_unknown(question, answer_text)
+        if signal is None:
+            signal = self._evaluate_with_rubric(question, answer_text)
         assessment_evidence_ids: list[str] = []
         if signal is None:
             state = AssessmentState(
@@ -197,6 +213,32 @@ class AssessmentAgent:
         self.all_attempts.append(attempt)
 
         return signal
+
+    def _evaluate_explicit_unknown(
+        self,
+        question: Question,
+        answer_text: str,
+    ) -> AnswerQualitySignal | None:
+        """명시한 모름/패스 답변은 검색과 LLM 평가를 생략한다."""
+        normalized = re.sub(r"[\s.!?,~ㅋㅎ]+$", "", answer_text.strip()).casefold()
+        normalized = " ".join(normalized.split())
+        if normalized not in _EXPLICIT_UNKNOWN_ANSWERS:
+            return None
+
+        _logger.info(
+            "[ASSESSMENT][RULE][LLM_SKIPPED] question_id=%s "
+            "reason=explicit_unknown",
+            question.question_id,
+        )
+        return AnswerQualitySignal(
+            answer_id=f"answer-{uuid4()}",
+            question_id=question.question_id,
+            quality=AnswerQuality.UNKNOWN,
+            rationale=["답변자가 해당 내용을 모른다고 명시했습니다."],
+            accuracy=0.0,
+            sufficiency=0.0,
+            evaluation_source="rule",
+        )
 
     def _evaluate_with_rubric(
         self,

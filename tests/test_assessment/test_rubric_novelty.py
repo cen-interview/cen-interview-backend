@@ -96,3 +96,29 @@ def test_current_interview_duplicate_questions_keep_first_source():
     result = store.filter_novel_questions(sources)
 
     assert [source.question_id for source in result] == ["first"]
+
+
+def test_question_embedding_cache_reuses_prefetched_vector():
+    question = "FastAPI란 무엇인가요?"
+    embeddings = FakeEmbeddings({question: [1.0, 0.0]})
+    store = RubricStore(backend="memory", embedding_client=embeddings)
+
+    store.prefetch_question("q-1", question, "FastAPI")
+    store.prefetch_question("q-2", f"  {question}  ", "fastapi")
+
+    assert embeddings.calls == [[question]]
+
+
+def test_rubric_update_invalidates_candidate_cache_version():
+    question = "FastAPI 비동기 함수는 언제 사용하나요?"
+    criterion = "비동기 I/O를 설명한다."
+    embeddings = FakeEmbeddings({
+        question: [1.0, 0.0],
+        criterion: [0.0, 1.0],
+    })
+    store = RubricStore(backend="memory", embedding_client=embeddings)
+    initial_version = store._index_version
+
+    store.add_candidate(_candidate(question))
+
+    assert store._index_version == initial_version + 1

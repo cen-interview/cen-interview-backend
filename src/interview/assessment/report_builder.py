@@ -103,6 +103,7 @@ def build_report_result(
         evidence_chunks=evidence_chunks,
         rubric_sources=rubric_sources,
     )
+    report_content = _normalize_report_highlights(report_content)
     
     summarized_evaluations = []
 
@@ -356,8 +357,12 @@ def _build_rubric_generation_context(
     return (
         "[Rubric 생성 요청]\n"
         "사용자가 공유에 동의했습니다. 아래 질문에 대해서만 재사용 가능한 "
-        "평가 기준을 생성하세요. 질문당 3~5개 기준을 작성하고, 핵심 정답 "
-        "요소는 required=true, 예시와 부가 설명은 required=false로 두세요. "
+        "평가 기준을 생성하세요. 질문당 3~5개 기준을 작성하고, "
+        "질문에 직접 답하는 최소 핵심 1~2개만 required=true로 두세요. "
+        "required 기준만 충족한 짧은 답변도 sufficient여야 합니다. "
+        "사용 사례, 예시, 장단점, 한계, 비교, 심화 설명은 "
+        "required=false로 두고 핵심 기준을 목록 앞쪽에 두세요. "
+        "서로 비슷한 내용을 여러 기준으로 나누지 마세요. "
         "사용자 이름, 프로젝트명, 개인정보는 제외하고 question_id를 변경하지 "
         "마세요.\n\n"
         f"{rendered_sources}"
@@ -553,3 +558,49 @@ def _collect_unique_items(
 
 
     return list(dict.fromkeys(items))
+
+
+def _normalize_report_highlights(content: ReportContent) -> ReportContent:
+    """강점·보완·학습 항목을 각각 최대 5개로 제한한다."""
+    return content.model_copy(
+        update={
+            "summary": _normalize_report_summary(content.summary),
+            "strengths": _normalize_highlight_items(content.strengths, 5),
+            "improvement_points": _normalize_highlight_items(
+                content.improvement_points, 5
+            ),
+            "learning_recommendations": _normalize_highlight_items(
+                content.learning_recommendations, 5
+            ),
+        }
+    )
+
+
+def _normalize_report_summary(summary: str) -> str:
+    """요약을 Markdown 없는 80자 이내의 한 문장으로 정리한다."""
+    text = re.sub(r"[*_`#]+", "", summary)
+    text = " ".join(text.split()).strip()
+    sentence = re.match(r"^.*?[.!?](?:\s|$)", text)
+    if sentence is not None:
+        text = sentence.group(0).strip()
+    if len(text) > 80:
+        text = text[:79].rstrip() + "…"
+    return text
+
+
+def _normalize_highlight_items(items: list[str], limit: int) -> list[str]:
+    normalized: list[str] = []
+    for item in items:
+        text = re.sub(r"[*_`#]+", "", item)
+        text = re.sub(r"^\s*[-•✓✔]+\s*", "", text)
+        text = " ".join(text.split()).strip()
+        sentence = re.match(r"^.*?[.!?](?:\s|$)", text)
+        if sentence is not None:
+            text = sentence.group(0).strip()
+        if len(text) > 60:
+            text = text[:59].rstrip() + "…"
+        if text and text not in normalized:
+            normalized.append(text)
+        if len(normalized) == limit:
+            break
+    return normalized

@@ -104,7 +104,10 @@ def test_external_compatibility_fields_are_always_removed():
         }
     )
     content = ReportContent(
-        summary="summary",
+        summary=(
+            "**FastAPI와는 아는 사이, 비동기와는 아직 어색한 사이예요.** "
+            "이 문장은 제외됩니다."
+        ),
         code_analysis=[[analysis_with_long_code]],
     )
 
@@ -117,4 +120,57 @@ def test_external_compatibility_fields_are_always_removed():
     assert secret not in analysis.current_code
     assert len(analysis.current_code) <= (
         report_builder.EVIDENCE_MAX_CHARS_PER_CHUNK + 30
+    )
+
+
+def test_report_highlights_are_short_plain_text_and_limited_to_five_each():
+    content = ReportContent(
+        summary=(
+            "**FastAPI와는 아는 사이, 비동기와는 아직 어색한 사이예요.** "
+            "이 문장은 제외됩니다."
+        ),
+        strengths=[
+            "**FastAPI의 정의를 정확하게 설명했습니다. 추가 문장입니다.**",
+            "✓ Pydantic 검증의 장점을 이해했습니다.",
+            "세 번째 강점은 제외됩니다.",
+        ],
+        improvement_points=[
+            "**비동기 처리 원리를 보완해야 합니다.**",
+            "- 의존성 주입의 활용법을 학습해야 합니다.",
+            "세 번째 보완점은 제외됩니다.",
+        ],
+        learning_recommendations=[
+            "FastAPI 공식 문서로 핵심 개념을 복습하세요.",
+            "두 번째 추천은 제외됩니다.",
+        ],
+    )
+
+    normalized = report_builder._normalize_report_highlights(content)
+
+    assert normalized.summary == (
+        "FastAPI와는 아는 사이, 비동기와는 아직 어색한 사이예요."
+    )
+    assert normalized.strengths[:2] == [
+        "FastAPI의 정의를 정확하게 설명했습니다.",
+        "Pydantic 검증의 장점을 이해했습니다.",
+    ]
+    assert len(normalized.strengths) == 3
+    assert len(normalized.improvement_points) == 3
+    assert len(normalized.learning_recommendations) == 2
+    assert sum(
+        len(items)
+        for items in (
+            normalized.strengths,
+            normalized.improvement_points,
+            normalized.learning_recommendations,
+        )
+    ) <= 15
+    assert all(
+        "**" not in item
+        for items in (
+            normalized.strengths,
+            normalized.improvement_points,
+            normalized.learning_recommendations,
+        )
+        for item in items
     )

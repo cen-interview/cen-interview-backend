@@ -135,10 +135,7 @@ def score_question_set(
 # 점수를 0~100 범위로 제한하고 소수점 둘째 자리까지 반올림한다.
 def _clamp_score(score: float) -> float:
 
-    return round(
-        max(0.0, min(100.0, score)),
-        2,
-    )
+    return round(max(0.0, min(100.0, score)))
 
 # 기본 점수에 비율 방식의 가산점 또는 감점을 적용한다.
 def _apply_score_rate(

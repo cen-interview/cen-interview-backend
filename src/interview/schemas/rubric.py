@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RubricCriterion(BaseModel):
@@ -6,7 +6,7 @@ class RubricCriterion(BaseModel):
 
     criterion_id: str
     description: str
-    required: bool = True
+    required: bool = False
     weight: float = Field(default=1.0, ge=0.0)
 
 
@@ -18,6 +18,31 @@ class RubricCandidate(BaseModel):
     question: str
     criteria: list[RubricCriterion] = Field(default_factory=list)
     rubric_version: str = "v1"
+
+    @model_validator(mode="after")
+    def normalize_required_criteria(self) -> "RubricCandidate":
+        """필수 기준을 1~2개로 제한해 부가 설명의 필수화를 막는다."""
+        if not self.criteria:
+            return self
+
+        required_indices = [
+            index
+            for index, criterion in enumerate(self.criteria)
+            if criterion.required
+        ]
+        if not required_indices:
+            required_indices = [0]
+        else:
+            required_indices = required_indices[:2]
+
+        required_index_set = set(required_indices)
+        self.criteria = [
+            criterion.model_copy(
+                update={"required": index in required_index_set}
+            )
+            for index, criterion in enumerate(self.criteria)
+        ]
+        return self
 
 
 class RubricSource(BaseModel):
