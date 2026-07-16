@@ -424,7 +424,9 @@ class VoiceTurnCoordinator:
         """누적 전사문 최신본을 반영하고 완료 판단 후보로 제출한다.
 
         확인 준비 또는 재생 중 더 높은 revision의 전사문이 도착하면 confirmation을
-        취소하고 사용자 답변 수집을 우선한다.
+        취소하고 사용자 답변 수집을 우선한다. 자동 제출 유예 중 내용이 같은 최종
+        전사가 더 높은 revision으로 다시 오면 기존 판단을 새 revision으로 승계해
+        중복 STT 이벤트가 제출 후보를 영구적으로 취소하지 않게 한다.
 
         Args:
             question_id:
@@ -461,16 +463,24 @@ class VoiceTurnCoordinator:
         self._validate_current_question(session_state, question_id)
 
         cancelled_confirmation_id: str | None = None
+        policy_result: _DecisionPolicyResult | None = None
+        policy_decision: TurnCompletionDecision | None = None
+        equivalent_completion_candidate = False
         async with self._entry.lock:
-            previous_state = self._entry.buffer.state
-            cancelled_confirmation_id = self._entry.buffer.active_confirmation_id
+            buffer = self._entry.buffer
+            previous_state = buffer.state
+            previous_revision = buffer.revision
+            previous_answer_text = buffer.answer_text
+            previous_decision_revision = buffer.latest_decision_revision
+            previous_decision = buffer.latest_decision
+            cancelled_confirmation_id = buffer.active_confirmation_id
             reconnect_snapshot = (
                 self._accept_equal_reconnect_snapshot
-                and revision == self._entry.buffer.revision
+                and revision == buffer.revision
             )
             if reconnect_snapshot:
                 try:
-                    self._entry.buffer.synchronize_reconnect_snapshot(
+                    buffer.synchronize_reconnect_snapshot(
                         question_id=question_id,
                         revision=revision,
                         text=text,
@@ -482,11 +492,11 @@ class VoiceTurnCoordinator:
                 except VoiceTurnRevisionConflictError as exc:
                     log_voice_turn_event(
                         "voice_turn.connection.revision_conflict",
-                        session_id=self._entry.buffer.session_id,
+                        session_id=buffer.session_id,
                         question_id=question_id,
                         revision=revision,
                         answer_text=text,
-                        server_revision=self._entry.buffer.revision,
+                        server_revision=buffer.revision,
                     )
                     raise VoiceTurnCoordinatorError(
                         "revision_conflict",
@@ -496,7 +506,7 @@ class VoiceTurnCoordinator:
                 updated = True
                 self._accept_equal_reconnect_snapshot = False
             else:
-                updated = self._entry.buffer.update_transcript(
+                updated = buffer.update_transcript(
                     question_id=question_id,
                     revision=revision,
                     text=text,
@@ -510,20 +520,45 @@ class VoiceTurnCoordinator:
             if not updated:
                 log_voice_turn_event(
                     "voice_turn.transcript.discarded",
-                    session_id=self._entry.buffer.session_id,
+                    session_id=buffer.session_id,
                     question_id=question_id,
                     revision=revision,
                     answer_text=text,
                     discard_reason="stale_revision",
-                    server_revision=self._entry.buffer.revision,
+                    server_revision=buffer.revision,
                 )
                 raise VoiceTurnCoordinatorError(
                     "stale_revision",
                     "최신 전사문보다 오래된 이벤트입니다.",
                     recoverable=True,
                 )
+            equivalent_completion_candidate = (
+                not reconnect_snapshot
+                and previous_state == "complete_candidate"
+                and previous_decision is not None
+                and previous_decision_revision == previous_revision
+                and " ".join(previous_answer_text.split())
+                == " ".join(text.split())
+                and not speech_active
+                and segment_final
+                and previous_decision.recommended_action == "auto_submit"
+            )
+            if equivalent_completion_candidate:
+                carried_result = TurnCompletionResult(
+                    question_id=question_id,
+                    revision=revision,
+                    decision=previous_decision,
+                    fallback_used=False,
+                )
+                buffer.record_decision(carried_result)
+                policy_decision = previous_decision
+                policy_result = self._apply_decision_policy(
+                    buffer=buffer,
+                    decision=policy_decision,
+                    revision=revision,
+                )
             snapshot = self._build_snapshot(session_state)
-            buffer_snapshot = self._entry.buffer.model_copy(deep=True)
+            buffer_snapshot = buffer.model_copy(deep=True)
 
         if reconnect_snapshot:
             log_voice_turn_event(
@@ -553,8 +588,20 @@ class VoiceTurnCoordinator:
                 question_id=buffer_snapshot.question_id,
                 revision=buffer_snapshot.revision,
                 answer_text=buffer_snapshot.answer_text,
-                cancel_reason="new_transcript",
-                candidate_resumed_speaking=True,
+                cancel_reason=(
+                    "equivalent_transcript_revision"
+                    if equivalent_completion_candidate
+                    else "new_transcript"
+                ),
+                candidate_resumed_speaking=speech_active,
+            )
+
+        if policy_result is not None and policy_decision is not None:
+            await self._dispatch_decision_policy(
+                policy_result=policy_result,
+                buffer_snapshot=buffer_snapshot,
+                decision=policy_decision,
+                decision_trigger="equivalent_transcript",
             )
 
         await self._worker.submit(snapshot)
@@ -975,8 +1022,8 @@ class VoiceTurnCoordinator:
                 현재 revision의 TurnCompletionDecision.
 
         Returns:
-            답변, 발화, STT 안정화, 의미 완료와 confidence 조건을 모두
-            만족하면 True.
+            답변, 발화, STT 안정화, LLM의 자동 제출 권장과 confidence 조건을
+            모두 만족하면 True.
         """
         return (
             bool(buffer.answer_text.strip())
@@ -984,9 +1031,6 @@ class VoiceTurnCoordinator:
             and buffer.segment_final
             and decision.semantic_state == "complete"
             and decision.recommended_action == "auto_submit"
-            and decision.linguistically_closed
-            and decision.question_satisfied
-            and decision.continuation_expected == "low"
             and decision.confidence >= self._auto_submit_confidence
             and decision.reason_code != "insufficient_context"
         )
