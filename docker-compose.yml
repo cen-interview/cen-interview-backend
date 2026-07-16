@@ -23,6 +23,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - /home/ubuntu/data:/app/data:ro
     env_file:
       - .env
 
