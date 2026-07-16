@@ -1,14 +1,10 @@
 """Interviewer 5단계 발화 조립과 LLM 폴백 단위 테스트."""
 
-import time
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
-import interview.interviewer.speech.composition as interviewer_composition
-from interview.interviewer.models import ComposedUtterance
-from interview.interviewer.session import SessionState, Turn
+from interview.interviewer.session import SessionState
 from interview.interviewer.speech.composition import compose_utterance
 from interview.interviewer.speech import utterance
 from interview.interviewer.workflow.runtime import InterviewDeps
@@ -35,69 +31,14 @@ def make_question(kind: QuestionKind = QuestionKind.MAIN) -> Question:
     )
 
 
-class FakeLlm:
-    """구조화 출력과 호출 결과를 제어하는 발화 생성 LLM fake."""
+class FailIfCalledLlm:
+    """발화 조립이 LLM에 접근하면 즉시 실패하는 테스트 대역."""
 
-    def __init__(
-        self,
-        output: Any = None,
-        error: Exception | None = None,
-        delay_seconds: float = 0.0,
-    ) -> None:
-        """반환값, 예외, 지연 시간을 초기화한다.
-
-        Args:
-            output:
-                invoke가 반환할 구조화 출력 또는 dict.
-
-            error:
-                invoke에서 발생시킬 선택적 예외.
-
-            delay_seconds:
-                시간 초과 상황을 만들기 위한 호출 지연 시간.
-        """
-        self.output = output
-        self.error = error
-        self.delay_seconds = delay_seconds
-        self.schema: type | None = None
-        self.messages: list[dict[str, str]] | None = None
-
-    def with_structured_output(self, schema: type) -> "FakeLlm":
-        """요청받은 구조화 출력 모델을 기록하고 자신을 반환한다.
-
-        Args:
-            schema:
-                LLM이 반환해야 하는 Pydantic 구조화 출력 모델.
-
-        Returns:
-            invoke를 이어서 호출할 현재 FakeLlm 인스턴스.
-        """
-        self.schema = schema
-        return self
-
-    def invoke(self, messages: list[dict[str, str]]) -> Any:
-        """설정된 지연과 예외를 적용한 뒤 고정 결과를 반환한다.
-
-        Args:
-            messages:
-                발화 생성에 전달된 system 및 user 메시지.
-
-        Returns:
-            생성 시 지정한 구조화 출력 대역값.
-
-        Raises:
-            Exception:
-                생성 시 error가 지정된 경우 해당 예외.
-        """
-        self.messages = messages
-        if self.delay_seconds:
-            time.sleep(self.delay_seconds)
-        if self.error is not None:
-            raise self.error
-        return self.output
+    def with_structured_output(self, _schema: type):
+        raise AssertionError("template utterance must not call an LLM")
 
 
-def make_runtime(llm: Any = None) -> SimpleNamespace:
+def make_runtime(llm: object | None = None) -> SimpleNamespace:
     """compose_utterance에 전달할 LangGraph runtime 대역을 만든다.
 
     Args:
@@ -171,7 +112,7 @@ def test_compose_utterance_uses_template_for_question_kind(kind, expected_preamb
 
     assert question.text == original_text
     assert result["last_utterance"] == f"{expected_preamble}\n\n{original_text}"
-    assert result["utterance_queue"] == [result["last_utterance"]]
+    assert result["utterance_queue"] == [expected_preamble, original_text]
     assert result["transcript"][-1].role == "interviewer"
     assert result["transcript"][-1].question_id == question.question_id
     assert result["transcript"][-1].kind == kind.value
@@ -209,85 +150,17 @@ def test_closing_does_not_append_stale_current_question():
     assert result["transcript"][-1].kind is None
 
 
-def test_llm_preamble_uses_recent_transcript_and_last_signal():
-    """LLM에는 최근 네 턴과 직전 평가 신호만 전달하고 결과를 발화에 사용한다."""
-    question = make_question(QuestionKind.FOLLOW_UP)
-    transcript = [
-        Turn(role="candidate", text=f"대화-{index}", question_id=question.question_id)
-        for index in range(6)
-    ]
-    llm = FakeLlm(output={"preamble": "네, 답변 잘 들었습니다."})
-    state = SessionState(
-        session_id="session-llm",
-        current_question=question,
-        turn_type="question",
-        transcript=transcript,
-        last_signal={"quality": "bonus_available", "next_probe_target": "DI"},
-    )
-
-    result = compose_utterance(state, make_runtime(llm))
-
-    assert llm.schema is ComposedUtterance
-    assert llm.messages is not None
-    user_prompt = llm.messages[1]["content"]
-    assert "대화-0" not in user_prompt
-    assert "대화-1" not in user_prompt
-    assert "대화-2" in user_prompt
-    assert "대화-5" in user_prompt
-    assert "bonus_available" in user_prompt
-    assert "next_probe_target" in user_prompt
-    assert result["last_utterance"].startswith("네, 답변 잘 들었습니다.")
-    assert result["last_utterance"].endswith(question.text)
-
-
-@pytest.mark.parametrize(
-    "llm",
-    [
-        FakeLlm(error=RuntimeError("LLM 호출 실패")),
-        FakeLlm(output={"preamble": ""}),
-        FakeLlm(output={"preamble": "FastAPI의 의존성 주입 방식에 대해 설명해 주세요."}),
-    ],
-)
-def test_invalid_llm_result_falls_back_to_template(llm):
-    """LLM 예외, 빈 출력, 질문 본문 반복은 모두 기본 템플릿으로 폴백한다.
-
-    Args:
-        llm:
-            실패 또는 잘못된 결과를 반환하도록 설정한 FakeLlm.
-    """
+def test_compose_utterance_never_calls_injected_llm():
+    """LLM이 주입돼 있어도 발화는 평가별 템플릿으로만 조립한다."""
     question = make_question()
     state = SessionState(
-        session_id="session-fallback",
+        session_id="session-template-only",
         current_question=question,
         turn_type="question",
+        last_signal={"quality": "sufficient"},
     )
 
-    result = compose_utterance(state, make_runtime(llm))
+    result = compose_utterance(state, make_runtime(FailIfCalledLlm()))
 
-    assert result["last_utterance"] == f"{utterance.question()}\n\n{question.text}"
-    assert result["error"] is None
-
-
-def test_llm_timeout_falls_back_to_template(monkeypatch):
-    """LLM이 제한 시간을 넘기면 기다리지 않고 기본 템플릿으로 폴백한다.
-
-    Args:
-        monkeypatch:
-            테스트 동안 LLM 제한 시간을 짧게 바꾸는 pytest fixture.
-    """
-    monkeypatch.setattr(interviewer_composition, "_UTTERANCE_LLM_TIMEOUT_SECONDS", 0.01)
-    question = make_question()
-    llm = FakeLlm(
-        output={"preamble": "늦게 생성된 안내 문장입니다."},
-        delay_seconds=0.1,
-    )
-    state = SessionState(
-        session_id="session-timeout",
-        current_question=question,
-        turn_type="question",
-    )
-
-    result = compose_utterance(state, make_runtime(llm))
-
-    assert result["last_utterance"] == f"{utterance.question()}\n\n{question.text}"
+    assert result["last_utterance"] == f"{utterance.sufficient()}\n\n{question.text}"
     assert result["error"] is None

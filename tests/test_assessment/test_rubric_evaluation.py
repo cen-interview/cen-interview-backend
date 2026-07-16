@@ -6,6 +6,7 @@ from interview.schemas.question import (
     QuestionKind,
 )
 from interview.schemas.rubric import RubricMatchResult
+from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 
 
 def _technical_question() -> Question:
@@ -105,3 +106,53 @@ def test_two_of_six_required_criteria_fall_back_to_llm():
     )
 
     assert match.is_sufficient is False
+
+
+def test_rubric_source_selection_uses_embedding_store_without_generation_llm(
+    monkeypatch,
+):
+    filtered_sources = []
+
+    class NoMatchStore:
+        def match(self, **_):
+            return None
+
+        def filter_novel_questions(self, sources):
+            filtered_sources.extend(sources)
+            return sources
+
+    class SufficientGraph:
+        def invoke(self, state):
+            return {
+                "evidence_chunks": [],
+                "final_signal": AnswerQualitySignal(
+                    answer_id="answer-llm",
+                    question_id=state.question.question_id,
+                    quality=AnswerQuality.SUFFICIENT,
+                    accuracy=1.0,
+                    sufficiency=1.0,
+                ),
+            }
+
+    monkeypatch.setattr(
+        "interview.assessment.agent.get_rubric_store",
+        lambda: NoMatchStore(),
+    )
+    monkeypatch.setattr(
+        "interview.assessment.agent.get_compiled_graph",
+        lambda: SufficientGraph(),
+    )
+    agent = AssessmentAgent()
+    question = _technical_question()
+    answer = "네트워크 같은 비동기 I/O 작업에서 async def를 사용합니다."
+    agent.evaluate(question, answer)
+    agent.complete_question_set(question.question_id)
+
+    assert agent.rubric_candidates == []
+
+    sources = agent.collect_rubric_sources()
+
+    assert len(sources) == 1
+    assert filtered_sources[0].question_id == question.question_id
+    assert filtered_sources[0].answer == answer
+    assert agent.rubric_candidates == []

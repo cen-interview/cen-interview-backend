@@ -13,7 +13,6 @@ from interview.interviewer.models import AdaptedInput, DeliveryMetrics
 from interview.interviewer.session import SessionState
 from interview.interviewer.workflow.graph import get_compiled_graph
 from interview.interviewer.workflow.runtime import InterviewDeps
-from interview.llm import get_llm
 from interview.schemas.events import InterviewerEvent, Mode
 from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
@@ -83,7 +82,6 @@ class InterviewSession:
         self.deps = deps or InterviewDeps(
             strategy=StrategyAgent(coverage, user_id=user_id),
             assessment=AssessmentAgent(user_id=user_id),
-            llm=get_llm(temperature=0.3),
         )
         self.strategy = self.deps.strategy
         self.assessment = self.deps.assessment
@@ -417,7 +415,6 @@ def create_session(
         user_id=user_id,
         weak_history_topics=weak_history_topics,),
         assessment=AssessmentAgent(user_id=user_id),
-        llm=get_llm(temperature=0.3),
     )
     session_lock = Lock()
     session = InterviewSession(

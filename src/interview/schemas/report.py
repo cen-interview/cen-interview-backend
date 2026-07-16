@@ -23,9 +23,11 @@ CompetencyModel
 
 from __future__ import annotations
 
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from interview.schemas.question import QuestionCategory
+from interview.schemas.rubric import RubricCandidate
 
 class QualityTrace(BaseModel):
     question_kind: str
@@ -60,18 +62,17 @@ expected_answer
   사용자가 질문에 답했어야 하는 핵심 내용
 
 compatibility_status
-  현재 코드와 최신 방식의 관계
-  예: current_valid, upgrade_option, deprecated, incorrect
+  외부 호환성 평가 여부
+  현재 파이프라인에서는 not_evaluated
 
 modern_code
-  Context7에서 확인한 최신 방식의 코드
-  최신 대안이 없으면 None
+  외부 최신 구현 예시를 사용하지 않으므로 None
 
 improvement_reason
-  최신 방식으로 변경할 이유
+  현재 코드 또는 답변에서 개선할 이유
 
 references
-  Context7 또는 공식 문서 링크
+  외부 문서를 사용하지 않으므로 빈 목록
     """
     topic: str
     source_file: str | None = None
@@ -79,7 +80,13 @@ references
     code_assessment: str
     answer_status: str
     expected_answer: str
-    compatibility_status: str
+    compatibility_status: Literal[
+        "current_valid",
+        "upgrade_option",
+        "deprecated",
+        "incorrect",
+        "not_evaluated",
+    ] = "not_evaluated"
     modern_code: str | None = None
     improvement_reason: str
     references: list[str] = Field(default_factory=list)
@@ -98,7 +105,7 @@ class AnswerEvaluation(BaseModel):
     
     quality_trace: list[QualityTrace] = Field(default_factory=list)
     
-    question_category: QuestionCategory
+    question_category: QuestionCategory | None = None
     question_evidence_ids: list[str] = Field(default_factory=list)
     assessment_evidence_ids: list[str] = Field(default_factory=list)
     code_analysis: list[CodeAnalysis] = Field(default_factory=list)
@@ -135,3 +142,10 @@ class FinalReport(BaseModel):
 
     # 문항별 평가 10개
     evaluations: list[AnswerEvaluation]
+
+
+class ReportGenerationResult(BaseModel):
+    """한 번의 최종 LLM 호출에서 생성한 리포트와 rubric 후보."""
+
+    report: FinalReport
+    rubric_candidates: list[RubricCandidate] = Field(default_factory=list)

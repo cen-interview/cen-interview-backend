@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from interview.schemas.question import Question
 from interview.schemas.report import AnswerEvaluation, CompetencyModel
-from interview.schemas.rubric import RubricCandidate
+from interview.schemas.rubric import RubricCandidate, RubricSource
 
 
 class Turn(BaseModel):
@@ -214,10 +214,12 @@ class SessionState(BaseModel):
     evaluations: list[AnswerEvaluation] = Field(default_factory=list)
     competency: CompetencyModel = Field(default_factory=CompetencyModel)
     last_signal: dict | None = None
+    rubric_sources: list[RubricSource] = Field(default_factory=list)
     rubric_candidates: list[RubricCandidate] = Field(default_factory=list)
     rubric_share_status: Literal[
-        "pending", "shared", "discarded", "not_available"
-    ] = "pending"
+        "pending", "shared", "discarded", "not_available", "failed"
+    ] | None = None
+    rubric_share_approved: bool | None = None
 
     # 마지막 출력 및 턴 상태
     last_utterance: str = ""

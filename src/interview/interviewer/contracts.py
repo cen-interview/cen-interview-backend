@@ -8,8 +8,8 @@ Protocol에만 의존한다. Protocol은 명시적인 상속을 요구하지 않
 from typing import Protocol
 
 from interview.schemas.question import Question
-from interview.schemas.report import FinalReport
-from interview.schemas.rubric import RubricCandidate
+from interview.schemas.report import FinalReport, ReportGenerationResult
+from interview.schemas.rubric import RubricSource
 from interview.schemas.signals import AnswerQualitySignal
 
 
@@ -219,7 +219,7 @@ class AssessmentPort(Protocol):
     def complete_question_set(
         self,
         main_question_id: str,
-    ) -> RubricCandidate | None:
+    ) -> None:
         """현재 메인 질문과 파생 질문 묶음의 평가를 완료한다.
 
         Args:
@@ -228,10 +228,21 @@ class AssessmentPort(Protocol):
         """
         ...
 
+    def collect_rubric_sources(self) -> list[RubricSource]:
+        """LLM 없이 공유 가능한 새 질문 세트를 반환한다."""
+        ...
+
     def finalize(self) -> FinalReport:
         """누적된 평가를 바탕으로 최종 면접 리포트를 반환한다.
 
         Returns:
             면접 전체의 최종 평가 리포트.
         """
+        ...
+
+    def finalize_with_rubrics(
+        self,
+        rubric_sources: list[RubricSource] | None = None,
+    ) -> ReportGenerationResult:
+        """한 번의 LLM 호출로 최종 리포트와 rubric 후보를 생성한다."""
         ...

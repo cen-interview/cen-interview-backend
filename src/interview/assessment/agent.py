@@ -58,14 +58,14 @@ from interview.schemas.question import (
     QuestionCategory,
     QuestionKind,
     )
-from interview.assessment.rubric_generator import generate_rubric_candidate
 from interview.assessment.rubric_store import get_rubric_store
-from interview.schemas.rubric import RubricCandidate
+from interview.schemas.rubric import RubricCandidate, RubricSource
 from interview.schemas.report import (
     AnswerEvaluation,
     CompetencyModel,
     FinalReport,
     QualityTrace,
+    ReportGenerationResult,
 )
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
@@ -273,7 +273,7 @@ class AssessmentAgent:
         self,
         main_question_id: str,
 
-    ) -> RubricCandidate | None:
+    ) -> None:
         """현재 질문 세트를 하나의 AnswerEvaluation으로 저장한다.
 
         질문 세트란 메인 질문 1개와 그 질문에서 파생된 follow_up,
@@ -329,41 +329,30 @@ class AssessmentAgent:
         self.competency.topic_scores[main_attempt.question_topic] = score.score
         self._update_competency_model()
 
-        rubric_candidate = self._maybe_generate_rubric_candidate(main_attempt)
-        if rubric_candidate is not None:
-            self.rubric_candidates.append(rubric_candidate)
-        
         self.current_attempts.clear()
-        return rubric_candidate
+        return None
 
-    def _maybe_generate_rubric_candidate(
-        self,
-        main_attempt: AnswerAttempt,
-    ) -> RubricCandidate | None:
-        if main_attempt.question_category != QuestionCategory.TECHNICAL:
-            return None
-        if main_attempt.signal.quality != AnswerQuality.SUFFICIENT:
-            return None
-        if main_attempt.signal.evaluation_source == "rubric":
-            return None
-        if any(
-            candidate.question_id == main_attempt.question_id
-            for candidate in self.rubric_candidates
-        ):
-            return None
+    def collect_rubric_sources(self) -> list[RubricSource]:
+        """Select novel sufficient technical questions without an LLM call."""
+        sources: list[RubricSource] = []
+        for evaluation in self.evaluations:
+            if evaluation.question_category != QuestionCategory.TECHNICAL:
+                continue
+            if not evaluation.quality_trace:
+                continue
+            final_trace = evaluation.quality_trace[-1]
+            if final_trace.quality != AnswerQuality.SUFFICIENT.value:
+                continue
+            if final_trace.evaluation_source == "rubric":
+                continue
+            sources.append(RubricSource(
+                question_id=evaluation.question_id,
+                topic=evaluation.topic,
+                question=evaluation.question,
+                answer=evaluation.answer_summary,
+            ))
 
-        question = Question(
-            question_id=main_attempt.question_id,
-            text=main_attempt.question_text,
-            topic=main_attempt.question_topic,
-            difficulty=main_attempt.question_difficulty,
-            kind=main_attempt.question_kind,
-            category=main_attempt.question_category,
-        )
-        return generate_rubric_candidate(
-            question=question,
-            answer_context=self._build_answer_context(),
-        )
+        return get_rubric_store().filter_novel_questions(sources)
 
 # 누적된 문항 평가 점수로 전체 평균 점수를 갱신한다.        
     def _update_competency_model(self) -> None:
@@ -465,3 +454,17 @@ class AssessmentAgent:
             self.evaluations,
             evidence_chunks=self.evidence_chunks,
         )
+
+    def finalize_with_rubrics(
+        self,
+        rubric_sources: list[RubricSource] | None = None,
+    ) -> ReportGenerationResult:
+        """Generate the report and approved rubric rows in one LLM call."""
+        result = report_builder.build_report_result(
+            self.competency,
+            self.evaluations,
+            evidence_chunks=self.evidence_chunks,
+            rubric_sources=rubric_sources or [],
+        )
+        self.rubric_candidates = list(result.rubric_candidates)
+        return result

@@ -10,6 +10,7 @@ from interview.interviewer.workflow.nodes import (
     ask_follow_up,
     ask_main,
     ask_trap,
+    check_rubric_eligibility,
     complete_set,
     evaluate_answer,
     final_report,
@@ -21,12 +22,14 @@ from interview.interviewer.workflow.nodes import (
     handle_timeout,
     record_candidate_answer,
     request_rubric_consent,
+    save_rubric_candidates,
     validate_event,
     wait_event,
 )
 from interview.interviewer.session import SessionState
 from interview.interviewer.workflow.routing import (
     after_complete_set,
+    after_check_rubric_eligibility,
     after_handle_silence,
     after_handle_timeout,
     route_event,
@@ -82,8 +85,10 @@ def _build_graph(
     builder.add_node("ask_confirm_negative", ask_confirm_negative)
     builder.add_node("ask_trap", ask_trap)
     builder.add_node("complete_set", complete_set)
+    builder.add_node("check_rubric_eligibility", check_rubric_eligibility)
     builder.add_node("final_report", final_report)
     builder.add_node("request_rubric_consent", request_rubric_consent)
+    builder.add_node("save_rubric_candidates", save_rubric_candidates)
     builder.add_node("finalize", finalize)
     builder.add_node("handle_replay", handle_replay)
     builder.add_node("handle_silence", handle_silence)
@@ -109,7 +114,7 @@ def _build_graph(
             "handle_replay": "handle_replay",
             "handle_silence": "handle_silence",
             "handle_timeout": "handle_timeout",
-            "final_report": "final_report",
+            "final_report": "check_rubric_eligibility",
         },
     )
     builder.add_edge("record_candidate_answer", "evaluate_answer")
@@ -130,7 +135,7 @@ def _build_graph(
         "complete_set",
         after_complete_set,
         {
-            "final_report": "final_report",
+            "final_report": "check_rubric_eligibility",
             "ask_main": "ask_main",
         },
     )
@@ -156,11 +161,20 @@ def _build_graph(
         after_handle_timeout,
         {
             "compose_utterance": "compose_utterance",
+            "final_report": "check_rubric_eligibility",
+        },
+    )
+    builder.add_conditional_edges(
+        "check_rubric_eligibility",
+        after_check_rubric_eligibility,
+        {
+            "request_rubric_consent": "request_rubric_consent",
             "final_report": "final_report",
         },
     )
-    builder.add_edge("final_report", "request_rubric_consent")
-    builder.add_edge("request_rubric_consent", "finalize")
+    builder.add_edge("request_rubric_consent", "final_report")
+    builder.add_edge("final_report", "save_rubric_candidates")
+    builder.add_edge("save_rubric_candidates", "finalize")
     builder.add_edge("finalize", "compose_utterance")
     return builder
 

@@ -16,7 +16,11 @@ from interview.api.rubric.model import (
     RubricVectorRecord,
 )
 from interview.config import settings
-from interview.schemas.rubric import RubricCandidate, RubricMatchResult
+from interview.schemas.rubric import (
+    RubricCandidate,
+    RubricMatchResult,
+    RubricSource,
+)
 
 
 QUESTION_DUPLICATE_THRESHOLD = 0.9
@@ -169,6 +173,90 @@ class RubricStore:
                     for key, value in values.items():
                         setattr(record, key, value)
             db.commit()
+
+    def filter_novel_questions(
+        self,
+        sources: list[RubricSource],
+        *,
+        threshold: float = QUESTION_DUPLICATE_THRESHOLD,
+    ) -> list[RubricSource]:
+        """Return only questions not already represented in the same topic.
+
+        Source questions are embedded in one batch. Existing DB vectors and
+        already-selected questions from the current interview are then used to
+        remove semantic duplicates before any rubric-generation LLM is called.
+        """
+        if not sources:
+            return []
+
+        source_embeddings = self._embed_documents([
+            source.question for source in sources
+        ])
+        selected: list[tuple[RubricSource, list[float]]] = []
+
+        if self.backend == "memory":
+            existing_questions: dict[tuple[str, str], RubricCandidate] = {}
+            for candidate, _ in self._candidates:
+                key = (
+                    _normalize_topic(candidate.topic),
+                    candidate.question_id,
+                )
+                existing_questions[key] = candidate
+            existing_rows = list(existing_questions.values())
+            existing_embeddings = self._embed_documents([
+                candidate.question for candidate in existing_rows
+            ]) if existing_rows else []
+
+            for source, embedding in zip(
+                sources,
+                source_embeddings,
+                strict=True,
+            ):
+                topic_key = _normalize_topic(source.topic)
+                duplicate_in_store = any(
+                    _normalize_topic(candidate.topic) == topic_key
+                    and _cosine_similarity(embedding, candidate_embedding)
+                    >= threshold
+                    for candidate, candidate_embedding in zip(
+                        existing_rows,
+                        existing_embeddings,
+                        strict=True,
+                    )
+                )
+                if duplicate_in_store or _duplicates_selected_source(
+                    source,
+                    embedding,
+                    selected,
+                    threshold=threshold,
+                ):
+                    continue
+                selected.append((source, embedding))
+            return [source for source, _ in selected]
+
+        with self._session_factory() as db:
+            for source, embedding in zip(
+                sources,
+                source_embeddings,
+                strict=True,
+            ):
+                existing = self._find_question_candidates(
+                    db,
+                    question_embedding=embedding,
+                    topic=source.topic,
+                    top_k=1,
+                )
+                if existing and existing[0][1] >= threshold:
+                    continue
+                if _duplicates_selected_source(
+                    source,
+                    embedding,
+                    selected,
+                    threshold=threshold,
+                ):
+                    continue
+                selected.append((source, embedding))
+
+        return [source for source, _ in selected]
 
     def match(
         self,
@@ -415,6 +503,26 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     numerator = sum(a * b for a, b in zip(left, right, strict=True))
     denominator = math.sqrt(sum(a * a for a in left) * sum(b * b for b in right))
     return numerator / denominator if denominator else 0.0
+
+
+def _normalize_topic(topic: str) -> str:
+    """Normalize topic spelling for comparisons within one interview."""
+    return " ".join(topic.strip().casefold().split())
+
+
+def _duplicates_selected_source(
+    source: RubricSource,
+    embedding: list[float],
+    selected: list[tuple[RubricSource, list[float]]],
+    *,
+    threshold: float,
+) -> bool:
+    topic_key = _normalize_topic(source.topic)
+    return any(
+        _normalize_topic(selected_source.topic) == topic_key
+        and _cosine_similarity(embedding, selected_embedding) >= threshold
+        for selected_source, selected_embedding in selected
+    )
 
 
 def _answer_segments(answer_text: str) -> list[str]:

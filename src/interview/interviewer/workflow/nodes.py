@@ -1,5 +1,6 @@
 """Interviewer LangGraph에서 상태를 변경하거나 외부 의존성을 호출하는 노드."""
 
+import logging
 from typing import Any
 
 from interview.interviewer.intent import detect_voice_command
@@ -20,10 +21,13 @@ from interview.schemas.events import (
     SilenceDetected,
 )
 from interview.schemas.question import Question
+from interview.schemas.report import ReportGenerationResult
+from interview.schemas.rubric import RubricCandidate, RubricSource
 from langgraph.types import interrupt
 from pydantic import TypeAdapter, ValidationError
 
 _EVENT_ADAPTER = TypeAdapter(InterviewerEvent)
+_logger = logging.getLogger("uvicorn.error")
 
 def greet(state: SessionState, runtime: Any) -> dict[str, Any]:
     """첫 메인 질문을 생성한다.
@@ -507,15 +511,11 @@ def complete_set(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         return {"error": "완료할 메인 질문 세트를 찾을 수 없습니다."}
 
     deps = _runtime_deps(runtime)
-    rubric_candidate = deps.assessment.complete_question_set(
+    deps.assessment.complete_question_set(
         main_question_id=main_question_id,
     )
-    rubric_candidates = _state_get(state, "rubric_candidates", [])
-    if rubric_candidate is not None:
-        rubric_candidates = [*rubric_candidates, rubric_candidate]
 
     return {
-        "rubric_candidates": rubric_candidates,
         "challenge_used_in_set": False,
         "derived_turn_count": 0,
         "silence_count": 0,
@@ -523,6 +523,40 @@ def complete_set(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         "timeout_action": None,
         "pending_event": None,
         "pending_delivery_metrics": None,
+        "error": None,
+    }
+
+
+def check_rubric_eligibility(
+    state: SessionState | dict[str, Any],
+    runtime: Any,
+) -> dict[str, Any]:
+    """Find novel shareable questions before running the final-report LLM."""
+    deps = _runtime_deps(runtime)
+    collector = getattr(deps.assessment, "collect_rubric_sources", None)
+    if not callable(collector):
+        return {
+            "rubric_sources": [],
+            "rubric_share_status": "not_available",
+            "rubric_share_approved": False,
+            "error": None,
+        }
+
+    try:
+        sources = collector()
+    except Exception as exc:
+        _logger.exception(
+            "[RUBRIC][ELIGIBILITY_FAILED] error=%s",
+            exc,
+        )
+        sources = []
+
+    return {
+        "rubric_sources": sources,
+        "rubric_share_status": (
+            "pending" if sources else "not_available"
+        ),
+        "rubric_share_approved": None if sources else False,
         "error": None,
     }
 
@@ -545,9 +579,31 @@ def final_report(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         직렬화된 최종 리포트와 초기화된 error를 담은 부분 상태.
     """
     deps = _runtime_deps(runtime)
-    report = deps.assessment.finalize()
+    generate_report = getattr(
+        deps.assessment,
+        "finalize_with_rubrics",
+        None,
+    )
+    approved = bool(_state_get(state, "rubric_share_approved", False))
+    raw_sources = _state_get(state, "rubric_sources", []) if approved else []
+    rubric_sources = [
+        source
+        if isinstance(source, RubricSource)
+        else RubricSource.model_validate(source)
+        for source in raw_sources
+    ]
+    if callable(generate_report):
+        result = generate_report(rubric_sources=rubric_sources)
+        if not isinstance(result, ReportGenerationResult):
+            result = ReportGenerationResult.model_validate(result)
+        report = result.report
+        rubric_candidates = result.rubric_candidates
+    else:
+        report = deps.assessment.finalize()
+        rubric_candidates = []
     return {
         "report": report.model_dump(mode="json"),
+        "rubric_candidates": rubric_candidates,
         "error": None,
     }
 
@@ -555,28 +611,51 @@ def final_report(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
 def request_rubric_consent(
     state: SessionState | dict[str, Any],
 ) -> dict[str, Any]:
-    """최종 rubric 후보의 공용 저장 여부를 확인하고 승인 시 저장한다."""
-    rubric_candidates = _state_get(state, "rubric_candidates", [])
-    if not rubric_candidates:
-        return {"rubric_share_status": "not_available", "error": None}
-
+    """Ask for sharing before any rubric-generation LLM work is performed."""
+    rubric_sources = _state_get(state, "rubric_sources", [])
     payload = interrupt(
         {
             "waiting_for": "rubric_share_consent",
             "message": "내 답변을 공용 평가 기준에 반영해도 되나요?",
-            "rubric_candidates": [
-                candidate.model_dump(mode="json")
-                for candidate in rubric_candidates
-            ],
+            "candidate_count": len(rubric_sources),
         }
     )
 
-    if not isinstance(payload, dict) or payload.get("share") is not True:
-        return {"rubric_share_status": "discarded", "error": None}
+    approved = isinstance(payload, dict) and payload.get("share") is True
+    return {
+        "rubric_share_approved": approved,
+        "rubric_share_status": "pending" if approved else "discarded",
+        "error": None,
+    }
 
-    store = get_rubric_store()
-    for candidate in rubric_candidates:
-        store.add_candidate(candidate)
+
+def save_rubric_candidates(
+    state: SessionState | dict[str, Any],
+) -> dict[str, Any]:
+    """Persist report-generated rubrics only after explicit approval."""
+    if not _state_get(state, "rubric_share_approved", False):
+        return {"error": None}
+
+    candidates = [
+        candidate
+        if isinstance(candidate, RubricCandidate)
+        else RubricCandidate.model_validate(candidate)
+        for candidate in _state_get(state, "rubric_candidates", [])
+    ]
+    if not candidates:
+        return {"rubric_share_status": "failed", "error": None}
+
+    try:
+        store = get_rubric_store()
+        for candidate in candidates:
+            store.add_candidate(candidate)
+    except Exception as exc:
+        _logger.exception(
+            "[RUBRIC][SAVE_FAILED] candidate_count=%s error=%s",
+            len(candidates),
+            exc,
+        )
+        return {"rubric_share_status": "failed", "error": None}
 
     return {"rubric_share_status": "shared", "error": None}
 

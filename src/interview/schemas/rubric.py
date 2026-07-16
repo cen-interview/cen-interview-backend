@@ -20,6 +20,15 @@ class RubricCandidate(BaseModel):
     rubric_version: str = "v1"
 
 
+class RubricSource(BaseModel):
+    """LLM 호출 전 공유 대상 여부를 판별하는 질문 세트 원문."""
+
+    question_id: str
+    topic: str
+    question: str
+    answer: str
+
+
 class RubricMatchResult(BaseModel):
     """현재 답변이 공개 rubric의 필수 기준을 충족했는지 나타낸다."""
 

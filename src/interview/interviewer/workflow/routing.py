@@ -174,3 +174,12 @@ def after_complete_set(state: SessionState | dict[str, Any]) -> str:
     asked_count = _state_get(state, "asked_count", 0)
     max_questions = _state_get(state, "max_questions", 10)
     return "final_report" if asked_count >= max_questions else "ask_main"
+
+
+def after_check_rubric_eligibility(
+    state: SessionState | dict[str, Any],
+) -> str:
+    """Show consent only when embedding checks found a novel question."""
+    if _state_get(state, "rubric_share_status") == "pending":
+        return "request_rubric_consent"
+    return "final_report"

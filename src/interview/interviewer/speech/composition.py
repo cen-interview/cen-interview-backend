@@ -1,6 +1,7 @@
 """면접관 안내 문장을 생성하고 질문 원문과 조립하는 발화 레이어."""
 
 import json
+import logging
 import re
 from queue import Empty, Queue
 from threading import Thread
@@ -18,14 +19,15 @@ from interview.interviewer.speech.reaction import (
     ReactionTone,
     select_reaction_policy,
 )
-from interview.interviewer.workflow.runtime import _runtime_deps, _state_get
-from interview.llm.logging import log_llm_error, log_llm_output
+from interview.interviewer.workflow.runtime import _state_get
+from interview.llm.logging import log_llm_output
 from interview.schemas.question import Question, QuestionKind
 from interview.schemas.signals import AnswerQuality
 
 _UTTERANCE_LLM_TIMEOUT_SECONDS = 3.0
 _UTTERANCE_TRANSCRIPT_TURN_LIMIT = 4
 _UTTERANCE_TRANSCRIPT_TEXT_LIMIT = 500
+_logger = logging.getLogger("uvicorn.error")
 _QUESTION_ANNOUNCEMENT_EXPRESSIONS = (
     "다음 질문",
     "질문을 드리",
@@ -528,9 +530,8 @@ def compose_utterance(
 ) -> dict[str, Any]:
     """현재 상황의 안내 문장과 질문 본문을 면접관 발화로 조립한다.
 
-    Strategy가 만든 Question.text는 수정하지 않고 짧은 preamble 앞에 그대로
-    붙인다. InterviewDeps에 LLM이 있으면 구조화된 preamble 생성을 시도하고,
-    LLM이 없거나 호출이 실패하거나 제한 시간을 넘기면 기본 템플릿을 사용한다.
+    Strategy가 만든 Question.text는 수정하지 않고 평가 결과별 템플릿
+    preamble 앞에 그대로 붙인다. 발화 조립에서는 LLM을 호출하지 않는다.
     조립한 전체 문장은 last_utterance에 저장한다. TTS용 utterance_queue에는
     안내 또는 리액션 문장과 질문 원문을 별도 항목으로 담아 프론트가 순서대로
     재생할 수 있게 한다. 동일한 전체 문장을 interviewer Turn으로 transcript에
@@ -539,10 +540,11 @@ def compose_utterance(
     Args:
         state:
             현재 질문, 턴 상황, 기존 transcript와 선택적인 last_signal을 가진
-            세션 상태. last_signal은 LLM preamble 생성 맥락으로 전달한다.
+            세션 상태. last_signal은 반응 템플릿 선택에 사용한다.
 
         runtime:
-            선택적 LLM이 담긴 InterviewDeps를 제공하는 LangGraph runtime.
+            LangGraph 노드 호출 시 전달되는 runtime. 발화 조립에는 사용하지
+            않지만 다른 노드와 동일한 함수 시그니처를 유지한다.
 
     Returns:
         조립된 last_utterance, 안내 문장과 질문 원문이 분리된
@@ -560,41 +562,12 @@ def compose_utterance(
 
     question_kind = current_question.kind if current_question is not None else None
     reaction_policy = select_reaction_policy(_state_get(state, "last_signal"))
-    fallback_preamble = _select_utterance_preamble(
+    preamble = _select_utterance_preamble(
         turn_type,
         question_kind,
         reaction_policy,
     )
-    preamble = fallback_preamble
-    preamble_source = "template"
-    deps = _runtime_deps(runtime)
-    if deps.llm is not None:
-        try:
-            preamble = _generate_llm_preamble(
-                llm=deps.llm,
-                state=state,
-                turn_type=turn_type,
-                current_question=current_question,
-                reaction_policy=reaction_policy,
-            )
-            preamble_source = "llm"
-        except Exception as exc:
-            preamble = fallback_preamble
-            preamble_source = "template_fallback"
-            log_llm_error(
-                "INTERVIEWER_PREAMBLE",
-                exc,
-                metadata={
-                    "turn_type": turn_type,
-                    "question_id": current_question.question_id if current_question else None,
-                    "question_kind": question_kind.value if question_kind else None,
-                    "reaction_tone": reaction_policy.tone.value,
-                    "answer_quality": (
-                        reaction_policy.quality.value if reaction_policy.quality else None
-                    ),
-                },
-                fallback={"preamble": fallback_preamble},
-            )
+    _ = runtime
 
     last_utterance = preamble
     question_text = None
@@ -610,24 +583,14 @@ def compose_utterance(
     )
     transcript = _state_get(state, "transcript", []) or []
 
-    log_llm_output(
-        "INTERVIEWER_UTTERANCE",
-        {
-            "preamble": preamble,
-            "question": question_text,
-            "utterance": last_utterance,
-        },
-        metadata={
-            "source": preamble_source,
-            "turn_type": turn_type,
-            "question_id": current_question.question_id if current_question else None,
-            "question_kind": question_kind.value if question_kind else None,
-            "reaction_tone": reaction_policy.tone.value,
-            "answer_quality": (
-                reaction_policy.quality.value if reaction_policy.quality else None
-            ),
-        },
-        status=preamble_source,
+    _logger.info(
+        "[INTERVIEWER][UTTERANCE][TEMPLATE] turn_type=%s question_id=%s "
+        "question_kind=%s reaction_tone=%s answer_quality=%s",
+        turn_type,
+        current_question.question_id if current_question else None,
+        question_kind.value if question_kind else None,
+        reaction_policy.tone.value,
+        reaction_policy.quality.value if reaction_policy.quality else None,
     )
 
     return {
