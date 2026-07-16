@@ -29,6 +29,18 @@ def commit_acknowledgment() -> str:
     return random.choice(_COMMIT_ACKNOWLEDGMENTS)
 
 
+def listening_cutoff_notice() -> str:
+    """정체된 답변 듣기를 중단하고 넘어갈 때 재생할 안내 문장을 반환한다.
+
+    확인 질문 이후에도 답변이 이어지지 않아 현재 답변을 그대로 제출하는
+    listening_cutoff 자동 제출에서 중립 수신 리액션 대신 사용한다.
+
+    Returns:
+        현재 질문의 답변 수집을 종료함을 알리는 고정 안내 문장.
+    """
+    return "네, 이 질문에 대한 답변은 여기까지 듣고 다음으로 넘어가겠습니다."
+
+
 def greeting() -> str:
     """면접 시작 인사를 반환한다.
 

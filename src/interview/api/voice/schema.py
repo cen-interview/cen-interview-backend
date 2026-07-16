@@ -367,6 +367,7 @@ class AnswerCommittedMessage(BaseModel):
         "semantic_complete",
         "explicit_finish",
         "user_confirmed",
+        "listening_cutoff",
     ]
     session: dict[str, Any]
 

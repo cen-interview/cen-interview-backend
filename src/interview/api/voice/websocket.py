@@ -31,7 +31,10 @@ from interview.config import settings
 from interview.interviewer.adapters import from_voice
 from interview.interviewer.facade import get_session
 from interview.interviewer.models import DeliveryMetrics
-from interview.interviewer.speech.utterance import commit_acknowledgment
+from interview.interviewer.speech.utterance import (
+    commit_acknowledgment,
+    listening_cutoff_notice,
+)
 from interview.interviewer.turn_completion.buffer import (
     VoiceTurnAlreadyCommittedError,
     VoiceTurnBufferError,
@@ -275,6 +278,9 @@ async def voice_turn_websocket(
         ) -> None:
             """제출 확정 직후 중립 리액션 발화를 프론트에 먼저 전달한다.
 
+            정체로 답변 듣기를 중단한 listening_cutoff 제출에서는 중립 리액션
+            대신 답변 수집 종료를 알리는 고정 안내 문구를 전송한다.
+
             다음 질문 생성이 완료되기 전에 프론트가 리액션 TTS 재생을
             시작할 수 있게 answer.committed보다 앞서 전송한다. 전송에
             성공하면 해당 제출 건을 기억해 두었다가 세션 응답의
@@ -287,7 +293,11 @@ async def voice_turn_websocket(
             nonlocal reaction_sent_event_id
             if not owns_current_worker():
                 return
-            reaction_text = commit_acknowledgment()
+            reaction_text = (
+                listening_cutoff_notice()
+                if request.completion_reason == "listening_cutoff"
+                else commit_acknowledgment()
+            )
             await send_model(
                 AnswerReactionMessage(
                     question_id=request.question_id,
