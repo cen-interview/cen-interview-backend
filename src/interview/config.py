@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536   # 차원 지정 1536
     question_pattern_min_similarity: float = 0.30
+    question_pattern_data_path: str = "../data"
 
     # 면접 진행
     max_questions: int = 10
