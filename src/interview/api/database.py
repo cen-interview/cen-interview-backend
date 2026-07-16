@@ -38,10 +38,11 @@ def create_missing_tables() -> None:
     """
     from interview.api.auth import model as auth_model
     from interview.api.evidence import model as evidence_model
+    from interview.api.evidence import question_pattern_model
     from interview.api.interviews import model as interviews_model
     from interview.api.users import model as users_model
 
-    _ = (auth_model, evidence_model, interviews_model, users_model)
+    _ = (auth_model, evidence_model, question_pattern_model, interviews_model, users_model)
     with engine.begin() as connection:
         connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(bind=engine)
