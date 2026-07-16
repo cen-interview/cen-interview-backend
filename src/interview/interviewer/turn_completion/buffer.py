@@ -27,6 +27,7 @@ VoiceTurnCompletionReason = Literal[
     "semantic_complete",
     "explicit_finish",
     "user_confirmed",
+    "listening_cutoff",
 ]
 """음성 답변의 자동 제출 후보가 만들어진 문맥 기반 사유."""
 
@@ -450,9 +451,9 @@ class VoiceTurnBuffer(BaseModel):
             )
         if not self.answer_text.strip():
             raise VoiceTurnInvalidTransitionError("빈 답변은 완료 후보가 될 수 없습니다.")
-        if completion_reason == "user_confirmed":
+        if completion_reason not in {"semantic_complete", "explicit_finish"}:
             raise VoiceTurnInvalidTransitionError(
-                "user_confirmed 완료 후보는 확인 응답 경로에서만 만들 수 있습니다."
+                "이 전이는 semantic_complete 또는 explicit_finish 완료 후보만 만들 수 있습니다."
             )
         self.pending_completion_reason = completion_reason
         self.state = "complete_candidate"
@@ -670,6 +671,62 @@ class VoiceTurnBuffer(BaseModel):
         self.pending_completion_reason = "user_confirmed"
         self.speech_active = False
         self.state = "complete_candidate"
+
+    def mark_cutoff_complete(
+        self,
+        *,
+        question_id: str,
+        expected_revision: int,
+    ) -> str | None:
+        """정체된 답변 수집을 중단하고 현재 답변을 완료 후보로 만든다.
+
+        확인 질문 횟수를 소진한 뒤 답변이 다시 정체되면 면접관이 듣기를
+        중단하고 현재까지의 답변을 제출하는 listening_cutoff 완료 후보를
+        만든다. LLM 완료 판단이 없어도 전이할 수 있으며 listening과 응답 없는
+        confirming_end 상태 모두에서 사용한다.
+
+        Args:
+            question_id:
+                듣기를 중단할 현재 질문 ID.
+
+            expected_revision:
+                중단 시점의 최신 답변 revision.
+
+        Returns:
+            취소된 활성 confirmation ID. 확인 질문이 없었으면 None.
+
+        Raises:
+            VoiceTurnQuestionMismatchError:
+                현재 질문과 다른 질문 ID가 전달된 경우.
+
+            VoiceTurnAlreadyCommittedError:
+                이미 제출이 완료된 buffer를 변경하려는 경우.
+
+            VoiceTurnInvalidTransitionError:
+                listening 또는 confirming_end 상태가 아니거나, revision이
+                최신값이 아니거나, 발화 중이거나 답변이 비어 있는 경우.
+        """
+        self._validate_question_id(question_id)
+        self._ensure_not_committed()
+        if self.state not in {"listening", "confirming_end"}:
+            raise VoiceTurnInvalidTransitionError(
+                f"{self.state} 상태에서는 답변 듣기를 중단할 수 없습니다."
+            )
+        if expected_revision != self.revision:
+            raise VoiceTurnInvalidTransitionError("듣기 중단 revision이 최신값이 아닙니다.")
+        if self.speech_active:
+            raise VoiceTurnInvalidTransitionError(
+                "발화 중에는 답변 듣기를 중단할 수 없습니다."
+            )
+        if not self.answer_text.strip():
+            raise VoiceTurnInvalidTransitionError("빈 답변은 완료 후보가 될 수 없습니다.")
+
+        cancelled_confirmation_id = self.active_confirmation_id
+        self.active_confirmation_id = None
+        self.active_confirmation_revision = None
+        self.pending_completion_reason = "listening_cutoff"
+        self.state = "complete_candidate"
+        return cancelled_confirmation_id
 
     def cancel_confirmation(self) -> str | None:
         """준비 중이거나 활성화된 확인 질문을 취소하고 listening으로 돌아간다.

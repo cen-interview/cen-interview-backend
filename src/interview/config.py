@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     turn_commit_grace_milliseconds: int = 300
     turn_confirmation_pause_seconds: float = 0.8
     turn_confirmation_max_per_question: int = 1
+    turn_stall_timeout_seconds: float = 6.0
     voice_turn_auth_timeout_seconds: float = 5.0
 
     # TTS
@@ -63,10 +64,12 @@ class Settings(BaseSettings):
 
     # Vector DB (Postgres + pgvector)
     database_url: str = "postgresql+psycopg://interview:1234@localhost:5432/interviewdb"
+    database_auto_create_tables: bool = True
 
     # Embedding
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536   # 차원 지정 1536
+    question_pattern_min_similarity: float = 0.30
 
     # 면접 진행
     max_questions: int = 10
