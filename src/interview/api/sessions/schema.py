@@ -65,6 +65,12 @@ class StartRequest(BaseModel):
     mode: str
 
 
+class RubricConsentRequest(BaseModel):
+    """최종 rubric의 공용 저장 여부 요청."""
+
+    share: bool
+
+
 class VoiceDeliveryMetricsPayload(BaseModel):
     """음성 답변의 전달 방식을 나타내는 선택적 측정값.
 

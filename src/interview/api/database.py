@@ -38,13 +38,150 @@ def create_missing_tables() -> None:
     """
     from interview.api.auth import model as auth_model
     from interview.api.evidence import model as evidence_model
+    from interview.api.rubric import model as rubric_model
     from interview.api.interviews import model as interviews_model
     from interview.api.users import model as users_model
 
-    _ = (auth_model, evidence_model, interviews_model, users_model)
+    _ = (auth_model, evidence_model, rubric_model, interviews_model, users_model)
     with engine.begin() as connection:
         connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     Base.metadata.create_all(bind=engine)
+    _migrate_legacy_rubric_schema()
+
+
+def _migrate_legacy_rubric_schema() -> None:
+    """기존 rubric vector 테이블을 rubric set 구조로 안전하게 보정한다.
+
+    ``create_all``은 이미 존재하는 테이블에 새 컬럼을 추가하지 않는다. 초기
+    rubric 구현으로 생성된 ``rubric_vector_records``에는 ``rubric_set_id``가
+    없으므로, 기존 레코드에 대응하는 set을 만든 뒤 외래 키를 채운다. 모든
+    SQL은 재실행 가능하게 작성해 애플리케이션 시작 때마다 호출해도 안전하다.
+    """
+    with engine.begin() as connection:
+        table_exists = connection.scalar(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'rubric_vector_records'
+                )
+                """
+            )
+        )
+        if not table_exists:
+            return
+
+        connection.execute(
+            text(
+                """
+                ALTER TABLE rubric_vector_records
+                ADD COLUMN IF NOT EXISTS rubric_set_id INTEGER
+                """
+            )
+        )
+        connection.execute(
+            text(
+                f"""
+                ALTER TABLE rubric_sets
+                ADD COLUMN IF NOT EXISTS question_embedding
+                    vector({settings.embedding_dimensions})
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO rubric_sets (
+                    question_id,
+                    topic,
+                    question,
+                    rubric_version,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                SELECT DISTINCT ON (question_id, rubric_version)
+                    question_id,
+                    topic,
+                    question,
+                    rubric_version,
+                    'pending',
+                    created_at,
+                    created_at
+                FROM rubric_vector_records
+                WHERE rubric_set_id IS NULL
+                ORDER BY question_id, rubric_version, created_at
+                ON CONFLICT (question_id, rubric_version) DO NOTHING
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE rubric_vector_records AS record
+                SET rubric_set_id = rubric_set.id
+                FROM rubric_sets AS rubric_set
+                WHERE record.rubric_set_id IS NULL
+                  AND rubric_set.question_id = record.question_id
+                  AND rubric_set.rubric_version = record.rubric_version
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE rubric_sets AS rubric_set
+                SET status = 'verified', updated_at = CURRENT_TIMESTAMP
+                WHERE rubric_set.status = 'pending'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM rubric_vector_records AS record
+                      WHERE record.rubric_set_id = rubric_set.id
+                  )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM rubric_vector_records
+                        WHERE rubric_set_id IS NULL
+                    ) THEN
+                        ALTER TABLE rubric_vector_records
+                        ALTER COLUMN rubric_set_id SET NOT NULL;
+                    END IF;
+
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_rubric_vector_records_set'
+                    ) THEN
+                        ALTER TABLE rubric_vector_records
+                        ADD CONSTRAINT fk_rubric_vector_records_set
+                        FOREIGN KEY (rubric_set_id)
+                        REFERENCES rubric_sets(id)
+                        ON DELETE CASCADE;
+                    END IF;
+                END
+                $$
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS
+                    ix_rubric_vector_records_rubric_set_id
+                ON rubric_vector_records (rubric_set_id)
+                """
+            )
+        )
 
 # FastAPI에서 DB 세션을 의존성 주입으로 사용하기 위한 함수
 # API 요청이 들어올 때 DB 세션을 하나 만들고,

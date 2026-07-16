@@ -20,6 +20,7 @@ from interview.interviewer.workflow.nodes import (
     handle_silence,
     handle_timeout,
     record_candidate_answer,
+    request_rubric_consent,
     validate_event,
     wait_event,
 )
@@ -82,6 +83,7 @@ def _build_graph(
     builder.add_node("ask_trap", ask_trap)
     builder.add_node("complete_set", complete_set)
     builder.add_node("final_report", final_report)
+    builder.add_node("request_rubric_consent", request_rubric_consent)
     builder.add_node("finalize", finalize)
     builder.add_node("handle_replay", handle_replay)
     builder.add_node("handle_silence", handle_silence)
@@ -157,7 +159,8 @@ def _build_graph(
             "final_report": "final_report",
         },
     )
-    builder.add_edge("final_report", "finalize")
+    builder.add_edge("final_report", "request_rubric_consent")
+    builder.add_edge("request_rubric_consent", "finalize")
     builder.add_edge("finalize", "compose_utterance")
     return builder
 

@@ -32,6 +32,9 @@ class QualityTrace(BaseModel):
     quality: str
     target: str | None = None
     rationale: list[str] = Field(default_factory=list)
+    evaluation_source: str = "llm"
+    rubric_version: str | None = None
+    rubric_question_similarity: float | None = None
     
 class CodeAnalysis(BaseModel):
     """topic

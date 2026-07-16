@@ -9,6 +9,7 @@ from typing import Protocol
 
 from interview.schemas.question import Question
 from interview.schemas.report import FinalReport
+from interview.schemas.rubric import RubricCandidate
 from interview.schemas.signals import AnswerQualitySignal
 
 
@@ -215,7 +216,10 @@ class AssessmentPort(Protocol):
         """
         ...
 
-    def complete_question_set(self, main_question_id: str) -> None:
+    def complete_question_set(
+        self,
+        main_question_id: str,
+    ) -> RubricCandidate | None:
         """현재 메인 질문과 파생 질문 묶음의 평가를 완료한다.
 
         Args:

@@ -8,6 +8,7 @@ from interview.api.auth.dependency import get_current_user
 from interview.api.sessions.schema import (
     EventRequest,
     MainQuestionProgress,
+    RubricConsentRequest,
     SessionProgress,
     StartRequest,
 )
@@ -249,6 +250,45 @@ def post_event(
     )
 
 
+@router.post("/{session_id}/rubric-consent")
+def post_rubric_consent(
+    session_id: str,
+    req: RubricConsentRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """최종 rubric 공유 선택으로 중단된 그래프를 재개한다."""
+    try:
+        session = get_session(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+
+    db_session = get_interview_session_by_runtime_id(
+        db,
+        runtime_session_id=session_id,
+        user_id=current_user.id,
+    )
+    if db_session is None:
+        raise HTTPException(status_code=404, detail="면접 세션을 찾을 수 없습니다.")
+
+    try:
+        state = session.confirm_rubric_sharing(req.share)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    result_id = None
+    if state.finished:
+        result = _save_finished_result(
+            db=db,
+            current_user=current_user,
+            runtime_session_id=session_id,
+            session=session,
+        )
+        result_id = result.id
+
+    return _session_response(state, result_id=result_id)
+
+
 def _sync_voice_turn_after_manual_submit(
     *,
     session_id: str,
@@ -359,7 +399,8 @@ def _session_response(
         "transcript": [turn.model_dump(mode="json") for turn in state.transcript],
         "turn_type": state.turn_type,
         "error": state.error,
-        "report": state.report if state.finished else None,
+        "report": state.report,
+        "rubric_share_status": state.rubric_share_status,
     }
 
 

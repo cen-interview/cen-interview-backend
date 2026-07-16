@@ -263,6 +263,21 @@ class InterviewSession:
             return None
         return state.current_question
 
+    def confirm_rubric_sharing(self, share: bool) -> SessionState:
+        """최종 rubric 공유 interrupt를 resume한다."""
+        with self._lock:
+            if not self._started:
+                raise RuntimeError("session must be started before rubric consent")
+            state = self._get_state_unlocked()
+            if state.rubric_share_status != "pending":
+                return state
+            self._graph.invoke(
+                Command(resume={"share": share}),
+                config=self._config,
+                context=self.deps,
+            )
+            return self._get_state_unlocked()
+
     def finalize(self) -> FinalReport:
         """종료된 그래프 상태에 저장된 최종 리포트를 반환한다.
 

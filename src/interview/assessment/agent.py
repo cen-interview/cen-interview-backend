@@ -48,12 +48,19 @@
         문항별 평가를 포함한다.
 """
 
+import logging
+from uuid import uuid4
+
 from interview.assessment import report_builder
 from interview.assessment.scoring import AnswerAttempt, score_question_set
 from interview.schemas.question import (
     Question, 
+    QuestionCategory,
     QuestionKind,
     )
+from interview.assessment.rubric_generator import generate_rubric_candidate
+from interview.assessment.rubric_store import get_rubric_store
+from interview.schemas.rubric import RubricCandidate
 from interview.schemas.report import (
     AnswerEvaluation,
     CompetencyModel,
@@ -63,6 +70,8 @@ from interview.schemas.report import (
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.assessment.graph import AssessmentState, get_compiled_graph
+
+_logger = logging.getLogger("uvicorn.error")
 
 class AssessmentAgent:
     """답변 평가 상태를 관리하는 Assessment Agent.
@@ -94,6 +103,7 @@ class AssessmentAgent:
         self.user_id = user_id
         self.competency = CompetencyModel()
         self.evaluations: list[AnswerEvaluation] = []
+        self.rubric_candidates: list[RubricCandidate] = []
 
         # 평가 중 조회한 Evidence 원문을 최종 리포트 생성까지 유지한다.
         # AnswerEvaluation에는 추적용 ID만 저장하고, 실제 chunk는 여기서 전달한다.
@@ -137,20 +147,23 @@ class AssessmentAgent:
                 quality 값에 따라 다음 메인 질문, 꼬리 질문, 압박 질문,
                 확인 질문, 함정 질문 등의 흐름이 결정된다.
         """
-        state = AssessmentState(
-            question=question,
-            answer_text=answer_text,
-            delivery_metrics=delivery_metrics,
-            history=self.all_attempts,
-            user_id=self.user_id,
-        )
-
-        result_state = get_compiled_graph().invoke(state)
-
-        for chunk in result_state["evidence_chunks"]:
-            self.evidence_chunks[chunk.chunk_id] = chunk
-
-        signal = result_state["final_signal"]
+        signal = self._evaluate_with_rubric(question, answer_text)
+        assessment_evidence_ids: list[str] = []
+        if signal is None:
+            state = AssessmentState(
+                question=question,
+                answer_text=answer_text,
+                delivery_metrics=delivery_metrics,
+                history=self.all_attempts,
+                user_id=self.user_id,
+            )
+            result_state = get_compiled_graph().invoke(state)
+            for chunk in result_state["evidence_chunks"]:
+                self.evidence_chunks[chunk.chunk_id] = chunk
+            assessment_evidence_ids = [
+                chunk.chunk_id for chunk in result_state["evidence_chunks"]
+            ]
+            signal = result_state["final_signal"]
 
         if signal.quality == AnswerQuality.OFF_TOPIC:
             return signal
@@ -171,10 +184,7 @@ class AssessmentAgent:
             # 질문 난이도
             question_difficulty=question.difficulty,
             question_evidence_ids=list(question.evidence_ids),
-            assessment_evidence_ids=[
-                chunk.chunk_id
-                for chunk in result_state["evidence_chunks"]
-            ],
+            assessment_evidence_ids=assessment_evidence_ids,
             # 답변 원문
             answer_text=answer_text,
             # 답변 평가
@@ -188,12 +198,82 @@ class AssessmentAgent:
 
         return signal
 
+    def _evaluate_with_rubric(
+        self,
+        question: Question,
+        answer_text: str,
+    ) -> AnswerQualitySignal | None:
+        """공개 rubric의 필수 기준을 모두 충족하면 LLM 없이 평가한다."""
+        if question.category != QuestionCategory.TECHNICAL:
+            return None
+
+        match = get_rubric_store().match(
+            question_id=question.question_id,
+            question_text=question.text,
+            topic=question.topic,
+            answer_text=answer_text,
+        )
+        if match is None:
+            _logger.info(
+                "[ASSESSMENT][RUBRIC][LLM_FALLBACK] "
+                "question_id=%s reason=no_matching_rubric",
+                question.question_id,
+            )
+            return None
+        if not match.is_sufficient:
+            _logger.info(
+                "[ASSESSMENT][RUBRIC][LLM_FALLBACK] "
+                "question_id=%s rubric_question_id=%s reason=incomplete_match "
+                "question_similarity=%s required=%s/%s coverage=%.3f "
+                "criterion_similarities=%s",
+                question.question_id,
+                match.matched_rubric_question_id,
+                match.question_similarity,
+                match.matched_required_count,
+                match.required_criteria_count,
+                match.required_coverage,
+                match.criterion_similarities,
+            )
+            return None
+
+        signal = AnswerQualitySignal(
+            answer_id=f"answer-{uuid4()}",
+            question_id=question.question_id,
+            quality=AnswerQuality.SUFFICIENT,
+            rationale=[
+                "공개 rubric의 핵심 평가 기준을 충분히 충족했습니다.",
+                (
+                    f"필수 기준 {match.matched_required_count}/"
+                    f"{match.required_criteria_count}개 일치 "
+                    f"({match.required_coverage:.0%})"
+                ),
+            ],
+            accuracy=1.0,
+            sufficiency=1.0,
+            evaluation_source="rubric",
+            rubric_version=match.rubric_version,
+            rubric_question_similarity=match.question_similarity,
+        )
+        _logger.info(
+            "[ASSESSMENT][RUBRIC][LLM_SKIPPED] "
+            "question_id=%s rubric_question_id=%s version=%s "
+            "question_similarity=%s required=%s/%s coverage=%.3f",
+            question.question_id,
+            match.matched_rubric_question_id,
+            match.rubric_version,
+            match.question_similarity,
+            match.matched_required_count,
+            match.required_criteria_count,
+            match.required_coverage,
+        )
+        return signal
+
 # 현재 메인 질문과 파생 질문을 묶어 하나의 문항 평가를 생성한다.
     def complete_question_set(
         self,
         main_question_id: str,
 
-    ) -> None:
+    ) -> RubricCandidate | None:
         """현재 질문 세트를 하나의 AnswerEvaluation으로 저장한다.
 
         질문 세트란 메인 질문 1개와 그 질문에서 파생된 follow_up,
@@ -215,7 +295,7 @@ class AssessmentAgent:
         """
 
         if not self.current_attempts:
-            return
+            return None
 
         score = score_question_set(self.current_attempts)
 
@@ -248,8 +328,42 @@ class AssessmentAgent:
         self.evaluations.append(evaluation)
         self.competency.topic_scores[main_attempt.question_topic] = score.score
         self._update_competency_model()
+
+        rubric_candidate = self._maybe_generate_rubric_candidate(main_attempt)
+        if rubric_candidate is not None:
+            self.rubric_candidates.append(rubric_candidate)
         
         self.current_attempts.clear()
+        return rubric_candidate
+
+    def _maybe_generate_rubric_candidate(
+        self,
+        main_attempt: AnswerAttempt,
+    ) -> RubricCandidate | None:
+        if main_attempt.question_category != QuestionCategory.TECHNICAL:
+            return None
+        if main_attempt.signal.quality != AnswerQuality.SUFFICIENT:
+            return None
+        if main_attempt.signal.evaluation_source == "rubric":
+            return None
+        if any(
+            candidate.question_id == main_attempt.question_id
+            for candidate in self.rubric_candidates
+        ):
+            return None
+
+        question = Question(
+            question_id=main_attempt.question_id,
+            text=main_attempt.question_text,
+            topic=main_attempt.question_topic,
+            difficulty=main_attempt.question_difficulty,
+            kind=main_attempt.question_kind,
+            category=main_attempt.question_category,
+        )
+        return generate_rubric_candidate(
+            question=question,
+            answer_context=self._build_answer_context(),
+        )
 
 # 누적된 문항 평가 점수로 전체 평균 점수를 갱신한다.        
     def _update_competency_model(self) -> None:
@@ -307,6 +421,11 @@ class AssessmentAgent:
                 quality=attempt.signal.quality.value,
                 target=attempt.signal.next_probe_target,
                 rationale=attempt.signal.rationale,
+                evaluation_source=attempt.signal.evaluation_source,
+                rubric_version=attempt.signal.rubric_version,
+                rubric_question_similarity=(
+                    attempt.signal.rubric_question_similarity
+                ),
             )
             for attempt in self.current_attempts
         ]

@@ -47,7 +47,7 @@ class AnswerQualitySignal:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -111,6 +111,8 @@ class AnswerQualitySignal(BaseModel):
     sufficiency: float = Field(default=0.0, ge=0.0, le=1.0)
 
     delivery_note: str | None = None
-
+    evaluation_source: Literal["llm", "rubric"] = "llm"
+    rubric_version: str | None = None
+    rubric_question_similarity: float | None = None
 
 

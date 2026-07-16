@@ -3,6 +3,7 @@
 from typing import Any
 
 from interview.interviewer.intent import detect_voice_command
+from interview.assessment.rubric_store import get_rubric_store
 from interview.interviewer.models import DeliveryMetrics
 from interview.interviewer.workflow.runtime import (
     _restore_signal,
@@ -506,9 +507,15 @@ def complete_set(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         return {"error": "완료할 메인 질문 세트를 찾을 수 없습니다."}
 
     deps = _runtime_deps(runtime)
-    deps.assessment.complete_question_set(main_question_id=main_question_id)
+    rubric_candidate = deps.assessment.complete_question_set(
+        main_question_id=main_question_id,
+    )
+    rubric_candidates = _state_get(state, "rubric_candidates", [])
+    if rubric_candidate is not None:
+        rubric_candidates = [*rubric_candidates, rubric_candidate]
 
     return {
+        "rubric_candidates": rubric_candidates,
         "challenge_used_in_set": False,
         "derived_turn_count": 0,
         "silence_count": 0,
@@ -543,6 +550,35 @@ def final_report(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         "report": report.model_dump(mode="json"),
         "error": None,
     }
+
+
+def request_rubric_consent(
+    state: SessionState | dict[str, Any],
+) -> dict[str, Any]:
+    """최종 rubric 후보의 공용 저장 여부를 확인하고 승인 시 저장한다."""
+    rubric_candidates = _state_get(state, "rubric_candidates", [])
+    if not rubric_candidates:
+        return {"rubric_share_status": "not_available", "error": None}
+
+    payload = interrupt(
+        {
+            "waiting_for": "rubric_share_consent",
+            "message": "내 답변을 공용 평가 기준에 반영해도 되나요?",
+            "rubric_candidates": [
+                candidate.model_dump(mode="json")
+                for candidate in rubric_candidates
+            ],
+        }
+    )
+
+    if not isinstance(payload, dict) or payload.get("share") is not True:
+        return {"rubric_share_status": "discarded", "error": None}
+
+    store = get_rubric_store()
+    for candidate in rubric_candidates:
+        store.add_candidate(candidate)
+
+    return {"rubric_share_status": "shared", "error": None}
 
 
 def finalize(state: SessionState | dict[str, Any]) -> dict[str, Any]:
