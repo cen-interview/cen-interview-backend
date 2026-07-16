@@ -28,7 +28,11 @@ from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.evidence import CoverageMap, EvidenceChunk, TopicCoverage
 from interview.schemas.question import Difficulty, Question, QuestionKind
 from interview.strategy.prompts import QUESTION_GEN_SYSTEM
-from interview.strategy.question_gen import GeneratedQuestion, filter_reliable_chunks
+from interview.strategy.question_gen import (
+    GeneratedQuestion,
+    apply_pattern_style,
+    filter_reliable_chunks,
+)
 from interview.strategy.state import StrategyState
 
 # 주제 선택 시 confidence 상위 몇 개를 후보 풀로 삼을지 (agent.py에서 그대로 가져옴)
@@ -190,7 +194,7 @@ def pick_topic(state: QuestionGenState) -> dict:
 
 def retrieve_evidence(state: QuestionGenState) -> dict:
     """현재 topic으로 근거를 검색한다."""
-    chunks = search_evidence(query=state.topic, topic=state.topic, k=5, user_id=state.user_id)
+    chunks = search_evidence(query=state.topic, topic=state.topic, k=10, user_id=state.user_id)
     reliable = filter_reliable_chunks(chunks)
     return {"evidence_chunks": reliable}
 
@@ -342,6 +346,14 @@ def _too_similar(a: str, b: str, threshold: float = 0.8) -> bool:
     overlap = len(set_a & set_b) / len(set_a | set_b)
     return overlap >= threshold
 
+def polish_style(state: QuestionGenState) -> dict:
+    """검증을 통과한 질문에 실전 면접 패턴의 화법을 사후적으로 입힌다.
+
+    question_gen.apply_pattern_style()에 실제 로직을 위임한다 (topic/evidence
+    등 그래프 상태와 무관하게 완성된 질문 문장만으로 동작하는 독립 함수).
+    """
+    return {"generated_text": apply_pattern_style(state.generated_text or "")}
+
 def build_result(state: QuestionGenState) -> dict:
     """검증을 통과한 질문으로 최종 Question을 조립한다."""
     return {
@@ -391,6 +403,7 @@ def get_compiled_graph():
     graph.add_node("retrieve_evidence", retrieve_evidence)
     graph.add_node("generate", generate)
     graph.add_node("validate", validate)
+    graph.add_node("polish_style", polish_style)
     graph.add_node("build_result", build_result)
 
     graph.set_entry_point("pick_topic")
@@ -405,8 +418,9 @@ def get_compiled_graph():
     graph.add_conditional_edges(
         "validate",
         route_after_validate,
-        {"build_result": "build_result", "generate": "generate"},
+        {"build_result": "polish_style", "generate": "generate"},
     )
+    graph.add_edge("polish_style", "build_result")
     graph.add_edge("build_result", END)
 
     return graph.compile()
