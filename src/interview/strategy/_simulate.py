@@ -55,15 +55,15 @@ def _random_signal(question_id: str) -> AnswerQualitySignal:
 
 def run_simulation(n: int = 10) -> None:
     """메인 질문 n개를 실제로 생성해보고 통계를 출력한다."""
-    _seed_evidence()
-    coverage = get_store().build_coverage_map(user_id=_SIM_USER_ID)
+    # _seed_evidence()  # 실제 인덱싱된 evidence를 쓸 것이므로 가짜 시딩은 생략
+    coverage = get_store().build_coverage_map(user_id="3")
 
     print("=== 초기 CoverageMap ===")
     for t, c in coverage.topic_coverage.items():
         print(f"{t}: confidence={c.confidence:.2f}, chunk_count={c.chunk_count}")
     print()
 
-    strategy = StrategyAgent(coverage=coverage, user_id=_SIM_USER_ID)
+    strategy = StrategyAgent(coverage=coverage, user_id="3")
 
     last_signal = None
     questions = []

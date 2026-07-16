@@ -190,7 +190,7 @@ def pick_topic(state: QuestionGenState) -> dict:
 
 def retrieve_evidence(state: QuestionGenState) -> dict:
     """현재 topic으로 근거를 검색한다."""
-    chunks = search_evidence(query=state.topic, topic=state.topic, k=5, user_id=state.user_id)
+    chunks = search_evidence(query=state.topic, topic=state.topic, k=10, user_id=state.user_id)
     reliable = filter_reliable_chunks(chunks)
     return {"evidence_chunks": reliable}
 
