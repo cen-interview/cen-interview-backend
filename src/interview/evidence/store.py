@@ -19,8 +19,10 @@ from interview.schemas.evidence import (
     EvidenceChunk,
     EvidenceOwnership,
     TopicCoverage,
-    RetrievalResult,
 )
+import math
+import re
+from difflib import SequenceMatcher
 
 DEFAULT_TOP_K = 5
 VECTOR_BACKEND_MEMORY = "memory"
@@ -209,34 +211,136 @@ class EvidenceStore:
         with self._session() as db:
             records = db.scalars(statement).all()
         return [self._chunk_from_record(record) for record in records]
-    #우지연추가 
-    def score_answer_against_chunks(
+    
+     # 우지연 추가
+    def _deduplicate_chunks(
         self,
-        answer_text: str,
-        chunk_ids: list[str],
-        user_id: int | str | None = None,
-    ) -> list[RetrievalResult]:
-        """답변과 지정된 Evidence chunk들의 유사도를 계산한다."""
+        chunks: list[EvidenceChunk],
+    ) -> list[EvidenceChunk]:
+        """동일하거나 거의 같은 Evidence를 제거한다."""
 
-        if not answer_text.strip() or not chunk_ids:
+        selected: list[EvidenceChunk] = []
+        normalized_texts: list[str] = []
+
+        for chunk in chunks:
+            normalized = re.sub(
+                r"\s+",
+                " ",
+                chunk.text,
+            ).strip().lower()
+
+            is_duplicate = any(
+                SequenceMatcher(
+                    None,
+                    normalized,
+                    existing,
+                ).ratio() >= 0.95
+                for existing in normalized_texts
+            )
+
+            if is_duplicate:
+                continue
+
+            selected.append(chunk)
+            normalized_texts.append(normalized)
+
+        return selected
+
+
+    # 우지연 추가
+    def rank_chunks_by_query(
+        self,
+        query_text: str,
+        chunk_ids: list[str],
+        k: int = 3,
+        user_id: int | str | None = None,
+    ) -> list[EvidenceChunk]:
+        """지정된 Evidence 중 질문과 유사한 chunk를 최대 k개 반환한다."""
+
+        if not query_text.strip() or not chunk_ids or k <= 0:
             return []
 
         namespace = self._namespace(user_id)
         unique_chunk_ids = list(dict.fromkeys(chunk_ids))
 
-        answer_embedding = self._get_embeddings().embed_query(
-            answer_text
+        # 테스트용 memory backend
+        if self.backend == VECTOR_BACKEND_MEMORY:
+            chunks = self.get_chunks_by_ids(
+                chunk_ids=unique_chunk_ids,
+                user_id=user_id,
+            )
+
+            if not chunks:
+                return []
+
+            embeddings = self._get_embeddings()
+            query_embedding = embeddings.embed_query(query_text)
+            chunk_embeddings = embeddings.embed_documents(
+                [chunk.text for chunk in chunks]
+            )
+
+            def cosine_similarity(
+                left: list[float],
+                right: list[float],
+            ) -> float:
+                dot_product = sum(
+                    left_value * right_value
+                    for left_value, right_value in zip(
+                        left,
+                        right,
+                        strict=True,
+                    )
+                )
+                left_norm = math.sqrt(
+                    sum(value * value for value in left)
+                )
+                right_norm = math.sqrt(
+                    sum(value * value for value in right)
+                )
+
+                if left_norm == 0.0 or right_norm == 0.0:
+                    return 0.0
+
+                return dot_product / (left_norm * right_norm)
+
+            scored_chunks = [
+                (
+                    cosine_similarity(
+                        query_embedding,
+                        chunk_embedding,
+                    ),
+                    chunk,
+                )
+                for chunk, chunk_embedding in zip(
+                    chunks,
+                    chunk_embeddings,
+                    strict=True,
+                )
+            ]
+
+            scored_chunks.sort(
+                key=lambda item: item[0],
+                reverse=True,
+            )
+
+            ranked_chunks = [
+                chunk
+                for _, chunk in scored_chunks[:k]
+            ]
+
+            return self._deduplicate_chunks(ranked_chunks)
+
+        # 운영 pgvector backend
+        query_embedding = self._get_embeddings().embed_query(
+            query_text
         )
 
         distance = EvidenceVectorRecord.embedding.cosine_distance(
-            answer_embedding
+            query_embedding
         )
 
         statement = (
-            select(
-                EvidenceVectorRecord,
-                distance.label("cosine_distance"),
-            )
+            select(EvidenceVectorRecord)
             .where(
                 EvidenceVectorRecord.user_id == namespace,
                 EvidenceVectorRecord.chunk_id.in_(
@@ -244,19 +348,66 @@ class EvidenceStore:
                 ),
             )
             .order_by(distance)
+            .limit(k)
         )
 
         with self._session() as db:
-            rows = db.execute(statement).all()
+            records = db.scalars(statement).all()
 
-        return [
-            RetrievalResult(
-                chunk=self._chunk_from_record(record),
-                score=1.0 - float(distance_value),
-            )
-            for record, distance_value in rows
+        ranked_chunks = [
+            self._chunk_from_record(record)
+            for record in records
         ]
 
+        return self._deduplicate_chunks(ranked_chunks)
+    
+    # 우지연추가 
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: list[str],
+        user_id: int | str | None = None,
+        ) -> list[EvidenceChunk]:
+        """지정된 ID에 해당하는 Evidence 원문을 조회한다."""
+
+        if not chunk_ids:
+            return []
+
+        namespace = self._namespace(user_id)
+        unique_chunk_ids = list(dict.fromkeys(chunk_ids))
+
+        if self.backend == VECTOR_BACKEND_MEMORY:
+            chunks = self._chunks_by_user.get(namespace, [])
+
+            chunk_by_id = {
+            chunk.chunk_id: chunk
+            for chunk in chunks
+            }
+
+            return [
+                chunk_by_id[chunk_id]
+                for chunk_id in unique_chunk_ids
+                if chunk_id in chunk_by_id
+            ]
+
+        statement = select(EvidenceVectorRecord).where(
+            EvidenceVectorRecord.user_id == namespace,
+            EvidenceVectorRecord.chunk_id.in_(unique_chunk_ids),
+        )
+
+        with self._session() as db:
+            records = db.scalars(statement).all()
+
+        record_by_id = {
+            record.chunk_id: record
+            for record in records
+        }
+
+        return [
+            self._chunk_from_record(record_by_id[chunk_id])
+            for chunk_id in unique_chunk_ids
+            if chunk_id in record_by_id
+        ]   
+    
     def build_coverage_map(self, user_id: int | str | None = None) -> CoverageMap:
         """사용자별 저장 청크의 topic confidence 평균과 개수를 집계한다."""
         namespace = self._namespace(user_id)

@@ -26,6 +26,9 @@ JUDGE_SYSTEM = """\
 - 관련 내용이 맞지만 부족하면 bonus_available을 사용한다.
 - 틀린 설명은 misconception, 모른다는 답변은 unknown으로 구분한다.
 - project 답변이 Evidence와 충돌할 때만 evidence conflict를 판단한다.
+- 답변의 충분성은 질문에 명시적으로 요구된 내용만 기준으로 판단한다.
+- Evidence에 추가 필드나 개념이 등장하더라도 질문에서 요구하지 않았다면 답변 누락으로 판단하지 않는다.
+- Evidence는 답변의 사실 확인에만 사용하고, 질문에 없는 평가 요구사항을 새로 만들지 않는다.
 
 [출력]
 - 지정된 JSON 스키마만 반환한다.
