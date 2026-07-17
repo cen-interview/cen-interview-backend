@@ -29,12 +29,31 @@ def test_next_difficulty_first_question_is_easy():
         (Difficulty.HARD, AnswerQuality.MISCONCEPTION, Difficulty.MEDIUM),
         (Difficulty.MEDIUM, AnswerQuality.CONFIRM_NEGATIVE, Difficulty.EASY),
         (Difficulty.EASY, AnswerQuality.MISCONCEPTION, Difficulty.EASY),  # 이미 최저, 유지
+        (Difficulty.HARD, AnswerQuality.UNKNOWN, Difficulty.MEDIUM),  # "모르겠다"도 즉시 하강
+        (Difficulty.MEDIUM, AnswerQuality.UNKNOWN, Difficulty.EASY),
+        (Difficulty.EASY, AnswerQuality.UNKNOWN, Difficulty.EASY),  # 이미 최저, 유지
     ],
 )
 def test_next_difficulty_steps_down_on_negative_signal(current_difficulty, quality, expected):
-    """규칙 2: MISCONCEPTION/CONFIRM_NEGATIVE -> 한 단계 하강"""
+    """규칙 2: MISCONCEPTION/CONFIRM_NEGATIVE/UNKNOWN -> 한 단계 하강
+
+    UNKNOWN("모르겠다")도 오개념과 동일하게 즉시 하강시킨다 - 그렇지 않으면
+    지원자가 계속 모른다고 답해도 난이도가 HARD에 고정된 채 내려오지 않는다.
+    """
     state = StrategyState(asked_difficulties=[current_difficulty])
     assert next_difficulty(state, _signal(quality)) == expected
+
+
+def test_next_difficulty_unknown_wins_over_forced_up_on_easy_streak():
+    """규칙 2가 규칙 3(연속 EASY 강제 상승)보다 우선한다.
+
+    EASY가 2연속이면 원래는 규칙 3이 강제로 MEDIUM까지 올리지만(다른 테스트
+    test_next_difficulty_forces_up_after_two_consecutive_easy 참고), 이번엔
+    "모르겠다"는 신호가 왔으므로 억지로 올리지 않고 하강(EASY 유지)이 이긴다.
+    """
+    state = StrategyState(asked_difficulties=[Difficulty.EASY, Difficulty.EASY])
+    result = next_difficulty(state, _signal(AnswerQuality.UNKNOWN))
+    assert result == Difficulty.EASY
 
 
 def test_next_difficulty_forces_up_after_two_consecutive_easy():

@@ -14,6 +14,16 @@ StrategyAgent
 ├── question_gen.py       (파생 질문 5종 + hint LLM 생성)
 └── personalization.py    (이전 면접 약점 주제 조회, Assessment stub)
 
+Strategy는 자체 store를 갖지 않고, Evidence가 소유한 두 검색 경계(RAG)를 호출만 한다.
+둘은 성격이 달라 나란히 두면 안 된다 — 하나는 사용자별, 하나는 전역이다.
+
+| 검색 함수 | 소유 | 네임스페이스 | 호출 지점 |
+|---|---|---|---|
+| `evidence.retrieval.search_evidence` | Evidence(A) | `user_id`별 (개인 Notion/GitHub 근거) | `graph.py`의 `retrieve_evidence` 노드, `question_gen.py`의 `_generate_derived_question`/`generate_hint` — 질문 **내용**의 근거로 사용 |
+| `evidence.question_patterns.search_interview_question_signals` | Evidence(A) | 없음(전역, 크롤링 기반 실전 질문 패턴) | `question_gen.py`의 `apply_pattern_style` — 완성된 질문 문장 자체를 쿼리로 던져 **화법·문장 구조**만 참고, 기술적 내용은 절대 가져오지 않음 |
+
+`CoverageMap`도 evidence 쪽에서 만들어 Strategy에 주입되는 값이라(`pick_topic`이 읽기만 함), Strategy 코드 어디에도 evidence 원문을 직접 만지는 로직은 없다.
+
 ## 메인 질문 생성 그래프 (graph.py)
 
 메인 질문 하나를 생성하는 과정만 LangGraph로 구성했다. `next_question()`은 내부적으로 이 그래프를 `invoke()` 한 번 호출한다.
@@ -109,11 +119,15 @@ graph TD;
 | 우선순위 | 조건 | 결과 |
 |---|---|---|
 | 1 | 첫 질문(last_signal 없음) | EASY |
-| 2 | 직전 신호가 MISCONCEPTION 또는 CONFIRM_NEGATIVE | 한 단계 하강 |
+| 2 | 직전 신호가 MISCONCEPTION, CONFIRM_NEGATIVE 또는 UNKNOWN("모르겠다") | 한 단계 하강 |
 | 3 | 최근 2회 연속 EASY | 강제 상승 (쉬운 질문 편중 방지) |
-| 4 | 메인 질문 5개 이상 진행됐는데 HARD가 한 번도 안 나옴 | HARD로 강제 상승 |
+| 4 | 메인 질문 4개 이상 진행됐는데 HARD가 한 번도 안 나옴 | HARD로 강제 상승 |
 | 5 | 최근 2회 연속 SUFFICIENT | 한 단계 상승 |
 | 6 | 그 외 | 직전 난이도 유지 |
+
+UNKNOWN도 MISCONCEPTION과 동일하게 즉시 하강 대상이다. 지원자가 "모르겠다"고 반복 답변해도
+난이도가 한 번 오른 뒤 고정된 채 안 내려오는 문제가 있었는데(예: 규칙 4로 HARD까지 오른 뒤
+계속 몰라서 넘어가도 하강 트리거가 없어 HARD가 유지됨), UNKNOWN을 규칙 2에 포함시켜 해결했다.
 
 난이도 이력(`asked_difficulties`)은 메인/파생 질문을 구분하지 않고 전체를 기준으로 판단한다. 사용자가 실제로 받는 질문 흐름 전체가 난이도 체감의 기준이라고 판단했기 때문이다.
 
