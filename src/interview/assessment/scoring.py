@@ -84,6 +84,12 @@ class AnswerAttempt(BaseModel):
     question_category: QuestionCategory
     question_difficulty: Difficulty
 
+    # 질문 생성에 사용된 Evidence ID
+    question_evidence_ids: list[str] = Field(default_factory=list)
+
+    # 실제 답변 평가에 사용된 Evidence ID
+    assessment_evidence_ids: list[str] = Field(default_factory=list)
+
     answer_text: str
     signal: AnswerQualitySignal
 

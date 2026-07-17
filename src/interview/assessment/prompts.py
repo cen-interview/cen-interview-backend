@@ -129,10 +129,16 @@ REPORT_SYSTEM_PROMPT = """\
 - 오개념, 보완 과정, 충분한 답변으로의 전환을 반영한다.
 
 [코드 분석]
-- PROJECT 질문이며 Evidence가 있을 때만 code_analysis를 작성한다.
+- code_analysis 바깥 배열은 evaluations와 같은 순서와 길이로 작성한다.
+- 각 바깥 배열 항목은 해당 문항의 코드 분석 목록이다.
+- TECHNICAL 질문이거나 Evidence가 없는 문항은 해당 위치에 빈 배열을 작성한다.
+- PROJECT 질문이며 Evidence가 있는 문항만 code_analysis를 작성한다.
 - Evidence의 실제 코드만 사용하고 서로 다른 파일을 합치지 않는다.
+- current_code는 제공된 Evidence 코드에서만 가져온다.
+- source_file은 Evidence의 file_path가 있을 때만 작성한다.
+- Evidence에 없는 파일 경로나 코드를 추측하지 않는다.
 - 외부 문서, 최신 구현, Evidence에 없는 코드를 만들지 않는다.
-- compatibility_status="not_evaluated", modern_code=null, references=[]로 둔다.
+- compatibility_status="not_evaluated", references=[]로 둔다.
 - 비밀정보는 출력하지 않는다.
 
 [Rubric]

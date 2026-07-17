@@ -62,6 +62,7 @@ from interview.schemas.report import (
 )
 from interview.schemas.signals import AnswerQuality, AnswerQualitySignal
 from interview.assessment.graph import AssessmentState, get_compiled_graph
+from interview.schemas.evidence import EvidenceChunk
 
 class AssessmentAgent:
     """답변 평가 상태를 관리하는 Assessment Agent.
@@ -93,6 +94,9 @@ class AssessmentAgent:
         self.user_id = user_id
         self.competency = CompetencyModel()
         self.evaluations: list[AnswerEvaluation] = []
+        
+        # 평가에 사용된 Evidence 원문을 최종 리포트 생성까지 보관
+        self.evidence_chunks: dict[str, EvidenceChunk] = {}
 
         # 현재 질문 세트의 답변 시도
         # 메인 질문 + follow_up / challenge / confirm / trap 등을 묶어 점수 산정할 때 사용
@@ -141,6 +145,18 @@ class AssessmentAgent:
         )
 
         result_state = get_compiled_graph().invoke(state)
+        assessment_chunks = result_state.get(
+            "evidence_chunks",
+            [],
+        )
+
+        for chunk in assessment_chunks:
+            self.evidence_chunks[chunk.chunk_id] = chunk
+
+        assessment_evidence_ids = [
+            chunk.chunk_id
+            for chunk in assessment_chunks
+        ]
 
         signal = result_state["final_signal"]
 
@@ -162,6 +178,11 @@ class AssessmentAgent:
             question_category=question.category,
             # 질문 난이도
             question_difficulty=question.difficulty,
+            
+            question_evidence_ids=list(
+                question.evidence_ids
+            ),
+            assessment_evidence_ids=assessment_evidence_ids,
             # 답변 원문
             answer_text=answer_text,
             # 답변 평가
@@ -211,16 +232,27 @@ class AssessmentAgent:
   
         evaluation = AnswerEvaluation(
             question_id=main_question_id,
-             # 평가 주제
             topic=main_attempt.question_topic,
-            # 메인 질문 원문.
             question=main_attempt.question_text,
-            # 메인 질문에 대한 최초 답변.
             answer_summary=self._build_answer_context(),
             score=score.score,
             comment=score.comment,
             delivery_note=self._build_delivery_note(),
             quality_trace=self._build_quality_trace(),
+
+            question_category=main_attempt.question_category,
+
+            question_evidence_ids=list(
+                main_attempt.question_evidence_ids
+            ),
+
+            assessment_evidence_ids=list(
+                dict.fromkeys(
+                    evidence_id
+                    for attempt in self.current_attempts
+                    for evidence_id in attempt.assessment_evidence_ids
+                )
+            ),
         )
 
         self.evaluations.append(evaluation)
@@ -322,4 +354,4 @@ class AssessmentAgent:
         return report_builder.build_report(
             self.competency,
             self.evaluations,
-        )
+            evidence_chunks=self.evidence_chunks,)
