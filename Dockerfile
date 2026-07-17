@@ -11,6 +11,8 @@ RUN uv sync --frozen --no-dev
 
 # 소스 복사
 COPY src ./src
+COPY alembic.ini ./
+COPY migrations ./migrations
 
 EXPOSE 8000
 
