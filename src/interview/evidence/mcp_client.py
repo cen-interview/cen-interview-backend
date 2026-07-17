@@ -144,6 +144,7 @@ class EvidenceMcpClient:
         owner: str | None = None,
         repo: str | None = None,
         github_login: str | None = None,
+        github_verified_emails: list[str] | None = None,
     ) -> dict:
         """GitHub MCP로 repository metadata, README, tree, commit 원본 응답을 모은다.
 
@@ -164,6 +165,7 @@ class EvidenceMcpClient:
             owner,
             repo,
             github_login,
+            github_verified_emails,
         )
 
     @asynccontextmanager
@@ -204,6 +206,7 @@ class EvidenceMcpClient:
         owner: str,
         repo: str,
         github_login: str | None,
+        github_verified_emails: list[str] | None,
     ) -> dict:
         """GitHub repository, README, tree, commit MCP 응답을 한 번에 모은다."""
         async with self._github_session() as session:
@@ -229,6 +232,7 @@ class EvidenceMcpClient:
                 owner=owner,
                 repo=repo,
                 github_login=github_login,
+                github_verified_emails=github_verified_emails,
                 max_commits=settings.evidence_github_max_commits,
             )
             commit_details = await self._fetch_github_commit_details(
@@ -349,37 +353,54 @@ class EvidenceMcpClient:
         owner: str,
         repo: str,
         github_login: str | None,
+        github_verified_emails: list[str] | None,
         max_commits: int,
     ) -> tuple[dict, list[str]]:
-        """작성자 커밋을 페이지네이션해 설정된 최대 개수까지 수집한다."""
+        """검증된 login·이메일의 커밋을 중복 없이 최대 개수까지 수집한다."""
         per_page = min(100, max(1, max_commits))
         pages: list[dict] = []
         shas: list[str] = []
-        page = 1
+        authors: list[str] = []
+        seen_authors: set[str] = set()
+        for author in [*(github_verified_emails or []), github_login]:
+            if not isinstance(author, str) or not author.strip():
+                continue
+            normalized = author.strip()
+            key = normalized.casefold()
+            if key not in seen_authors:
+                seen_authors.add(key)
+                authors.append(normalized)
 
-        while len(shas) < max_commits:
-            arguments: dict[str, object] = {
-                "owner": owner,
-                "repo": repo,
-                "page": page,
-                "perPage": min(per_page, max_commits - len(shas)),
-            }
-            if github_login:
-                arguments["author"] = github_login
+        for author in authors:
+            page = 1
+            while len(shas) < max_commits:
+                requested_count = min(per_page, max_commits - len(shas))
+                arguments: dict[str, object] = {
+                    "owner": owner,
+                    "repo": repo,
+                    "author": author,
+                    "page": page,
+                    "perPage": requested_count,
+                }
+                response = await self._safe_call_github_tool(
+                    session,
+                    settings.github_mcp_commits_tool,
+                    arguments,
+                )
+                pages.append(response)
+                page_shas = _extract_github_commit_shas(response)
+                new_shas = [sha for sha in page_shas if sha not in shas]
+                shas.extend(new_shas)
 
-            response = await self._safe_call_github_tool(
-                session,
-                settings.github_mcp_commits_tool,
-                arguments,
-            )
-            pages.append(response)
-            page_shas = _extract_github_commit_shas(response)
-            new_shas = [sha for sha in page_shas if sha not in shas]
-            shas.extend(new_shas)
-
-            if response.get("isError") or not page_shas or len(page_shas) < arguments["perPage"]:
+                if (
+                    response.get("isError")
+                    or not page_shas
+                    or len(page_shas) < requested_count
+                ):
+                    break
+                page += 1
+            if len(shas) >= max_commits:
                 break
-            page += 1
 
         return {"pages": pages}, shas[:max_commits]
 

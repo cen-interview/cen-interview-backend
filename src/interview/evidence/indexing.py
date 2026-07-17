@@ -26,6 +26,7 @@ def build_index(
     notion_source: NotionSource | None = None,
     github_source: GitHubSource | None = None,
     github_login: str | None = None,
+    github_verified_emails: list[str] | None = None,
 ) -> IndexBuildResult:
     """면접용 지식 베이스를 구축하고 커버리지 맵을 반환한다.
 
@@ -37,6 +38,7 @@ def build_index(
         notion_source: 사용자별 Notion credential이 주입된 source. 없으면 기본 source를 사용한다.
         github_source: 사용자별 GitHub credential이 주입된 source. 없으면 기본 source를 사용한다.
         github_login: GitHub commit 조회에서 author 필터로 사용할 사용자 login.
+        github_verified_emails: commit author를 검증하고 이메일별로 조회할 GitHub 인증 이메일.
 
     Returns:
         인덱싱 상태, 실패 목록, 저장 청크 수, 주제별 커버리지 맵.
@@ -72,7 +74,13 @@ def build_index(
     github_source = github_source or GitHubSource()
     for link in github_links:
         try:
-            raw_docs.extend(github_source.fetch_repos([link], github_login=github_login))
+            raw_docs.extend(
+                github_source.fetch_repos(
+                    [link],
+                    github_login=github_login,
+                    github_verified_emails=github_verified_emails,
+                )
+            )
         except Exception as exc:
             failures.append(
                 _failure(

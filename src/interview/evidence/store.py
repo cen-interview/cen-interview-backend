@@ -181,7 +181,7 @@ class EvidenceStore:
         user_id: int | str | None = None,
         ownership: EvidenceOwnership | None = None,
     ) -> list[EvidenceChunk]:
-        """사용자 namespace 안에서 cosine distance 기준 top-k 청크를 반환한다."""
+        """사용자 namespace에서 최소 cosine similarity를 충족하는 청크를 거리 순으로 최대 k개 반환한다."""
         namespace = self._namespace(user_id)
         if self.backend == VECTOR_BACKEND_MEMORY:
             chunks = self._chunks_by_user.get(namespace, [])
@@ -193,6 +193,8 @@ class EvidenceStore:
 
         query_embedding = self._get_embeddings().embed_query(query)
         distance = EvidenceVectorRecord.embedding.cosine_distance(query_embedding)
+        max_distance = 1.0 - settings.evidence_min_similarity
+
         statement = select(EvidenceVectorRecord).where(
             EvidenceVectorRecord.user_id == namespace
         )
@@ -200,7 +202,9 @@ class EvidenceStore:
             statement = statement.where(EvidenceVectorRecord.topic == topic)
         if ownership is not None:
             statement = statement.where(EvidenceVectorRecord.ownership == ownership)
-        statement = statement.order_by(distance).limit(k)
+
+        statement = statement.where(distance <= max_distance).order_by(distance).limit(k)
+
         with self._session() as db:
             records = db.scalars(statement).all()
         return [self._chunk_from_record(record) for record in records]
