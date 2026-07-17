@@ -155,7 +155,9 @@ def _generate_derived_question(
 ) -> Question:
     """파생 질문(follow_up/challenge/confirm_positive/confirm_negative/trap) 공통 생성 로직."""
     probe = target or "답변에서 더 확인이 필요한 부분"
-    evidence_chunks = search_evidence(query=probe, topic=topic, k=10, user_id=user_id)
+    evidence_chunks = search_evidence(
+        query=probe, topic=topic, k=10, user_id=user_id, ownership="user_touched"
+    )
     reliable_chunks = filter_reliable_chunks(evidence_chunks)
 
     context = (
@@ -338,7 +340,9 @@ def generate_hint(
     """
 
     probe = target or "질문의 핵심 개념"
-    evidence_chunks = search_evidence(query=probe, topic=question.topic, k=5, user_id=user_id)
+    evidence_chunks = search_evidence(
+        query=probe, topic=question.topic, k=5, user_id=user_id, ownership="user_touched"
+    )
     reliable_chunks = filter_reliable_chunks(evidence_chunks)
 
     context = (
