@@ -30,6 +30,7 @@ class InterviewDeps:
     strategy: StrategyPort
     assessment: AssessmentPort
     llm: object | None = None
+    rubric_sharing_enabled: bool = False
 
 
 def _state_get(state: SessionState | dict[str, Any], key: str, default: Any = None) -> Any:

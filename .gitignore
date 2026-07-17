@@ -35,5 +35,6 @@ check.bat
 # Certbot이 생성하는 SSL 인증서/설정
 certbot/
 
-# 로컬 Chroma 벡터 DB (더 이상 사용 안 함, pgvector로 전환됨)
-.chroma/
+# 기업 면접 질문 일회성 전처리 산출물
+artifacts/question_dataset/
+/csv/

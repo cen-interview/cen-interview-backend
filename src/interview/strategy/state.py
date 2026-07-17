@@ -37,13 +37,16 @@ class StrategyState(BaseModel):
             LLM 프롬프트에 "이미 한 질문"으로 전달할 때 사용한다 (4단계).
 
         topic_last_quality:
-            주제별 마지막 답변 평가 결과. next_question() 호출 시에만 갱신된다
-            (파생 질문은 답변 평가 신호를 받지 않으므로 갱신하지 않는다).
+            주제별 마지막 답변 평가 결과. next_question()이 받는 last_signal을
+            그대로 저장하므로, 파생 질문이 있었던 세트라면 메인 질문이 아니라
+            마지막 파생 질문의 평가 결과가 담긴다. next_question() 호출 시에만
+            갱신된다.
 
         recent_qualities:
-            메인 질문에 대한 답변 평가 결과(quality)의 시간순 이력. 연속
-            SUFFICIENT/EASY 판단 등 난이도 조정 규칙(difficulty.py)에서
-            사용한다. next_question() 호출 시에만 갱신된다.
+            가장 마지막으로 평가된 답변(quality)의 시간순 이력 - 메인 질문뿐
+            아니라 세트의 마지막 파생 질문 평가도 포함된다. 연속 SUFFICIENT/EASY
+            판단 등 난이도 조정 규칙(difficulty.py)에서 사용한다. next_question()
+            호출 시에만 갱신된다.
     """
 
     asked_topics: list[str] = Field(default_factory=list)

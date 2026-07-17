@@ -90,7 +90,11 @@ def _reach_consent():
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
     assessment = FakeAssessment()
-    deps = InterviewDeps(strategy=FakeStrategy(), assessment=assessment)
+    deps = InterviewDeps(
+        strategy=FakeStrategy(),
+        assessment=assessment,
+        rubric_sharing_enabled=True,
+    )
     session_id = f"session-{uuid.uuid4().hex}"
     state = graph.invoke(
         SessionState(session_id=session_id, max_questions=1),

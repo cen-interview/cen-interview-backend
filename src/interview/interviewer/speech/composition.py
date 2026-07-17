@@ -530,9 +530,17 @@ def compose_utterance(
 ) -> dict[str, Any]:
     """현재 상황의 안내 문장과 질문 본문을 면접관 발화로 조립한다.
 
+<<<<<<< HEAD
     Strategy가 만든 Question.text는 수정하지 않고 평가 결과별 템플릿
     preamble 앞에 그대로 붙인다. 발화 조립에서는 LLM을 호출하지 않는다.
     조립한 전체 문장은 last_utterance에 저장한다. TTS용 utterance_queue에는
+=======
+    Strategy가 만든 Question.text는 수정하지 않고 짧은 preamble 앞에 그대로
+    붙인다. preamble은 직전 평가 신호와 턴 상황에 맞는 고정 템플릿에서
+    선택한다. LLM preamble 생성(_generate_llm_preamble)은 턴당 1~3초의
+    지연을 만들면서 음성 모드에서는 선전송 리액션에 가려 사용자에게 전달되지
+    않으므로 호출하지 않는다. 조립한 전체 문장은 last_utterance에 저장한다. TTS용 utterance_queue에는
+>>>>>>> dev
     안내 또는 리액션 문장과 질문 원문을 별도 항목으로 담아 프론트가 순서대로
     재생할 수 있게 한다. 동일한 전체 문장을 interviewer Turn으로 transcript에
     추가한다. closing과 pause_prompt에는 질문을 덧붙이지 않는다.
@@ -562,12 +570,19 @@ def compose_utterance(
 
     question_kind = current_question.kind if current_question is not None else None
     reaction_policy = select_reaction_policy(_state_get(state, "last_signal"))
+
+    # LLM preamble(_generate_llm_preamble)은 턴마다 1~3초를 소모하지만 음성
+    # 모드에서는 선전송 리액션에 밀려 사용자에게 전달되지 않으므로, 응답
+    # 속도를 위해 호출하지 않고 평가 톤이 반영된 템플릿만 사용한다.
+
     preamble = _select_utterance_preamble(
         turn_type,
         question_kind,
         reaction_policy,
     )
-    _ = runtime
+
+    preamble_source = "template"
+
 
     last_utterance = preamble
     question_text = None

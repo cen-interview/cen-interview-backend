@@ -138,9 +138,10 @@ class LatestWinsTurnCompletionWorker:
     async def submit(self, snapshot: TurnCompletionSnapshot) -> bool:
         """판단할 최신 전사 snapshot을 worker에 제출한다.
 
-        buffer와 일치하는 listening 상태의 snapshot만 받는다. 첫 판단은 최소
-        길이를 충족하면 즉시 예약하고, 이후에는 안정화된 STT 구간이거나 직전
-        수락 snapshot보다 최소 길이만큼 증가한 경우에만 새 판단 cycle을
+        buffer와 일치하는 listening 상태의 snapshot만 받는다. 최종 STT 구간은
+        짧은 답변도 판단할 수 있도록 길이 제한 없이 예약하고, 중간 STT 구간은
+        최소 길이를 충족한 경우에만 판단한다. 이후에는 안정화된 STT 구간이거나
+        직전 수락 snapshot보다 최소 길이만큼 증가한 경우에만 새 판단 cycle을
         시작한다. 실행 중이거나 rate-limit 대기 중인 runner가 있으면 작은
         변경도 더 높은 revision의 pending snapshot 하나로 교체한다.
 
@@ -149,8 +150,9 @@ class LatestWinsTurnCompletionWorker:
                 현재 질문과 누적 전사문 최신본을 담은 완료 판단 입력.
 
         Returns:
-            snapshot을 최신 판단 후보로 수락했으면 True. 상태 불일치, 짧거나
-            의미 없는 변경, 오래된 revision 또는 닫힌 worker이면 False.
+            snapshot을 최신 판단 후보로 수락했으면 True. 상태 불일치, 빈 전사,
+            길이가 부족한 중간 전사, 의미 없는 변경, 오래된 revision 또는 닫힌
+            worker이면 False.
         """
         if self._closed:
             return False
@@ -161,7 +163,9 @@ class LatestWinsTurnCompletionWorker:
 
         normalized_text = " ".join(snapshot.current_answer.split())
         compact_text = normalized_text.replace(" ", "")
-        if len(compact_text) < self._min_text_length:
+        if not compact_text:
+            return False
+        if not snapshot.segment_final and len(compact_text) < self._min_text_length:
             return False
 
         async with self._state_lock:

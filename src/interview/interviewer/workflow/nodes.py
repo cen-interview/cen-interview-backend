@@ -532,34 +532,12 @@ def check_rubric_eligibility(
     runtime: Any,
 ) -> dict[str, Any]:
     """Find novel shareable questions before running the final-report LLM."""
-    deps = _runtime_deps(runtime)
-    collector = getattr(deps.assessment, "collect_rubric_sources", None)
-    if not callable(collector):
-        return {
-            "rubric_sources": [],
-            "rubric_share_status": "not_available",
-            "rubric_share_approved": False,
-            "error": None,
-        }
-
-    try:
-        sources = collector()
-    except Exception as exc:
-        _logger.exception(
-            "[RUBRIC][ELIGIBILITY_FAILED] error=%s",
-            exc,
-        )
-        sources = []
-
     return {
-        "rubric_sources": sources,
-        "rubric_share_status": (
-            "pending" if sources else "not_available"
-        ),
-        "rubric_share_approved": None if sources else False,
+        "rubric_sources": [],
+        "rubric_share_status": "not_available",
+        "rubric_share_approved": False,
         "error": None,
     }
-
 
 def final_report(state: SessionState | dict[str, Any], runtime: Any) -> dict[str, Any]:
     """Assessment가 만든 최종 평가 리포트를 세션 상태에 저장한다.
@@ -592,7 +570,7 @@ def final_report(state: SessionState | dict[str, Any], runtime: Any) -> dict[str
         else RubricSource.model_validate(source)
         for source in raw_sources
     ]
-    if callable(generate_report):
+    if deps.rubric_sharing_enabled and callable(generate_report):
         result = generate_report(rubric_sources=rubric_sources)
         if not isinstance(result, ReportGenerationResult):
             result = ReportGenerationResult.model_validate(result)

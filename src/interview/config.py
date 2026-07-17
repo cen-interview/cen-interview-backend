@@ -31,11 +31,18 @@ class Settings(BaseSettings):
     turn_commit_grace_milliseconds: int = 300
     turn_confirmation_pause_seconds: float = 0.8
     turn_confirmation_max_per_question: int = 1
+    turn_confirmation_ready_timeout_seconds: float = 15.0
+    turn_confirmation_response_timeout_seconds: float = 8.0
+    turn_stall_timeout_seconds: float = 3.0
     voice_turn_auth_timeout_seconds: float = 5.0
 
     # TTS
     openai_tts_model: str = "gpt-4o-mini-tts"
-    openai_tts_voice: str = "marin"
+    openai_tts_voice: str = "onyx"
+    openai_tts_instructions: str = (
+        "차분하고 신뢰감 있는 한국인 남성 면접관의 낮고 자연스러운 목소리로 "
+        "또박또박 말한다."
+    )
 
     # MCP / 외부 소스
     # notion
@@ -63,10 +70,13 @@ class Settings(BaseSettings):
 
     # Vector DB (Postgres + pgvector)
     database_url: str = "postgresql+psycopg://interview:1234@localhost:5432/interviewdb"
+    database_auto_create_tables: bool = True
 
     # Embedding
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536   # 차원 지정 1536
+    question_pattern_min_similarity: float = 0.30
+    question_pattern_data_path: str = "../data"
 
     # 면접 진행
     max_questions: int = 10

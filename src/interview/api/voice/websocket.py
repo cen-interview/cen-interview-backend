@@ -16,11 +16,14 @@ from interview.api.users.model import User
 from interview.api.voice.schema import (
     VOICE_TURN_CLIENT_MESSAGE_ADAPTER,
     AnswerCommittedMessage,
+    AnswerReactionMessage,
     AnswerTranscriptUpdatedMessage,
     ConnectionAuthenticateMessage,
     ConnectionReadyMessage,
     TurnConfirmationCancelledMessage,
     TurnConfirmationRequestedMessage,
+    TurnConfirmationResponseActivityChangedMessage,
+    TurnConfirmationResponseReadyMessage,
     TurnConfirmationRespondedMessage,
     TurnStateChangedMessage,
     VoiceActivityChangedMessage,
@@ -28,8 +31,12 @@ from interview.api.voice.schema import (
 )
 from interview.config import settings
 from interview.interviewer.adapters import from_voice
-from interview.interviewer.facade import get_session
+from interview.interviewer.facade import get_session, release_session
 from interview.interviewer.models import DeliveryMetrics
+from interview.interviewer.speech.utterance import (
+    commit_acknowledgment,
+    listening_cutoff_notice,
+)
 from interview.interviewer.turn_completion.buffer import (
     VoiceTurnAlreadyCommittedError,
     VoiceTurnBufferError,
@@ -85,6 +92,7 @@ async def voice_turn_websocket(
     send_lock = asyncio.Lock()
     connection_open = True
     coordinator: VoiceTurnCoordinator | None = None
+    reaction_sent_event_id: str | None = None
     registry = get_voice_turn_registry()
 
     async def send_model(message: BaseModel) -> None:
@@ -237,6 +245,13 @@ async def voice_turn_websocket(
                     question_id=question_id,
                     revision=revision,
                     text=text,
+                    ready_timeout_milliseconds=round(
+                        settings.turn_confirmation_ready_timeout_seconds * 1000
+                    ),
+                    response_timeout_milliseconds=round(
+                        settings.turn_confirmation_response_timeout_seconds * 1000
+                    ),
+                    requires_ready_ack=True,
                 )
             )
 
@@ -267,6 +282,47 @@ async def voice_turn_websocket(
                 )
             )
 
+        async def on_commit_started(
+            request: VoiceTurnCommitRequest,
+        ) -> None:
+            """제출 확정 직후 중립 리액션 발화를 프론트에 먼저 전달한다.
+
+            정체로 답변 듣기를 중단한 listening_cutoff 제출에서는 중립 리액션
+            대신 답변 수집 종료를 알리는 고정 안내 문구를 전송한다.
+
+            다음 질문 생성이 완료되기 전에 프론트가 리액션 TTS 재생을
+            시작할 수 있게 answer.committed보다 앞서 전송한다. 전송에
+            성공하면 해당 제출 건을 기억해 두었다가 세션 응답의
+            utterance_queue에서 리액션 문장을 제거한다.
+
+            Args:
+                request:
+                    제출이 확정된 불변 답변 snapshot.
+            """
+            nonlocal reaction_sent_event_id
+            if not owns_current_worker():
+                return
+            reaction_text = (
+                listening_cutoff_notice()
+                if request.completion_reason == "listening_cutoff"
+                else commit_acknowledgment()
+            )
+            await send_model(
+                AnswerReactionMessage(
+                    question_id=request.question_id,
+                    revision=request.revision,
+                    text=reaction_text,
+                )
+            )
+            reaction_sent_event_id = request.client_event_id
+            log_voice_turn_event(
+                "voice_turn.reaction.sent",
+                session_id=session_id,
+                question_id=request.question_id,
+                revision=request.revision,
+                reaction_length=len(reaction_text),
+            )
+
         async def on_commit_answer(
             request: VoiceTurnCommitRequest,
         ) -> dict:
@@ -275,7 +331,9 @@ async def voice_turn_websocket(
             동기 InterviewSession facade와 그래프 실행은 worker thread에서
             처리해 WebSocket event loop를 막지 않는다. 면접이 종료된 경우에는
             기존 sessions API와 동일하게 결과를 저장하고 응답 payload에
-            result_id를 포함한다.
+            result_id를 포함한다. 리액션 발화를 이미 보낸 제출 건이면
+            utterance_queue와 transcript의 리액션 문장을 제거해 음성과
+            화면 양쪽의 중복 리액션을 막는다.
 
             Args:
                 request:
@@ -322,10 +380,13 @@ async def voice_turn_websocket(
                         "자동 제출 후 면접 결과 저장에 실패했습니다.",
                         extra={"session_id": session_id},
                     )
-            return _session_response(
+            response = _session_response(
                 committed_state,
                 result_id=result_id,
             )
+            if reaction_sent_event_id == request.client_event_id:
+                _strip_predelivered_reaction(response)
+            return response
 
         async def on_answer_committed(
             result: VoiceTurnCommitResult,
@@ -356,6 +417,10 @@ async def voice_turn_websocket(
                 registry.remove(session_id)
                 connection_open = False
                 await websocket.close()
+                # 결과 저장까지 성공한 세션만 정리한다. 저장에 실패한 세션은
+                # 남겨 두어야 events API 재시도로 결과를 다시 저장할 수 있다.
+                if result.session.get("result_id") is not None:
+                    await asyncio.to_thread(release_session, session_id)
             elif isinstance(next_question, dict) and next_question.get("question_id"):
                 next_entry = registry.replace_question(
                     session_id=session_id,
@@ -410,6 +475,7 @@ async def voice_turn_websocket(
                 on_state_changed=on_state_changed,
                 on_confirmation_requested=on_confirmation_requested,
                 on_confirmation_cancelled=on_confirmation_cancelled,
+                on_commit_started=on_commit_started,
                 on_commit_answer=on_commit_answer,
                 on_answer_committed=on_answer_committed,
                 on_commit_failed=on_commit_failed,
@@ -526,6 +592,26 @@ async def voice_turn_websocket(
                         )
                 elif isinstance(
                     client_message,
+                    TurnConfirmationResponseReadyMessage,
+                ):
+                    await coordinator.handle_confirmation_response_ready(
+                        confirmation_id=client_message.confirmation_id,
+                        question_id=client_message.question_id,
+                        revision=client_message.revision,
+                        playback_status=client_message.playback_status,
+                    )
+                elif isinstance(
+                    client_message,
+                    TurnConfirmationResponseActivityChangedMessage,
+                ):
+                    await coordinator.handle_confirmation_response_activity_changed(
+                        confirmation_id=client_message.confirmation_id,
+                        question_id=client_message.question_id,
+                        revision=client_message.revision,
+                        speech_active=client_message.speech_active,
+                    )
+                elif isinstance(
+                    client_message,
                     TurnConfirmationRespondedMessage,
                 ):
                     confirmation_result = (
@@ -615,6 +701,47 @@ async def voice_turn_websocket(
                 session_id=session_id,
                 worker=coordinator.worker,
             )
+
+
+def _strip_predelivered_reaction(response: dict) -> None:
+    """선전송 리액션과 중복되는 면접관 리액션 문장을 세션 응답에서 제거한다.
+
+    answer.reaction으로 리액션을 이미 전달한 제출 건에서는 utterance_queue의
+    리액션 문장을 제거하고, transcript의 마지막 면접관 발화와 last_utterance를
+    질문 본문으로 교체해 화면과 음성 모두에서 리액션이 두 번 나오지 않게 한다.
+    off_topic이나 hint처럼 안내 문장 자체가 정보를 담는 턴과 질문이 없는 종료
+    턴은 그대로 둔다. 그래프가 보관하는 세션 상태는 수정하지 않고 이 WebSocket
+    응답 payload만 정리한다.
+
+    Args:
+        response:
+            _session_response()가 만든 JSON 직렬화 가능 세션 응답. 제자리에서
+            수정된다.
+    """
+    if response.get("turn_type") != "question":
+        return
+
+    utterance_queue = response.get("utterance_queue")
+    if isinstance(utterance_queue, list) and len(utterance_queue) >= 2:
+        response["utterance_queue"] = utterance_queue[1:]
+
+    question = response.get("question")
+    question_text = question.get("text") if isinstance(question, dict) else None
+    if not question_text:
+        return
+
+    transcript = response.get("transcript")
+    if isinstance(transcript, list) and transcript:
+        last_turn = transcript[-1]
+        if (
+            isinstance(last_turn, dict)
+            and last_turn.get("role") == "interviewer"
+            and last_turn.get("text") != question_text
+        ):
+            last_turn["text"] = question_text
+
+    if response.get("last_utterance"):
+        response["last_utterance"] = question_text
 
 
 async def _authenticate_first_message(

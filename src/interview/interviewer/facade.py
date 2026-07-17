@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from threading import Lock
@@ -18,6 +19,9 @@ from interview.schemas.evidence import CoverageMap
 from interview.schemas.question import Question
 from interview.schemas.report import FinalReport
 from interview.strategy import StrategyAgent
+
+
+logger = logging.getLogger(__name__)
 
 
 class InterviewSession:
@@ -261,20 +265,26 @@ class InterviewSession:
             return None
         return state.current_question
 
-    def confirm_rubric_sharing(self, share: bool) -> SessionState:
-        """최종 rubric 공유 interrupt를 resume한다."""
+
+    def release(self) -> None:
+        """종료된 세션이 프로세스 메모리에 남긴 상주 자원을 정리한다.
+
+        공유 compiled graph의 checkpointer에서 이 세션 thread의 체크포인트
+        히스토리를 삭제하고, Strategy의 프리페치 executor 같은 세션 전용
+        백그라운드 자원을 닫는다. 최종 결과가 DB에 저장된 뒤에만 호출해야
+        하며, 호출 이후에는 이 세션의 그래프 상태를 다시 조회할 수 없다.
+        """
         with self._lock:
-            if not self._started:
-                raise RuntimeError("session must be started before rubric consent")
-            state = self._get_state_unlocked()
-            if state.rubric_share_status != "pending":
-                return state
-            self._graph.invoke(
-                Command(resume={"share": share}),
-                config=self._config,
-                context=self.deps,
-            )
-            return self._get_state_unlocked()
+            checkpointer = getattr(self._graph, "checkpointer", None)
+            if checkpointer is not None:
+                thread_id = self._config["configurable"]["thread_id"]
+                checkpointer.delete_thread(thread_id)
+            self._processed_client_events.clear()
+
+        close_strategy = getattr(self.strategy, "close", None)
+        if callable(close_strategy):
+            close_strategy()
+
 
     def finalize(self) -> FinalReport:
         """종료된 그래프 상태에 저장된 최종 리포트를 반환한다.
@@ -371,6 +381,19 @@ class SessionRegistry:
         with self._lock:
             return self._entries[session_id]
 
+    def remove(self, session_id: str) -> SessionRegistryEntry | None:
+        """세션 항목을 레지스트리에서 제거하고 반환한다.
+
+        Args:
+            session_id:
+                제거할 면접 세션 ID.
+
+        Returns:
+            제거된 SessionRegistryEntry. 등록돼 있지 않으면 None.
+        """
+        with self._lock:
+            return self._entries.pop(session_id, None)
+
 
 _registry = SessionRegistry()
 
@@ -437,6 +460,34 @@ def create_session(
         )
     )
     return session, first_question
+
+
+def release_session(session_id: str) -> bool:
+    """종료된 세션을 레지스트리에서 제거하고 상주 자원을 정리한다.
+
+    세션과 InMemorySaver 체크포인트가 모두 프로세스 메모리에만 존재하므로,
+    최종 결과를 DB에 저장한 뒤 이 함수를 호출해 메모리 누적을 막는다.
+    정리 실패가 사용자 응답을 막으면 안 되므로 예외는 로그만 남기고 삼킨다.
+
+    Args:
+        session_id:
+            정리할 면접 세션 ID.
+
+    Returns:
+        레지스트리에서 항목을 찾아 정리를 시도했으면 True, 이미 제거돼
+        있으면 False.
+    """
+    entry = _registry.remove(session_id)
+    if entry is None:
+        return False
+    try:
+        entry.session.release()
+    except Exception:
+        logger.exception(
+            "세션 자원 정리에 실패했습니다.",
+            extra={"session_id": session_id},
+        )
+    return True
 
 
 def get_session(session_id: str) -> InterviewSession:
