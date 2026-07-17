@@ -23,8 +23,10 @@ def create_tts_audio_stream(text: str) -> Iterator[bytes]:
     """면접관 발화를 MP3 음성 스트림으로 변환한다.
 
     OpenAI Speech API 연결을 응답 반환 전에 열어 upstream 설정
-    오류를 HTTP 계층에서 처리할 수 있게 한다. 연결이 열리면
-    음성 데이터를 전체 메모리에 올리지 않고 청크 단위로 반환한다.
+    오류를 HTTP 계층에서 처리할 수 있게 한다. 설정에 고정된 음성과
+    한국인 남성 면접관 발화 지침을 모든 요청에 동일하게 적용한다.
+    연결이 열리면 음성 데이터를 전체 메모리에 올리지 않고 청크 단위로
+    반환한다.
 
     Args:
         text:
@@ -41,6 +43,7 @@ def create_tts_audio_stream(text: str) -> Iterator[bytes]:
         model=settings.openai_tts_model,
         voice=settings.openai_tts_voice,
         input=text,
+        instructions=settings.openai_tts_instructions,
         response_format="mp3",
     )
     response = response_context.__enter__()

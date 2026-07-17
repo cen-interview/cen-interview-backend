@@ -314,6 +314,17 @@ class StrategyAgent:
         """
         return question_gen.generate_hint(question, target, answer_excerpt, self.user_id)
 
+    def close(self) -> None:
+        """프리페치 executor와 대기 중인 프리페치 작업을 정리한다.
+
+        세션 종료 시 facade의 세션 정리 경로에서 호출한다. 이미 실행 중인
+        프리페치 LLM 호출은 중단할 수 없지만, 큐에서 대기 중인 작업은
+        취소하고 worker 스레드가 유휴 상태로 남지 않게 executor를 닫는다.
+        """
+        self._prefetch_future = None
+        self._prefetch_difficulty = None
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
     def _record(self, question: Question) -> None:
         """질문 생성 후 state를 한 곳에서 갱신한다 (hint 제외 모든 next_*가 호출)."""
         self.state.asked_topics.append(question.topic)
