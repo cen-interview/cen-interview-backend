@@ -108,26 +108,7 @@ def load_question_evidence(
         k=3,
         user_id=state.user_id,
     )
-    logger.info(
-        "\n"
-        "========== [PROJECT EVIDENCE LOADED] ==========\n"
-        "question_id: %s\n"
-        "question: %s\n"
-        "requested_evidence_ids: %s\n"
-        "loaded_evidence: %s\n"
-        "===============================================\n",
-        question.question_id,
-        question.text,
-        question.evidence_ids,
-        [
-            {
-                "chunk_id": chunk.chunk_id,
-                "topic": chunk.topic,
-                "text": chunk.text,
-            }
-            for chunk in state.evidence_chunks
-        ],
-    )
+   
     return state
 
 # 답변을 LLM으로 1차 평가하고 JudgeResult를 상태에 저장한다.
@@ -144,27 +125,7 @@ def judge(state: AssessmentState) -> AssessmentState:
     state.same_topic_history_summary = _build_same_topic_history_summary(
     state.same_topic_history,
     )
-    logger.info(
-        "\n"
-        "========== [ASSESSMENT LLM INPUT] ==========\n"
-        "category: %s\n"
-        "question_id: %s\n"
-        "question: %s\n"
-        "answer: %s\n"
-        "evidence: %s\n"
-        "============================================\n",
-        state.question.category.value,
-        state.question.question_id,
-        state.question.text,
-        state.answer_text,
-        [
-            {
-                "chunk_id": chunk.chunk_id,
-                "text": chunk.text,
-            }
-            for chunk in state.evidence_chunks
-        ],
-    )
+    
     state.judge_result = evaluator._judge_with_llm(
         question=state.question,
         answer_text=state.answer_text,
@@ -172,15 +133,7 @@ def judge(state: AssessmentState) -> AssessmentState:
         delivery_metrics=state.delivery_metrics,
         history=state.history,
     )
-    logger.info(
-        "\n"
-        "========== [ASSESSMENT LLM RESULT] ==========\n"
-        "question_id: %s\n"
-        "result: %s\n"
-        "================================================\n",
-        state.question.question_id,
-        state.judge_result.model_dump(),
-    )
+    
 
     return state
 
