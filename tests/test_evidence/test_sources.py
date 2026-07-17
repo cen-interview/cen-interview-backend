@@ -41,9 +41,11 @@ class FakeMcpClient:
         owner: str | None = None,
         repo: str | None = None,
         github_login: str | None = None,
+        github_verified_emails: list[str] | None = None,
     ) -> dict:
         """GitHub MCP 호출 요청 링크를 기록하고 변환 가능한 응답을 돌려준다."""
         self.github_calls.append(repo_link)
+        _ = (github_login, github_verified_emails)
         repo_name = f"{owner}/{repo}" if owner and repo else repo_link
         return {
             "repo_url": repo_link,
@@ -202,6 +204,52 @@ def test_github_commit_details_request_full_patch() -> None:
 
     assert result
     assert calls[0][1]["detail"] == "full_patch"
+
+
+def test_github_commit_lookup_uses_verified_email_before_login(monkeypatch) -> None:
+    """이메일 연결이 안 된 commit도 찾도록 검증 이메일을 login보다 먼저 조회한다."""
+    calls: list[dict] = []
+    first_sha = "a" * 40
+    second_sha = "b" * 40
+    third_sha = "c" * 40
+    client = EvidenceMcpClient(
+        github_mcp_url="https://example.com/mcp",
+        github_access_token="token",
+    )
+
+    async def fake_call(session, tool_name: str, arguments: dict) -> dict:
+        _ = (session, tool_name)
+        calls.append(arguments)
+        author = arguments["author"]
+        page = arguments["page"]
+        if author == "octocat@example.com":
+            shas = [first_sha]
+        elif page == 1:
+            shas = [first_sha, second_sha]
+        else:
+            shas = [third_sha]
+        return {"structuredContent": [{"sha": sha} for sha in shas]}
+
+    monkeypatch.setattr(client, "_safe_call_github_tool", fake_call)
+
+    async def fetch() -> tuple[dict, list[str]]:
+        return await client._fetch_github_commits(
+            session=object(),
+            owner="example",
+            repo="project",
+            github_login="octocat",
+            github_verified_emails=["octocat@example.com"],
+            max_commits=3,
+        )
+
+    _, shas = anyio.run(fetch)
+
+    assert [call["author"] for call in calls] == [
+        "octocat@example.com",
+        "octocat",
+        "octocat",
+    ]
+    assert shas == [first_sha, second_sha, third_sha]
 
 
 def test_github_mcp_retries_nested_rate_limit_errors(monkeypatch) -> None:
@@ -588,6 +636,53 @@ def test_github_source_accepts_verified_commit_when_mcp_omits_parents() -> None:
     )
 
     assert [doc for doc in docs if doc.meta.get("ownership") == "user_touched"]
+
+
+def test_github_source_accepts_verified_commit_email_without_linked_login() -> None:
+    """GitHub login 연결이 누락돼도 검증 이메일이 같은 일반 commit은 저장한다."""
+
+    class EmailMatchedCommitClient(FakeMcpClient):
+        def call_github_tool(self, *args, **kwargs) -> dict:
+            response = super().call_github_tool(*args, **kwargs)
+            record = response["commit_details"][0]["structuredContent"]
+            record["author"] = None
+            record["commit"] = {
+                "author": {"name": "octocat", "email": "octocat@example.com"},
+                "message": "feat: implement websocket message send",
+            }
+            return response
+
+    docs = GitHubSource(mcp_client=EmailMatchedCommitClient()).fetch_repos(
+        ["https://github.com/example/project"],
+        github_login="octocat",
+        github_verified_emails=["OctoCat@example.com"],
+    )
+
+    assert [doc for doc in docs if doc.meta.get("ownership") == "user_touched"]
+
+
+def test_github_source_rejects_unverified_commit_email() -> None:
+    """API login과 검증 이메일이 모두 불일치하면 user_touched로 저장하지 않는다."""
+
+    class EmailMismatchCommitClient(FakeMcpClient):
+        def call_github_tool(self, *args, **kwargs) -> dict:
+            response = super().call_github_tool(*args, **kwargs)
+            record = response["commit_details"][0]["structuredContent"]
+            record["author"] = None
+            record["commit"] = {
+                "author": {"name": "octocat", "email": "unknown@example.com"},
+                "message": "feat: implement websocket message send",
+            }
+            return response
+
+    docs = GitHubSource(mcp_client=EmailMismatchCommitClient()).fetch_repos(
+        ["https://github.com/example/project"],
+        github_login="octocat",
+        github_verified_emails=["octocat@example.com"],
+    )
+
+    assert not [doc for doc in docs if doc.meta.get("ownership") == "user_touched"]
+    assert [doc for doc in docs if doc.meta.get("ownership") == "repo_context"]
 
 
 def test_github_source_excludes_merge_message_when_mcp_omits_parents() -> None:

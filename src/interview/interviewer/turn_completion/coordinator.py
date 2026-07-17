@@ -211,8 +211,14 @@ class VoiceTurnCoordinator:
         _worker:
             최신 snapshot만 완료 판단하는 질문 단위 비동기 worker.
 
-        _confirmation_task:
+        _confirmation_delay_task:
             확인 질문을 시작하기 전 자연스러운 대화 간격을 기다리는 task.
+
+        _confirmation_ready_timeout_task:
+            확인 요청 후 프론트의 TTS·STT 준비 완료를 기다리는 task.
+
+        _confirmation_response_timeout_task:
+            프론트 준비 완료 후 실제 확인 응답을 기다리는 task.
 
         _commit_task:
             완료 후보 이후 경합 방지 구간과 기존 제출 경로를 실행하는 task.
@@ -246,6 +252,8 @@ class VoiceTurnCoordinator:
         auto_submit_confidence: float | None = None,
         max_confirmations: int | None = None,
         stall_timeout_seconds: float | None = None,
+        confirmation_ready_timeout_seconds: float | None = None,
+        confirmation_response_timeout_seconds: float | None = None,
     ) -> None:
         """현재 세션과 질문의 음성 턴 coordinator를 생성한다.
 
@@ -311,6 +319,14 @@ class VoiceTurnCoordinator:
                 하면 확인 질문을 강제 시작하거나, 횟수를 소진했으면 답변
                 듣기를 중단하고 현재 답변을 제출한다.
 
+            confirmation_ready_timeout_seconds:
+                확인 요청 전송 후 프론트가 TTS 재생과 STT 준비를 마칠 때까지
+                기다릴 최대 시간.
+
+            confirmation_response_timeout_seconds:
+                프론트 준비 완료 후 지원자의 실제 확인 응답을 기다릴 최대
+                시간. 확인 응답 발화 중에는 이 시간이 계산되지 않는다.
+
         Raises:
             ValueError:
                 확인 대기 시간, confidence, 최대 횟수 또는 정체 timeout이
@@ -346,6 +362,16 @@ class VoiceTurnCoordinator:
             if stall_timeout_seconds is None
             else stall_timeout_seconds
         )
+        configured_ready_timeout = (
+            settings.turn_confirmation_ready_timeout_seconds
+            if confirmation_ready_timeout_seconds is None
+            else confirmation_ready_timeout_seconds
+        )
+        configured_response_timeout = (
+            settings.turn_confirmation_response_timeout_seconds
+            if confirmation_response_timeout_seconds is None
+            else confirmation_response_timeout_seconds
+        )
         if configured_pause < 0:
             raise ValueError("확인 질문 대화 간격은 음수일 수 없습니다.")
         if not 0 <= configured_confidence <= 1:
@@ -358,6 +384,10 @@ class VoiceTurnCoordinator:
             raise ValueError("자동 제출 confidence는 0 이상 1 이하여야 합니다.")
         if configured_stall_timeout <= 0:
             raise ValueError("답변 정체 timeout은 0보다 커야 합니다.")
+        if configured_ready_timeout <= 0:
+            raise ValueError("확인 응답 준비 timeout은 0보다 커야 합니다.")
+        if configured_response_timeout <= 0:
+            raise ValueError("확인 응답 timeout은 0보다 커야 합니다.")
 
         self._session = session
         self._entry = entry
@@ -378,7 +408,11 @@ class VoiceTurnCoordinator:
         self._commit_grace_seconds = configured_commit_grace / 1000
         self._auto_submit_confidence = configured_auto_submit_confidence
         self._stall_timeout_seconds = configured_stall_timeout
-        self._confirmation_task: asyncio.Task[None] | None = None
+        self._confirmation_ready_timeout_seconds = configured_ready_timeout
+        self._confirmation_response_timeout_seconds = configured_response_timeout
+        self._confirmation_delay_task: asyncio.Task[None] | None = None
+        self._confirmation_ready_timeout_task: asyncio.Task[None] | None = None
+        self._confirmation_response_timeout_task: asyncio.Task[None] | None = None
         self._commit_task: asyncio.Task[None] | None = None
         self._stall_task: asyncio.Task[None] | None = None
         self._invalid_confirmation_ids: set[str] = set()
@@ -407,7 +441,7 @@ class VoiceTurnCoordinator:
         Returns:
             재연결 정리 이후의 VoiceTurnBuffer 복사본.
         """
-        self._cancel_confirmation_task()
+        self._cancel_confirmation_tasks()
         self._cancel_commit_task()
         self._cancel_stall_task()
         async with self._entry.lock:
@@ -603,8 +637,12 @@ class VoiceTurnCoordinator:
                 segment_final=buffer_snapshot.segment_final,
             )
 
-        if previous_state in {"confirmation_pending", "confirming_end"}:
-            self._cancel_confirmation_task()
+        if previous_state in {
+            "confirmation_pending",
+            "confirmation_prompting",
+            "confirming_end",
+        }:
+            self._cancel_confirmation_tasks()
             if cancelled_confirmation_id is not None:
                 self._remember_invalid_confirmation(cancelled_confirmation_id)
                 await self._notify_confirmation_cancelled(
@@ -719,9 +757,10 @@ class VoiceTurnCoordinator:
             self._maybe_schedule_stall_task(buffer_snapshot)
         if speech_active and previous_state in {
             "confirmation_pending",
+            "confirmation_prompting",
             "confirming_end",
         }:
-            self._cancel_confirmation_task()
+            self._cancel_confirmation_tasks()
             if cancelled_confirmation_id is not None:
                 self._remember_invalid_confirmation(cancelled_confirmation_id)
                 await self._notify_confirmation_cancelled(
@@ -747,6 +786,170 @@ class VoiceTurnCoordinator:
                 decision=policy_decision,
                 decision_trigger="speech_inactive",
             )
+        return buffer_snapshot
+
+    async def handle_confirmation_response_ready(
+        self,
+        *,
+        confirmation_id: str,
+        question_id: str,
+        revision: int,
+        playback_status: str,
+    ) -> VoiceTurnBuffer:
+        """프론트의 확인 응답 수집 준비 완료를 반영한다.
+
+        최초 ready에만 준비 timeout을 응답 timeout으로 교체한다. 같은 활성
+        confirmation의 중복 ready는 성공으로 처리하지만 응답 timeout 시작
+        시각은 갱신하지 않는다.
+
+        Args:
+            confirmation_id:
+                준비를 완료한 활성 확인 질문 ID.
+
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            revision:
+                확인 질문이 대상으로 삼은 기본 답변 revision.
+
+            playback_status:
+                확인 TTS 재생 결과. completed 또는 failed이며 관찰 로그에만
+                사용한다.
+
+        Returns:
+            준비 완료 반영 직후의 VoiceTurnBuffer 복사본.
+
+        Raises:
+            VoiceTurnCoordinatorError:
+                취소됐거나 현재 활성 confirmation 범위와 다른 ready인 경우.
+        """
+        self._ensure_worker_available()
+        if confirmation_id in self._invalid_confirmation_ids:
+            raise self._stale_confirmation_error()
+        if playback_status not in {"completed", "failed"}:
+            raise VoiceTurnCoordinatorError(
+                "invalid_message",
+                "지원하지 않는 확인 질문 재생 상태입니다.",
+                recoverable=True,
+            )
+
+        session_state = await self._get_active_voice_state()
+        self._validate_current_question(session_state, question_id)
+        async with self._entry.lock:
+            self._validate_active_confirmation(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                revision=revision,
+                allowed_states={"confirmation_prompting", "confirming_end"},
+            )
+            transitioned = self._entry.buffer.mark_confirmation_response_ready(
+                question_id=question_id,
+                confirmation_id=confirmation_id,
+                expected_revision=revision,
+            )
+            buffer_snapshot = self._entry.buffer.model_copy(deep=True)
+
+        if transitioned:
+            self._cancel_confirmation_ready_timeout_task()
+            self._schedule_confirmation_response_timeout(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                revision=revision,
+            )
+        log_voice_turn_event(
+            "voice_turn.confirmation.response.ready",
+            session_id=buffer_snapshot.session_id,
+            question_id=question_id,
+            revision=revision,
+            answer_text=buffer_snapshot.answer_text,
+            confirmation_id=confirmation_id,
+            playback_status=playback_status,
+            timeout_milliseconds=round(
+                self._confirmation_response_timeout_seconds * 1000
+            ),
+            speech_active=False,
+            duplicate=not transitioned,
+            voice_turn_state=buffer_snapshot.state,
+        )
+        return buffer_snapshot
+
+    async def handle_confirmation_response_activity_changed(
+        self,
+        *,
+        confirmation_id: str,
+        question_id: str,
+        revision: int,
+        speech_active: bool,
+    ) -> VoiceTurnBuffer:
+        """확인 응답 수집 중 발화 상태에 맞춰 응답 timeout을 조절한다.
+
+        지원자가 말하기 시작하면 응답 timeout을 취소하고, 말을 마친 뒤 최종
+        STT 응답이 아직 없으면 전체 응답 제한 시간을 새로 예약한다. 중복된
+        발화 상태 이벤트는 timeout에 영향을 주지 않는다.
+
+        Args:
+            confirmation_id:
+                발화 상태가 속한 활성 확인 질문 ID.
+
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            revision:
+                확인 질문이 대상으로 삼은 기본 답변 revision.
+
+            speech_active:
+                지원자가 확인 응답을 말하는 중이면 True.
+
+        Returns:
+            발화 상태 반영 직후의 VoiceTurnBuffer 복사본.
+
+        Raises:
+            VoiceTurnCoordinatorError:
+                ready 전이거나 현재 활성 confirmation 범위와 다른 이벤트인
+                경우.
+        """
+        self._ensure_worker_available()
+        if confirmation_id in self._invalid_confirmation_ids:
+            raise self._stale_confirmation_error()
+
+        session_state = await self._get_active_voice_state()
+        self._validate_current_question(session_state, question_id)
+        async with self._entry.lock:
+            self._validate_active_confirmation(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                revision=revision,
+            )
+            changed = self._entry.buffer.update_confirmation_response_activity(
+                question_id=question_id,
+                confirmation_id=confirmation_id,
+                expected_revision=revision,
+                speech_active=speech_active,
+            )
+            buffer_snapshot = self._entry.buffer.model_copy(deep=True)
+
+        if changed and speech_active:
+            self._cancel_confirmation_response_timeout_task()
+        elif changed:
+            self._schedule_confirmation_response_timeout(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                revision=revision,
+            )
+        log_voice_turn_event(
+            "voice_turn.confirmation.response.activity.changed",
+            session_id=buffer_snapshot.session_id,
+            question_id=question_id,
+            revision=revision,
+            answer_text=buffer_snapshot.answer_text,
+            confirmation_id=confirmation_id,
+            speech_active=speech_active,
+            timeout_milliseconds=round(
+                self._confirmation_response_timeout_seconds * 1000
+            ),
+            duplicate=not changed,
+            voice_turn_state=buffer_snapshot.state,
+        )
         return buffer_snapshot
 
     async def handle_confirmation_response(
@@ -800,7 +1003,7 @@ class VoiceTurnCoordinator:
                 revision=revision,
             )
 
-        self._cancel_stall_task()
+        self._cancel_confirmation_response_timeout_task()
         decision = await self._confirmation_classifier.classify(text)
 
         session_state = await self._get_active_voice_state()
@@ -863,18 +1066,38 @@ class VoiceTurnCoordinator:
     async def aclose(self) -> None:
         """확인·제출·정체 감시 task와 현재 연결의 완료 판단 worker를 종료한다."""
         self._closed = True
-        confirmation_task = self._confirmation_task
+        confirmation_delay_task = self._confirmation_delay_task
+        confirmation_ready_timeout_task = self._confirmation_ready_timeout_task
+        confirmation_response_timeout_task = (
+            self._confirmation_response_timeout_task
+        )
         commit_task = self._commit_task
         stall_task = self._stall_task
-        self._cancel_confirmation_task()
+        self._cancel_confirmation_tasks()
         self._cancel_commit_task()
         self._cancel_stall_task()
+        async with self._entry.lock:
+            confirmation_id = self._entry.buffer.cancel_confirmation()
+            if confirmation_id is not None:
+                self._remember_invalid_confirmation(confirmation_id)
         if (
-            confirmation_task is not None
-            and confirmation_task is not asyncio.current_task()
+            confirmation_delay_task is not None
+            and confirmation_delay_task is not asyncio.current_task()
         ):
             with suppress(asyncio.CancelledError):
-                await confirmation_task
+                await confirmation_delay_task
+        if (
+            confirmation_ready_timeout_task is not None
+            and confirmation_ready_timeout_task is not asyncio.current_task()
+        ):
+            with suppress(asyncio.CancelledError):
+                await confirmation_ready_timeout_task
+        if (
+            confirmation_response_timeout_task is not None
+            and confirmation_response_timeout_task is not asyncio.current_task()
+        ):
+            with suppress(asyncio.CancelledError):
+                await confirmation_response_timeout_task
         if commit_task is not None and commit_task is not asyncio.current_task():
             with suppress(asyncio.CancelledError):
                 await commit_task
@@ -1128,6 +1351,8 @@ class VoiceTurnCoordinator:
             revision:
                 제출 후보를 만든 최신 답변 revision.
         """
+        self._cancel_confirmation_tasks()
+        self._cancel_stall_task()
         self._cancel_commit_task()
         self._commit_task = asyncio.create_task(
             self._run_commit_delay(
@@ -1457,10 +1682,10 @@ class VoiceTurnCoordinator:
     ) -> None:
         """timeout 동안 새 이벤트가 없으면 확인 질문 또는 듣기 중단을 시작한다.
 
-        listening 상태에서는 실행 가능한 auto_submit 판단이 남아 있으면 먼저
+        listening 상태에서 실행 가능한 auto_submit 판단이 남아 있으면 먼저
         재적용하고, 없으면 확인 질문을 강제 시작한다. 확인 질문 횟수를
-        소진했거나 확인 질문에 응답이 없으면(confirming_end) 답변 듣기를
-        중단하고 현재 답변을 listening_cutoff 사유로 제출한다.
+        소진한 일반 답변이 계속 정체된 경우에만 listening_cutoff 사유로
+        제출한다. confirmation 상태는 전용 timeout task가 담당한다.
 
         Args:
             question_id:
@@ -1479,7 +1704,6 @@ class VoiceTurnCoordinator:
                 return
 
             stall_action: str | None = None
-            cancelled_confirmation_id: str | None = None
             policy_result: _DecisionPolicyResult | None = None
             policy_decision: TurnCompletionDecision | None = None
             schedule_cutoff_commit = False
@@ -1491,76 +1715,66 @@ class VoiceTurnCoordinator:
                     or buffer.question_id != question_id
                     or buffer.revision != revision
                     or not buffer.answer_text.strip()
-                    or buffer.state not in {"listening", "confirming_end"}
+                    or buffer.state != "listening"
                 ):
                     return
 
-                if buffer.state == "listening":
-                    if not buffer.segment_final:
-                        return
-                    if buffer.speech_active:
-                        # timeout 내내 revision이 그대로였으므로 발화 flag를
-                        # activity 이벤트 유실로 보고 정리한 뒤 진행한다.
-                        buffer.update_speech_activity(
+                if not buffer.segment_final:
+                    return
+                if buffer.speech_active:
+                    # timeout 내내 revision이 그대로였으므로 발화 flag를
+                    # activity 이벤트 유실로 보고 정리한 뒤 진행한다.
+                    buffer.update_speech_activity(
+                        question_id=question_id,
+                        revision=revision,
+                        speech_active=False,
+                    )
+                if (
+                    buffer.latest_decision is not None
+                    and buffer.latest_decision_revision == revision
+                    and self._can_start_auto_submit(
+                        buffer,
+                        buffer.latest_decision,
+                    )
+                ):
+                    stall_action = "reapply_auto_submit"
+                    policy_decision = buffer.latest_decision
+                    policy_result = self._apply_decision_policy(
+                        buffer=buffer,
+                        decision=policy_decision,
+                        revision=revision,
+                    )
+                elif buffer.confirmation_count < self._max_confirmations:
+                    stall_action = "ask_confirmation"
+                    stall_decision = TurnCompletionDecision(
+                        semantic_state="ambiguous",
+                        linguistically_closed=True,
+                        question_satisfied=True,
+                        continuation_expected="medium",
+                        explicit_completion=False,
+                        recommended_action="ask_confirmation",
+                        confidence=1.0,
+                        reason_code="hesitation",
+                    )
+                    recorded = buffer.record_decision(
+                        TurnCompletionResult(
                             question_id=question_id,
                             revision=revision,
-                            speech_active=False,
-                        )
-                    if (
-                        buffer.latest_decision is not None
-                        and buffer.latest_decision_revision == revision
-                        and self._can_start_auto_submit(
-                            buffer,
-                            buffer.latest_decision,
-                        )
-                    ):
-                        stall_action = "reapply_auto_submit"
-                        policy_decision = buffer.latest_decision
-                        policy_result = self._apply_decision_policy(
-                            buffer=buffer,
-                            decision=policy_decision,
-                            revision=revision,
-                        )
-                    elif buffer.confirmation_count < self._max_confirmations:
-                        stall_action = "ask_confirmation"
-                        stall_decision = TurnCompletionDecision(
-                            semantic_state="ambiguous",
-                            linguistically_closed=True,
-                            question_satisfied=True,
-                            continuation_expected="medium",
-                            explicit_completion=False,
-                            recommended_action="ask_confirmation",
-                            confidence=1.0,
-                            reason_code="hesitation",
-                        )
-                        recorded = buffer.record_decision(
-                            TurnCompletionResult(
-                                question_id=question_id,
-                                revision=revision,
-                                decision=stall_decision,
-                                fallback_used=False,
-                            )
-                        )
-                        if not recorded:
-                            return
-                        policy_decision = stall_decision
-                        policy_result = self._apply_decision_policy(
-                            buffer=buffer,
                             decision=stall_decision,
-                            revision=revision,
+                            fallback_used=False,
                         )
-                    else:
-                        stall_action = "listening_cutoff"
-                        buffer.mark_cutoff_complete(
-                            question_id=question_id,
-                            expected_revision=revision,
-                        )
-                        schedule_cutoff_commit = True
-                else:
-                    if buffer.speech_active:
+                    )
+                    if not recorded:
                         return
+                    policy_decision = stall_decision
+                    policy_result = self._apply_decision_policy(
+                        buffer=buffer,
+                        decision=stall_decision,
+                        revision=revision,
+                    )
+                else:
                     stall_action = "listening_cutoff"
-                    cancelled_confirmation_id = buffer.mark_cutoff_complete(
+                    buffer.mark_cutoff_complete(
                         question_id=question_id,
                         expected_revision=revision,
                     )
@@ -1577,14 +1791,6 @@ class VoiceTurnCoordinator:
                 timeout_milliseconds=round(self._stall_timeout_seconds * 1000),
                 confirmation_count=buffer_snapshot.confirmation_count,
             )
-
-            if cancelled_confirmation_id is not None:
-                self._remember_invalid_confirmation(cancelled_confirmation_id)
-                await self._notify_confirmation_cancelled(
-                    confirmation_id=cancelled_confirmation_id,
-                    question_id=question_id,
-                    reason="listening_cutoff",
-                )
 
             if schedule_cutoff_commit:
                 log_voice_turn_event(
@@ -1622,8 +1828,9 @@ class VoiceTurnCoordinator:
             revision:
                 확인 후보 판단이 사용한 답변 revision.
         """
-        self._cancel_confirmation_task()
-        self._confirmation_task = asyncio.create_task(
+        self._cancel_stall_task()
+        self._cancel_confirmation_delay_task()
+        self._confirmation_delay_task = asyncio.create_task(
             self._run_confirmation_delay(
                 question_id=question_id,
                 revision=revision,
@@ -1667,7 +1874,7 @@ class VoiceTurnCoordinator:
                     return
 
                 confirmation_id = f"confirmation_{uuid.uuid4().hex[:12]}"
-                buffer.begin_confirmation(
+                buffer.begin_confirmation_prompt(
                     confirmation_id=confirmation_id,
                     expected_revision=revision,
                     max_confirmations=self._max_confirmations,
@@ -1688,6 +1895,11 @@ class VoiceTurnCoordinator:
                     confirmation_id=confirmation_id,
                 )
                 return
+            self._schedule_confirmation_ready_timeout(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                revision=revision,
+            )
             try:
                 await self._on_confirmation_requested(
                     confirmation_id,
@@ -1698,19 +1910,232 @@ class VoiceTurnCoordinator:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                self._cancel_confirmation_ready_timeout_task()
                 await self._rollback_confirmation_request(
                     confirmation_id=confirmation_id,
                 )
                 return
-            # 확인 질문에도 응답이 없으면 stall timeout이 confirming_end
-            # 상태를 감지해 답변 듣기를 중단할 수 있게 감시를 다시 시작한다.
-            self._schedule_stall_task(
+        finally:
+            if self._confirmation_delay_task is current_task:
+                self._confirmation_delay_task = None
+
+    def _schedule_confirmation_ready_timeout(
+        self,
+        *,
+        confirmation_id: str,
+        question_id: str,
+        revision: int,
+    ) -> None:
+        """현재 확인 질문의 프론트 준비 제한 시간 task를 예약한다.
+
+        Args:
+            confirmation_id:
+                준비 완료를 기다릴 활성 확인 질문 ID.
+
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            revision:
+                확인 질문이 대상으로 삼은 기본 답변 revision.
+        """
+        self._cancel_confirmation_ready_timeout_task()
+        self._confirmation_ready_timeout_task = asyncio.create_task(
+            self._run_confirmation_ready_timeout(
+                confirmation_id=confirmation_id,
                 question_id=question_id,
                 revision=revision,
             )
+        )
+
+    async def _run_confirmation_ready_timeout(
+        self,
+        *,
+        confirmation_id: str,
+        question_id: str,
+        revision: int,
+    ) -> None:
+        """프론트가 준비되지 않으면 확인만 취소하고 원래 답변을 보존한다.
+
+        준비 실패는 사용자가 답변을 끝냈다는 근거가 아니므로 답변을 제출하지
+        않고 listening으로 복귀한다. 같은 정체 답변에 일반 stall timeout도
+        즉시 다시 예약하지 않는다.
+
+        Args:
+            confirmation_id:
+                준비 완료를 기다리는 활성 확인 질문 ID.
+
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            revision:
+                확인 질문이 대상으로 삼은 기본 답변 revision.
+        """
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self._confirmation_ready_timeout_seconds)
+            try:
+                session_state = await self._get_active_voice_state()
+                self._validate_current_question(session_state, question_id)
+            except VoiceTurnCoordinatorError:
+                return
+
+            async with self._entry.lock:
+                buffer = self._entry.buffer
+                if (
+                    self._closed
+                    or self._worker.closed
+                    or buffer.state != "confirmation_prompting"
+                    or buffer.question_id != question_id
+                    or buffer.revision != revision
+                    or buffer.active_confirmation_id != confirmation_id
+                    or buffer.active_confirmation_revision != revision
+                ):
+                    return
+                buffer.cancel_confirmation()
+                self._remember_invalid_confirmation(confirmation_id)
+                buffer_snapshot = buffer.model_copy(deep=True)
+
+            log_voice_turn_event(
+                "voice_turn.confirmation.ready.timeout",
+                session_id=buffer_snapshot.session_id,
+                question_id=question_id,
+                revision=revision,
+                answer_text=buffer_snapshot.answer_text,
+                confirmation_id=confirmation_id,
+                timeout_milliseconds=round(
+                    self._confirmation_ready_timeout_seconds * 1000
+                ),
+                speech_active=False,
+                voice_turn_state=buffer_snapshot.state,
+            )
+            await self._notify_confirmation_cancelled(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                reason="confirmation_client_not_ready",
+            )
+            await self._notify_state_changed(
+                question_id=question_id,
+                revision=revision,
+                reason="confirmation_client_not_ready",
+            )
         finally:
-            if self._confirmation_task is current_task:
-                self._confirmation_task = None
+            if self._confirmation_ready_timeout_task is current_task:
+                self._confirmation_ready_timeout_task = None
+
+    def _schedule_confirmation_response_timeout(
+        self,
+        *,
+        confirmation_id: str,
+        question_id: str,
+        revision: int,
+    ) -> None:
+        """준비된 확인 질문의 실제 응답 제한 시간 task를 예약한다.
+
+        Args:
+            confirmation_id:
+                응답을 기다릴 활성 확인 질문 ID.
+
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            revision:
+                확인 질문이 대상으로 삼은 기본 답변 revision.
+        """
+        self._cancel_confirmation_response_timeout_task()
+        self._confirmation_response_timeout_task = asyncio.create_task(
+            self._run_confirmation_response_timeout(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                revision=revision,
+            )
+        )
+
+    async def _run_confirmation_response_timeout(
+        self,
+        *,
+        confirmation_id: str,
+        question_id: str,
+        revision: int,
+    ) -> None:
+        """준비 완료 후 발화와 최종 응답이 없으면 듣기를 중단한다.
+
+        timeout 직전에 질문, revision, confirmation ID, 상태와 확인 응답 발화
+        여부를 모두 재검증한다. 조건이 유지된 경우에만 기존
+        listening_cutoff 제출 경로로 연결한다.
+
+        Args:
+            confirmation_id:
+                응답을 기다리는 활성 확인 질문 ID.
+
+            question_id:
+                확인 질문이 속한 현재 면접 질문 ID.
+
+            revision:
+                확인 질문이 대상으로 삼은 기본 답변 revision.
+        """
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self._confirmation_response_timeout_seconds)
+            try:
+                session_state = await self._get_active_voice_state()
+                self._validate_current_question(session_state, question_id)
+            except VoiceTurnCoordinatorError:
+                return
+
+            async with self._entry.lock:
+                buffer = self._entry.buffer
+                if (
+                    self._closed
+                    or self._worker.closed
+                    or buffer.state != "confirming_end"
+                    or buffer.question_id != question_id
+                    or buffer.revision != revision
+                    or buffer.active_confirmation_id != confirmation_id
+                    or buffer.active_confirmation_revision != revision
+                    or buffer.confirmation_response_speech_active
+                ):
+                    return
+                cancelled_confirmation_id = buffer.mark_cutoff_complete(
+                    question_id=question_id,
+                    expected_revision=revision,
+                )
+                if cancelled_confirmation_id != confirmation_id:
+                    return
+                self._remember_invalid_confirmation(confirmation_id)
+                buffer_snapshot = buffer.model_copy(deep=True)
+
+            log_voice_turn_event(
+                "voice_turn.confirmation.response.timeout",
+                session_id=buffer_snapshot.session_id,
+                question_id=question_id,
+                revision=revision,
+                answer_text=buffer_snapshot.answer_text,
+                confirmation_id=confirmation_id,
+                timeout_milliseconds=round(
+                    self._confirmation_response_timeout_seconds * 1000
+                ),
+                speech_active=False,
+                voice_turn_state=buffer_snapshot.state,
+            )
+            await self._notify_confirmation_cancelled(
+                confirmation_id=confirmation_id,
+                question_id=question_id,
+                reason="listening_cutoff",
+            )
+            log_voice_turn_event(
+                "voice_turn.commit.candidate",
+                session_id=buffer_snapshot.session_id,
+                question_id=question_id,
+                revision=revision,
+                answer_text=buffer_snapshot.answer_text,
+                completion_reason="listening_cutoff",
+                grace_milliseconds=round(self._commit_grace_seconds * 1000),
+                decision_trigger="confirmation_response_timeout",
+            )
+            self._schedule_commit(question_id=question_id, revision=revision)
+        finally:
+            if self._confirmation_response_timeout_task is current_task:
+                self._confirmation_response_timeout_task = None
 
     async def _rollback_confirmation_request(self, *, confirmation_id: str) -> None:
         """확인 요청 전송 실패 시 활성 confirmation을 무효화한다.
@@ -1724,9 +2149,9 @@ class VoiceTurnCoordinator:
                 self._entry.buffer.cancel_confirmation()
                 self._remember_invalid_confirmation(confirmation_id)
 
-    def _cancel_confirmation_task(self) -> None:
-        """실행 중인 확인 대기 task에 취소를 요청한다."""
-        task = self._confirmation_task
+    def _cancel_confirmation_delay_task(self) -> None:
+        """실행 중인 확인 질문 대화 간격 task에 취소를 요청한다."""
+        task = self._confirmation_delay_task
         if (
             task is not None
             and task is not asyncio.current_task()
@@ -1734,12 +2159,39 @@ class VoiceTurnCoordinator:
         ):
             task.cancel()
 
+    def _cancel_confirmation_ready_timeout_task(self) -> None:
+        """실행 중인 확인 응답 준비 제한 시간 task를 취소한다."""
+        task = self._confirmation_ready_timeout_task
+        if (
+            task is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
+
+    def _cancel_confirmation_response_timeout_task(self) -> None:
+        """실행 중인 확인 응답 제한 시간 task를 취소한다."""
+        task = self._confirmation_response_timeout_task
+        if (
+            task is not None
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
+
+    def _cancel_confirmation_tasks(self) -> None:
+        """확인 질문과 관련된 모든 대기·제한 시간 task를 취소한다."""
+        self._cancel_confirmation_delay_task()
+        self._cancel_confirmation_ready_timeout_task()
+        self._cancel_confirmation_response_timeout_task()
+
     def _validate_active_confirmation(
         self,
         *,
         confirmation_id: str,
         question_id: str,
         revision: int,
+        allowed_states: set[str] | None = None,
     ) -> None:
         """응답 대상이 현재 활성 confirmation과 같은지 확인한다.
 
@@ -1753,13 +2205,18 @@ class VoiceTurnCoordinator:
             revision:
                 확인 질문이 대상으로 삼은 답변 revision.
 
+            allowed_states:
+                이벤트가 허용되는 confirmation 상태 집합. 없으면 실제 확인
+                응답을 기다리는 confirming_end만 허용한다.
+
         Raises:
             VoiceTurnCoordinatorError:
                 확인 상태, ID, 질문 또는 revision이 현재값과 다른 경우.
         """
         buffer = self._entry.buffer
+        valid_states = allowed_states or {"confirming_end"}
         if (
-            buffer.state != "confirming_end"
+            buffer.state not in valid_states
             or buffer.question_id != question_id
             or buffer.revision != revision
             or buffer.active_confirmation_id != confirmation_id

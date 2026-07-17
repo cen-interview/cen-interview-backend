@@ -22,6 +22,8 @@ from interview.api.voice.schema import (
     ConnectionReadyMessage,
     TurnConfirmationCancelledMessage,
     TurnConfirmationRequestedMessage,
+    TurnConfirmationResponseActivityChangedMessage,
+    TurnConfirmationResponseReadyMessage,
     TurnConfirmationRespondedMessage,
     TurnStateChangedMessage,
     VoiceActivityChangedMessage,
@@ -29,7 +31,7 @@ from interview.api.voice.schema import (
 )
 from interview.config import settings
 from interview.interviewer.adapters import from_voice
-from interview.interviewer.facade import get_session
+from interview.interviewer.facade import get_session, release_session
 from interview.interviewer.models import DeliveryMetrics
 from interview.interviewer.speech.utterance import (
     commit_acknowledgment,
@@ -243,6 +245,13 @@ async def voice_turn_websocket(
                     question_id=question_id,
                     revision=revision,
                     text=text,
+                    ready_timeout_milliseconds=round(
+                        settings.turn_confirmation_ready_timeout_seconds * 1000
+                    ),
+                    response_timeout_milliseconds=round(
+                        settings.turn_confirmation_response_timeout_seconds * 1000
+                    ),
+                    requires_ready_ack=True,
                 )
             )
 
@@ -408,6 +417,10 @@ async def voice_turn_websocket(
                 registry.remove(session_id)
                 connection_open = False
                 await websocket.close()
+                # 결과 저장까지 성공한 세션만 정리한다. 저장에 실패한 세션은
+                # 남겨 두어야 events API 재시도로 결과를 다시 저장할 수 있다.
+                if result.session.get("result_id") is not None:
+                    await asyncio.to_thread(release_session, session_id)
             elif isinstance(next_question, dict) and next_question.get("question_id"):
                 next_entry = registry.replace_question(
                     session_id=session_id,
@@ -577,6 +590,26 @@ async def voice_turn_websocket(
                                 reason="candidate_resumed_speaking",
                             )
                         )
+                elif isinstance(
+                    client_message,
+                    TurnConfirmationResponseReadyMessage,
+                ):
+                    await coordinator.handle_confirmation_response_ready(
+                        confirmation_id=client_message.confirmation_id,
+                        question_id=client_message.question_id,
+                        revision=client_message.revision,
+                        playback_status=client_message.playback_status,
+                    )
+                elif isinstance(
+                    client_message,
+                    TurnConfirmationResponseActivityChangedMessage,
+                ):
+                    await coordinator.handle_confirmation_response_activity_changed(
+                        confirmation_id=client_message.confirmation_id,
+                        question_id=client_message.question_id,
+                        revision=client_message.revision,
+                        speech_active=client_message.speech_active,
+                    )
                 elif isinstance(
                     client_message,
                     TurnConfirmationRespondedMessage,

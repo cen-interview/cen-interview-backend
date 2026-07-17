@@ -167,6 +167,7 @@ def _run_index_background(
     notion_access_token: str | None,
     github_access_token: str | None,
     github_login: str | None,
+    github_verified_emails: list[str],
 ) -> None:
     """사용자별 credential이 주입된 source로 Evidence 인덱싱을 실행한다."""
     try:
@@ -181,6 +182,7 @@ def _run_index_background(
             notion_source=NotionSource(mcp_client=mcp_client),
             github_source=GitHubSource(mcp_client=mcp_client),
             github_login=github_login,
+            github_verified_emails=github_verified_emails,
         )
     except Exception as exc:
         result = IndexBuildResult(
@@ -352,6 +354,11 @@ def start_evidence_index(
             github_credential.access_token if github_credential else None
         ),
         github_login=github_credential.github_login if github_credential else None,
+        github_verified_emails=(
+            list(github_credential.verified_emails or [])
+            if github_credential
+            else []
+        ),
     )
 
     return status_payload

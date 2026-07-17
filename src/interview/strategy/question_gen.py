@@ -8,21 +8,23 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from interview.evidence.question_patterns import search_interview_question_signals
 from interview.evidence.retrieval import search_evidence
 from interview.llm.client import get_llm
 from interview.llm.logging import log_llm_error, log_llm_output
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import Difficulty, Question, QuestionCategory,QuestionKind
 from interview.strategy.prompts import (
-    QUESTION_GEN_SYSTEM,
     FOLLOW_UP_SYSTEM,
     CHALLENGE_SYSTEM,
     CONFIRM_POSITIVE_SYSTEM,
     CONFIRM_NEGATIVE_SYSTEM,
     TRAP_SYSTEM,
-    HINT_SYSTEM
+    HINT_SYSTEM,
+    PATTERN_STYLE_SYSTEM,
 )
 _EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
+_PATTERN_STYLE_TOP_K = 3
 
 
 def filter_reliable_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
@@ -63,6 +65,85 @@ class GeneratedHint(BaseModel):
     """LLM이 생성하는 힌트의 구조화 출력."""
     text: str = Field(description="정답을 직접 알려주지 않는 힌트 문장. 한두 문장으로 짧게.")
 
+class StyledQuestion(BaseModel):
+    """LLM이 생성하는 화법 폴리시 결과."""
+    text: str = Field(
+        description="원본 질문의 기술적 내용은 그대로 유지하되 말투·문장 구조만 다듬은 질문. "
+        "한 문장, 반드시 물음표로 끝난다."
+    )
+
+def apply_pattern_style(text: str) -> str:
+    """생성된 질문 문장에 실전 면접 패턴의 화법을 사후적으로 입힌다.
+
+    QuestionGenState 등 그래프 상태에 의존하지 않는 독립 함수다 (입력/출력이
+    text 하나뿐) — MAIN 질문(graph.py), 파생 질문(_generate_derived_question)
+    은 물론 이후 다른 흐름에서도 그대로 재사용할 수 있다.
+
+    패턴 검색은 topic이 아니라 완성된 질문 문장 자체(text)를 쿼리로 쓴다.
+    기술개념형/경험프레임형 어느 쪽이 더 비슷한지는 유사도가 자연히 정해주므로
+    미리 kind를 filter하지 않는다. 매칭되는 패턴이 없거나 호출이 실패하면
+    원본 text를 그대로 반환한다 (질문 생성 자체를 막지 않는다).
+    """
+    if not text.strip():
+        return text
+
+    try:
+        patterns = search_interview_question_signals(query=text, limit=_PATTERN_STYLE_TOP_K)
+    except Exception as exc:
+        log_llm_error(
+            "PATTERN_STYLE_SEARCH",
+            exc,
+            metadata={"original_text": text},
+            fallback={"text": text},
+        )
+        return text
+
+    if not patterns:
+        return text
+
+    pattern_block = "\n".join(f"- {p.pattern_text}" for p in patterns)
+    user_prompt = f"""\
+원본 질문:
+{text}
+
+실전 면접 질문 표현 예시 (말투·문장 구조만 참고, 예시의 기술적 소재는 절대 가져오지 말 것):
+{pattern_block}
+"""
+
+    llm = get_llm(temperature=0.4)
+    structured_llm = llm.with_structured_output(StyledQuestion)
+
+    try:
+        result = structured_llm.invoke(
+            [
+                {"role": "system", "content": PATTERN_STYLE_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+        log_llm_output(
+            "PATTERN_STYLE_APPLY",
+            result,
+            metadata={
+                "original_text": text,
+                "matched_pattern_ids": [p.pattern_id for p in patterns],
+                "matched_similarities": [p.similarity for p in patterns],
+            },
+            input_data={"user_prompt": user_prompt},
+        )
+        return result.text
+    except Exception as exc:
+        log_llm_error(
+            "PATTERN_STYLE_APPLY",
+            exc,
+            metadata={
+                "original_text": text,
+                "matched_pattern_ids": [p.pattern_id for p in patterns],
+            },
+            fallback={"text": text},
+            input_data={"user_prompt": user_prompt},
+        )
+        return text
+
 def _generate_derived_question(
     kind: QuestionKind,
     topic: str,
@@ -74,7 +155,9 @@ def _generate_derived_question(
 ) -> Question:
     """파생 질문(follow_up/challenge/confirm_positive/confirm_negative/trap) 공통 생성 로직."""
     probe = target or "답변에서 더 확인이 필요한 부분"
-    evidence_chunks = search_evidence(query=probe, topic=topic, k=5, user_id=user_id)
+    evidence_chunks = search_evidence(
+        query=probe, topic=topic, k=10, user_id=user_id, ownership="user_touched"
+    )
     reliable_chunks = filter_reliable_chunks(evidence_chunks)
 
     context = (
@@ -155,6 +238,8 @@ def _generate_derived_question(
             },
         )
 
+    text = apply_pattern_style(text)
+
     return Question(
         question_id=str(uuid4()),
         text=text,
@@ -165,112 +250,6 @@ def _generate_derived_question(
         evidence_ids=[c.chunk_id for c in reliable_chunks],
         parent_question_id=parent_question_id,
     )
-
-def generate_question(
-    topic: str,
-    difficulty: Difficulty,
-    asked_question_texts: list[str] | None = None,
-    user_id: str | None = None,
-) -> Question:
-    """주제 + 난이도로 일반 질문 생성.
-
-    근거를 조회해 QUESTION_GEN_SYSTEM 프롬프트와 함께 LLM에 전달하고,
-    구조화된 출력(text, category)을 받아 Question으로 구성한다.
-
-    Args:
-        topic: 질문 주제.
-        difficulty: 질문 난이도.
-        asked_question_texts: 이미 출제된 질문 문장들 (중복 방지용).
-            LLM에게 "이런 질문은 이미 했으니 겹치지 않게 하라"고 전달한다.
-        user_id: 사용자 id. 현재는 None 가능.
-
-
-    Returns:
-        kind=MAIN인 Question. evidence_ids에 실제 조회된 근거 chunk_id가 담긴다.
-
-    TODO(담당 B):
-      - prompts.QUESTION_GEN_SYSTEM + 근거로 LLM 호출
-      - linked_evidence 에 사용한 chunk_id 기록
-    """
-    evidence_chunks = search_evidence(query=topic, topic=topic, user_id=user_id)
-
-    reliable_chunks = filter_reliable_chunks(evidence_chunks)
-
-    context = (
-        "\n".join(f"- {c.text}" for c in reliable_chunks)
-        if reliable_chunks
-        else "(관련 근거 없음. 근거를 인용하지 말고 일반적인 개념 질문으로 만들 것)"
-    )
-
-    asked_block = (
-        "\n".join(f"- {t}" for t in asked_question_texts)
-        if asked_question_texts
-        else "(없음)"
-    )
-
-    user_prompt = f"""\
-주제: {topic}
-난이도: {difficulty.value}
-
-근거:
-{context}
-
-이미 출제한 질문 (아래와 겹치지 않는 새로운 질문을 만들 것):
-{asked_block}
-"""
-
-    llm = get_llm(temperature=0.6)
-    structured_llm = llm.with_structured_output(GeneratedQuestion)
-    try :
-
-        result = structured_llm.invoke(
-            [
-                {"role": "system", "content": QUESTION_GEN_SYSTEM},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-        log_llm_output(
-            "MAIN_QUESTION_GENERATION",
-            result,
-            metadata={
-                "topic": topic,
-                "difficulty": difficulty.value,
-                "question_kind": QuestionKind.MAIN.value,
-                "evidence_ids": [chunk.chunk_id for chunk in reliable_chunks],
-            },
-            input_data={"user_prompt": user_prompt},
-        )
-    except Exception as exc:
-        fallback = _fallback_question(
-            topic,
-            difficulty,
-            [chunk.chunk_id for chunk in reliable_chunks],
-        )
-        log_llm_error(
-            "MAIN_QUESTION_GENERATION",
-            exc,
-            metadata={
-                "topic": topic,
-                "difficulty": difficulty.value,
-                "question_kind": QuestionKind.MAIN.value,
-                "evidence_ids": fallback.evidence_ids,
-            },
-            fallback=fallback,
-            input_data={"user_prompt": user_prompt},
-        )
-        return fallback
-
-    return Question(
-        question_id=str(uuid4()),
-        text=result.text,
-        topic=topic,
-        difficulty=difficulty,
-        kind=QuestionKind.MAIN,
-        category=result.category,
-        evidence_ids=[chunk.chunk_id for chunk in reliable_chunks],
-        parent_question_id=None,
-    )
-
 
 def generate_follow_up(
         topic: str,
@@ -361,7 +340,9 @@ def generate_hint(
     """
 
     probe = target or "질문의 핵심 개념"
-    evidence_chunks = search_evidence(query=probe, topic=question.topic, k=5, user_id=user_id)
+    evidence_chunks = search_evidence(
+        query=probe, topic=question.topic, k=5, user_id=user_id, ownership="user_touched"
+    )
     reliable_chunks = filter_reliable_chunks(evidence_chunks)
 
     context = (
@@ -436,16 +417,4 @@ def generate_hint(
         kind=QuestionKind.HINT,
         evidence_ids=[chunk.chunk_id for chunk in reliable_chunks],
         parent_question_id=question.question_id,
-    )
-
-def _fallback_question(topic: str, difficulty: Difficulty, evidence_ids: list[str]) -> Question:
-    """LLM 호출 실패 시 사용하는 템플릿 질문."""
-    return Question(
-        question_id=str(uuid4()),
-        text=f"{topic}에 대해 설명해 주세요.",
-        topic=topic,
-        difficulty=difficulty,
-        kind=QuestionKind.MAIN,
-        evidence_ids=evidence_ids,
-        parent_question_id=None,
     )

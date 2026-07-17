@@ -31,12 +31,18 @@ class Settings(BaseSettings):
     turn_commit_grace_milliseconds: int = 300
     turn_confirmation_pause_seconds: float = 0.8
     turn_confirmation_max_per_question: int = 1
-    turn_stall_timeout_seconds: float = 6.0
+    turn_confirmation_ready_timeout_seconds: float = 15.0
+    turn_confirmation_response_timeout_seconds: float = 8.0
+    turn_stall_timeout_seconds: float = 3.0
     voice_turn_auth_timeout_seconds: float = 5.0
 
     # TTS
     openai_tts_model: str = "gpt-4o-mini-tts"
-    openai_tts_voice: str = "marin"
+    openai_tts_voice: str = "onyx"
+    openai_tts_instructions: str = (
+        "차분하고 신뢰감 있는 한국인 남성 면접관의 낮고 자연스러운 목소리로 "
+        "또박또박 말한다."
+    )
 
     # MCP / 외부 소스
     # notion
@@ -51,7 +57,7 @@ class Settings(BaseSettings):
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
     github_oauth_redirect_uri: str = "http://localhost:8000/api/auth/github/callback"
-    github_oauth_scope: str = "read:user repo"
+    github_oauth_scope: str = "read:user user:email repo"
     github_mcp_url: str = ""
     github_mcp_access_token: str = ""
     github_mcp_repository_tool: str = "search_repositories"
@@ -70,6 +76,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536   # 차원 지정 1536
     question_pattern_min_similarity: float = 0.30
+    question_pattern_data_path: str = "../data"
 
     # 면접 진행
     max_questions: int = 10
@@ -79,6 +86,8 @@ class Settings(BaseSettings):
     evidence_llm_extract_enabled: bool = True
     evidence_store_backend: str = "pgvector"
     evidence_github_max_commits: int = 200
+    evidence_min_similarity: float = 0.30
+
     # 0이면 지원하는 모든 소스 파일을 수집한다.
     evidence_github_max_code_files: int = 0
     evidence_github_max_file_chars: int = 100000
