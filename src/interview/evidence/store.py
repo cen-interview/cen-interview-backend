@@ -19,6 +19,7 @@ from interview.schemas.evidence import (
     EvidenceChunk,
     EvidenceOwnership,
     TopicCoverage,
+    RetrievalResult,
 )
 
 DEFAULT_TOP_K = 5
@@ -208,6 +209,53 @@ class EvidenceStore:
         with self._session() as db:
             records = db.scalars(statement).all()
         return [self._chunk_from_record(record) for record in records]
+    #우지연추가 
+    def score_answer_against_chunks(
+        self,
+        answer_text: str,
+        chunk_ids: list[str],
+        user_id: int | str | None = None,
+    ) -> list[RetrievalResult]:
+        """답변과 지정된 Evidence chunk들의 유사도를 계산한다."""
+
+        if not answer_text.strip() or not chunk_ids:
+            return []
+
+        namespace = self._namespace(user_id)
+        unique_chunk_ids = list(dict.fromkeys(chunk_ids))
+
+        answer_embedding = self._get_embeddings().embed_query(
+            answer_text
+        )
+
+        distance = EvidenceVectorRecord.embedding.cosine_distance(
+            answer_embedding
+        )
+
+        statement = (
+            select(
+                EvidenceVectorRecord,
+                distance.label("cosine_distance"),
+            )
+            .where(
+                EvidenceVectorRecord.user_id == namespace,
+                EvidenceVectorRecord.chunk_id.in_(
+                    unique_chunk_ids
+                ),
+            )
+            .order_by(distance)
+        )
+
+        with self._session() as db:
+            rows = db.execute(statement).all()
+
+        return [
+            RetrievalResult(
+                chunk=self._chunk_from_record(record),
+                score=1.0 - float(distance_value),
+            )
+            for record, distance_value in rows
+        ]
 
     def build_coverage_map(self, user_id: int | str | None = None) -> CoverageMap:
         """사용자별 저장 청크의 topic confidence 평균과 개수를 집계한다."""
