@@ -330,6 +330,54 @@ def build_github_oauth_authorize_url(*, user: User) -> dict:
     }
 
 
+def _github_api_headers(access_token: str) -> dict[str, str]:
+    """GitHub REST 사용자 API 호출에 공통으로 사용하는 헤더를 만든다."""
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {access_token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _fetch_verified_github_emails(access_token: str) -> list[str]:
+    """OAuth 사용자의 GitHub 계정에 연결된 검증 이메일만 반환한다."""
+    response = httpx.get(
+        "https://api.github.com/user/emails",
+        headers=_github_api_headers(access_token),
+        timeout=10.0,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "GitHub 검증 이메일 조회에 실패했습니다. user:email 권한으로 다시 연결해 주세요.",
+                "github_response": response.json(),
+            },
+        )
+
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="GitHub 이메일 응답 형식이 올바르지 않습니다.",
+        )
+
+    emails: list[str] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict) or item.get("verified") is not True:
+            continue
+        email = item.get("email")
+        if not isinstance(email, str) or not email.strip():
+            continue
+        normalized = email.strip()
+        key = normalized.casefold()
+        if key not in seen:
+            seen.add(key)
+            emails.append(normalized)
+    return emails
+
+
 def exchange_github_oauth_code(
     *,
     db: Session,
@@ -381,11 +429,7 @@ def exchange_github_oauth_code(
 
     user_response = httpx.get(
         "https://api.github.com/user",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {access_token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=_github_api_headers(access_token),
         timeout=10.0,
     )
 
@@ -399,6 +443,7 @@ def exchange_github_oauth_code(
         )
 
     github_user = user_response.json()
+    verified_emails = _fetch_verified_github_emails(access_token)
     credential = (
         db.query(GitHubCredential)
         .filter(GitHubCredential.user_id == user_id)
@@ -414,6 +459,7 @@ def exchange_github_oauth_code(
     credential.scope = token_data.get("scope")
     credential.github_user_id = str(github_user.get("id")) if github_user.get("id") else None
     credential.github_login = github_user.get("login")
+    credential.verified_emails = verified_emails
 
     db.commit()
     db.refresh(credential)
@@ -424,6 +470,7 @@ def exchange_github_oauth_code(
         "user_id": credential.user_id,
         "github_user_id": credential.github_user_id,
         "github_login": credential.github_login,
+        "verified_emails": credential.verified_emails,
         "scope": credential.scope,
     }
 

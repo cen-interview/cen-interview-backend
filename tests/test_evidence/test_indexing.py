@@ -31,10 +31,12 @@ def test_build_index_passes_notion_and_github_link_lists(monkeypatch) -> None:
             self,
             links: list[str],
             github_login: str | None = None,
+            github_verified_emails: list[str] | None = None,
         ) -> list[object]:
             """GitHub 링크별 호출을 기록하고 원본 문서가 없는 상태를 흉내낸다."""
             calls.setdefault("github_link_calls", []).append(links)
             calls.setdefault("github_login_calls", []).append(github_login)
+            calls.setdefault("github_email_calls", []).append(github_verified_emails)
             return []
 
     class FakeStore:
@@ -59,7 +61,13 @@ def test_build_index_passes_notion_and_github_link_lists(monkeypatch) -> None:
     monkeypatch.setattr("interview.evidence.indexing.chunk", lambda chunks: chunks)
     monkeypatch.setattr("interview.evidence.indexing.get_store", lambda: FakeStore())
 
-    result = build_index(notion_links, github_links, user_id="user-1")
+    result = build_index(
+        notion_links,
+        github_links,
+        user_id="user-1",
+        github_login="octocat",
+        github_verified_emails=["octocat@example.com"],
+    )
 
     assert isinstance(result, IndexBuildResult)
     assert isinstance(result.coverage_map, CoverageMap)
@@ -70,6 +78,8 @@ def test_build_index_passes_notion_and_github_link_lists(monkeypatch) -> None:
     assert calls["clear_user_id"] == "user-1"
     assert calls["notion_link_calls"] == [[link] for link in notion_links]
     assert calls["github_link_calls"] == [[link] for link in github_links]
+    assert calls["github_login_calls"] == ["octocat"] * len(github_links)
+    assert calls["github_email_calls"] == [["octocat@example.com"]] * len(github_links)
     assert calls["chunks"] == []
     assert calls["user_id"] == "user-1"
     assert calls["coverage_user_id"] == "user-1"
@@ -114,9 +124,10 @@ def test_build_index_records_partial_failures_and_keeps_successful_chunks(monkey
             self,
             links: list[str],
             github_login: str | None = None,
+            github_verified_emails: list[str] | None = None,
         ) -> list[RawDoc]:
             """GitHub source 장애를 흉내낸다."""
-            _ = github_login
+            _ = (github_login, github_verified_emails)
             raise RuntimeError("github unavailable")
 
     class FakeStore:

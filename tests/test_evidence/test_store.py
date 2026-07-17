@@ -1,5 +1,7 @@
 """EvidenceStore 인메모리 POC 동작 검증."""
 
+import pytest
+
 from interview.evidence.store import EvidenceStore
 from interview.schemas.evidence import EvidenceChunk, SourceType
 
@@ -85,6 +87,57 @@ def test_query_filters_by_ownership_before_limit() -> None:
     )
 
     assert [chunk.chunk_id for chunk in results] == ["touched-0", "touched-1"]
+
+
+@pytest.mark.parametrize(
+    ("min_similarity", "expected_max_distance"),
+    [
+        (0.30, 0.70),
+        (0.80, 0.20),
+    ],
+)
+def test_pgvector_query_applies_configured_min_similarity(
+    monkeypatch,
+    min_similarity: float,
+    expected_max_distance: float,
+) -> None:
+    """설정한 최소 유사도가 pgvector의 cosine distance 상한으로 변환되어야 한다."""
+    captured_statements = []
+
+    class FakeEmbeddings:
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0, 0.0]
+
+    class EmptyScalarResult:
+        def all(self) -> list:
+            return []
+
+    class CapturingSession:
+        def scalars(self, statement):
+            captured_statements.append(statement)
+            return EmptyScalarResult()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "interview.evidence.store.settings.evidence_min_similarity",
+        min_similarity,
+    )
+    store = EvidenceStore(
+        backend="pgvector",
+        embedding_client=FakeEmbeddings(),
+        session_factory=CapturingSession,
+    )
+
+    results = store.query("로그인 접근 제어", k=5, user_id="user-1")
+
+    assert results == []
+    assert len(captured_statements) == 1
+    statement = captured_statements[0]
+    similarity_clause = statement._where_criteria[-1]
+    assert similarity_clause.right.value == pytest.approx(expected_max_distance)
+    assert statement._limit_clause.value == 5
 
 
 def test_embedding_batches_deduplicate_text_and_preserve_chunk_order(monkeypatch) -> None:

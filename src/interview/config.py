@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
     github_oauth_redirect_uri: str = "http://localhost:8000/api/auth/github/callback"
-    github_oauth_scope: str = "read:user repo"
+    github_oauth_scope: str = "read:user user:email repo"
     github_mcp_url: str = ""
     github_mcp_access_token: str = ""
     github_mcp_repository_tool: str = "search_repositories"
@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     evidence_llm_extract_enabled: bool = True
     evidence_store_backend: str = "pgvector"
     evidence_github_max_commits: int = 200
+    evidence_min_similarity: float = 0.30
+
     # 0이면 지원하는 모든 소스 파일을 수집한다.
     evidence_github_max_code_files: int = 0
     evidence_github_max_file_chars: int = 100000
