@@ -370,9 +370,6 @@ def _run_conflict_check(
 
     """
 
-    _ = question
-    _ = evidence_chunks
-
     if not history:
         if fallback_result is not None:
             return fallback_result.model_copy(
