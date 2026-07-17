@@ -18,6 +18,7 @@ from interview.interviewer.facade import (
     InterviewSession,
     create_session as create_interview_session,
     get_session,
+    release_session,
 )
 from interview.interviewer.session import SessionState
 from interview.interviewer.turn_completion.registry import get_voice_turn_registry
@@ -180,11 +181,12 @@ def post_event(
             runtime_session_id=session_id,
             session=session,
         )
-
-        return _session_response(
+        response = _session_response(
             state,
             result_id=result.id,
         )
+        release_session(session_id)
+        return response
 
     question_id = (
         state.current_question.question_id
@@ -243,10 +245,13 @@ def post_event(
         )
         result_id = result.id
 
-    return _session_response(
+    response = _session_response(
         state,
         result_id=result_id,
     )
+    if state.finished and result_id is not None:
+        release_session(session_id)
+    return response
 
 
 def _sync_voice_turn_after_manual_submit(
