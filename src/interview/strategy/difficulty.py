@@ -40,7 +40,8 @@ def next_difficulty(
 
     규칙(우선순위 순):
         1) 첫 질문(last_signal 없음) -> EASY
-        2) 오개념/부정 확인(MISCONCEPTION, CONFIRM_NEGATIVE) -> 한 단계 하강
+        2) 오개념/부정 확인/모름(MISCONCEPTION, CONFIRM_NEGATIVE, UNKNOWN) -> 한 단계 하강.
+           UNKNOWN("모르겠다"는 답변)도 MISCONCEPTION과 동일하게 즉시 하강시킨다
         3) EASY가 연속 _CONSECUTIVE_THRESHOLD회 -> 강제 상승 (쉬운 질문 편중 방지)
         4) 질문 수가 _MIN_QUESTIONS_BEFORE_FORCE_HARD 이상인데 HARD가
            한 번도 안 나왔으면 -> HARD로 강제 상승
@@ -59,7 +60,11 @@ def next_difficulty(
 
     current = state.asked_difficulties[-1] if state.asked_difficulties else Difficulty.EASY
 
-    if last_signal.quality in (AnswerQuality.MISCONCEPTION, AnswerQuality.CONFIRM_NEGATIVE):
+    if last_signal.quality in (
+        AnswerQuality.MISCONCEPTION,
+        AnswerQuality.CONFIRM_NEGATIVE,
+        AnswerQuality.UNKNOWN,
+    ):
         return _step_down(current)
 
     if _last_n_all_equal(state.asked_difficulties, _CONSECUTIVE_THRESHOLD, Difficulty.EASY):
