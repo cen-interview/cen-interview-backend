@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Column
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Column
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from interview.api.database import Base
@@ -98,6 +98,11 @@ class GitHubCredential(Base):
 
     github_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     github_login: Mapped[str | None] = mapped_column(String, nullable=True)
+    verified_emails: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
           DateTime,

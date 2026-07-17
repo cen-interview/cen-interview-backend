@@ -564,9 +564,14 @@ def _github_contributions_to_raw_docs(
     repo: str,
     commit_details: object,
     github_login: str | None,
+    github_verified_emails: list[str] | None = None,
 ) -> tuple[list[RawDoc], dict[str, list[str]]]:
     """검증된 사용자 commit의 추가 코드만 RawDoc과 파일 map으로 만든다."""
-    contributions = _extract_github_contributions(commit_details, github_login)
+    contributions = _extract_github_contributions(
+        commit_details,
+        github_login,
+        github_verified_emails,
+    )
     repo_name = f"{owner}/{repo}"
     docs: list[RawDoc] = []
     touched: dict[str, list[str]] = {}
@@ -610,9 +615,15 @@ def _github_contributions_to_raw_docs(
 def _extract_github_contributions(
     commit_details: object,
     github_login: str | None,
+    github_verified_emails: list[str] | None = None,
 ) -> list[_GitHubContribution]:
     """작성자 일치·비병합 commit의 patch에서 추가 코드 hunk를 추출한다."""
-    if not github_login:
+    verified_emails = {
+        email.strip().casefold()
+        for email in github_verified_emails or []
+        if isinstance(email, str) and email.strip()
+    }
+    if not github_login and not verified_emails:
         return []
 
     contributions: list[_GitHubContribution] = []
@@ -622,12 +633,25 @@ def _extract_github_contributions(
             sha = _full_sha(record.get("sha"))
             author = record.get("author")
             author_login = author.get("login") if isinstance(author, dict) else None
+            commit = record.get("commit")
+            git_author = commit.get("author") if isinstance(commit, dict) else None
+            author_email = (
+                git_author.get("email") if isinstance(git_author, dict) else None
+            )
+            login_matches = (
+                isinstance(author_login, str)
+                and isinstance(github_login, str)
+                and author_login.casefold() == github_login.casefold()
+            )
+            email_matches = (
+                isinstance(author_email, str)
+                and author_email.strip().casefold() in verified_emails
+            )
             parents = record.get("parents")
             files = record.get("files")
             if (
                 sha is None
-                or not isinstance(author_login, str)
-                or author_login.casefold() != github_login.casefold()
+                or not (login_matches or email_matches)
                 or (isinstance(parents, list) and len(parents) > 1)
                 or _looks_like_merge_commit(record)
                 or not isinstance(files, list)
@@ -1064,6 +1088,7 @@ class GitHubSource:
         self,
         repo_links: list[str],
         github_login: str | None = None,
+        github_verified_emails: list[str] | None = None,
     ) -> list[RawDoc]:
         """등록된 GitHub repository 링크를 정규화하고 RawDoc 리스트로 반환한다.
 
@@ -1084,6 +1109,7 @@ class GitHubSource:
                 owner=owner,
                 repo=repo,
                 github_login=github_login,
+                github_verified_emails=github_verified_emails,
             )
             raw_docs.extend(_github_response_to_raw_docs(response, canonical_url))
 
@@ -1093,6 +1119,7 @@ class GitHubSource:
                 repo=repo,
                 commit_details=response.get("commit_details"),
                 github_login=github_login,
+                github_verified_emails=github_verified_emails,
             )
             tree_paths = _extract_github_file_paths(response.get("tree"))
             selected_paths = _select_github_code_paths(
