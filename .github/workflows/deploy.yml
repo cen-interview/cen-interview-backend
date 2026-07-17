@@ -91,5 +91,6 @@ jobs:
             git reset --hard origin/${{ github.ref_name }}
             export IMAGE_TAG=$(echo '${{ github.ref_name }}' | tr '/' '-')
             docker compose --env-file .env.compose pull
+            docker compose --env-file .env.compose run --rm backend uv run alembic upgrade head
             docker compose --env-file .env.compose up -d
             docker image prune -f
