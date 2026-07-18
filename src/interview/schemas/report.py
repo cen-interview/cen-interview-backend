@@ -83,6 +83,9 @@ class AnswerEvaluation(BaseModel):
     question_evidence_ids: list[str] = Field(default_factory=list)
     assessment_evidence_ids: list[str] = Field(default_factory=list)
     code_analysis: list[CodeAnalysis] = Field(default_factory=list)
+    
+    # 프론트 평가 배지에 표시할 짧은 핵심어
+    feedback_keywords: list[str] = Field(default_factory=list)
 
 
 
