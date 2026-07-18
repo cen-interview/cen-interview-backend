@@ -62,6 +62,9 @@ class ReportContent(BaseModel):
     code_analysis: list[list[CodeAnalysis]] = Field(
         default_factory=list
     )
+    
+    # evaluations와 같은 순서의 문항별 키워드
+    evaluation_keywords: list[list[str]] = Field(default_factory=list)
 
 # 누적 역량과 문항별 평가를 이용해 최종 면접 리포트를 생성한다.
 def build_report(
@@ -93,12 +96,18 @@ def build_report(
             analyses = report_content.code_analysis[index]
         else:
             analyses = []
+            
+        if index < len(report_content.evaluation_keywords):
+            feedback_keywords = report_content.evaluation_keywords[index]
+        else:
+            feedback_keywords = []
 
         summarized_evaluations.append(
             evaluation.model_copy(
                 update={
                     "answer_summary": summary,
                     "code_analysis": analyses,
+                    "feedback_keywords": feedback_keywords,
                 }
             )
         )
