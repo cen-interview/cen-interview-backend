@@ -1,10 +1,6 @@
 """답변 하나를 평가하는 Assessment 내부 LangGraph 파이프라인.
 
-평가 흐름:
-    retrieve_evidence
-    → judge
-    → 충돌 의심 시 conflict_check
-    → finalize_signal
+
 
 프로젝트 질문은 Evidence를 조회해 평가하고, 기술 개념 질문은 LLM의
 기술 지식을 기준으로 평가한다. 이전 같은 topic의 답변이 있거나
@@ -20,18 +16,22 @@ from pydantic import BaseModel, Field
 
 from interview.assessment import evaluator
 from interview.assessment.evaluator import JudgeResult
-from interview.assessment.prompts import CONFLICT_CHECK_SYSTEM
 from interview.assessment.scoring import AnswerAttempt
-from interview.evidence.retrieval import search_evidence
-from interview.llm.client import get_llm
-from interview.llm.logging import log_llm_error, log_llm_output
+from interview.evidence.store import get_store
+
+from interview.llm.logging import log_llm_output
 from interview.schemas.evidence import EvidenceChunk
 from interview.schemas.question import Question, QuestionCategory
-from interview.schemas.signals import AnswerQualitySignal
+from interview.schemas.signals import (
+    AnswerQuality,
+    AnswerQualitySignal,
+    ConflictType,
+)
 from functools import lru_cache
 
-ASSESSMENT_EVIDENCE_TOP_K = 5
-ASSESSMENT_EVIDENCE_CONFIDENCE_THRESHOLD = 0.3
+import logging
+logger = logging.getLogger("uvicorn.error")
+
 
 class AssessmentState(BaseModel):
     """답변 1회 평가 과정에서 그래프 노드들이 공유하는 상태를 관리한다."""
@@ -84,10 +84,11 @@ def _build_same_topic_history_summary(history: list[AnswerAttempt]) -> str:
         for attempt in history
     )
 
-# 프로젝트 질문이면 관련 Evidence를 조회해 평가 상태에 저장한다.
-def retrieve_evidence(
+def load_question_evidence(
     state: AssessmentState,
 ) -> AssessmentState:
+    """질문 생성에 사용된 Evidence를 ID로 정확히 조회한다."""
+
     question = state.question
 
     if question is None:
@@ -97,29 +98,18 @@ def retrieve_evidence(
         state.evidence_chunks = []
         return state
 
-    search_query = (
-        f"[질문]\n{question.text}\n\n"
-        f"[지원자 답변]\n{state.answer_text}"
-    )
+    if not question.evidence_ids:
+        state.evidence_chunks = []
+        return state
 
-
-    evidence_chunks = search_evidence(
-        query=search_query,
-        topic=question.topic,
-        k=ASSESSMENT_EVIDENCE_TOP_K,
+    state.evidence_chunks = get_store().rank_chunks_by_query(
+        query_text=question.text,
+        chunk_ids=question.evidence_ids,
+        k=3,
         user_id=state.user_id,
     )
-
-    reliable_chunks = [
-        chunk
-        for chunk in evidence_chunks
-        if chunk.confidence
-        >= ASSESSMENT_EVIDENCE_CONFIDENCE_THRESHOLD
-    ]
-
-    state.evidence_chunks = reliable_chunks
+   
     return state
-
 
 # 답변을 LLM으로 1차 평가하고 JudgeResult를 상태에 저장한다.
 def judge(state: AssessmentState) -> AssessmentState:
@@ -135,6 +125,7 @@ def judge(state: AssessmentState) -> AssessmentState:
     state.same_topic_history_summary = _build_same_topic_history_summary(
     state.same_topic_history,
     )
+    
     state.judge_result = evaluator._judge_with_llm(
         question=state.question,
         answer_text=state.answer_text,
@@ -142,76 +133,30 @@ def judge(state: AssessmentState) -> AssessmentState:
         delivery_metrics=state.delivery_metrics,
         history=state.history,
     )
+    
 
     return state
 
-# 이전 답변과 Evidence를 기준으로 현재 답변의 충돌 여부를 정밀 검사한다.
-def conflict_check(state: AssessmentState) -> AssessmentState:
+def normalize_conflict(
+    state: AssessmentState,
+) -> AssessmentState:
+    """Evidence 충돌이면 다른 quality를 무시하고 부정 확인으로 확정한다."""
 
-    if state.question is None or state.judge_result is None:
+    result = state.judge_result
+
+    if result is None:
         return state
 
-    if not state.same_topic_history_summary and not state.evidence_chunks:
-        state.judge_result = state.judge_result.model_copy(
-            update={"conflict_suspected": False}
-        )
-        return state
-
-    llm = get_llm(temperature=0.0)
-    structured_llm = llm.with_structured_output(JudgeResult)
-    conflict_prompt = _build_conflict_check_prompt(state)
-    try:
-        conflict_result = structured_llm.invoke(
-            [
-                {"role": "system", "content": CONFLICT_CHECK_SYSTEM},
-                {"role": "user", "content": conflict_prompt},
-            ]
-        )
-        log_llm_output(
-            "CONFLICT_ASSESSMENT",
-            conflict_result,
-            metadata={
-                "question_id": state.question.question_id,
-                "topic": state.question.topic,
-                "question_kind": state.question.kind.value,
-                "evidence_ids": [chunk.chunk_id for chunk in state.evidence_chunks],
-                "same_topic_history_count": len(state.same_topic_history),
-            },
-            input_data={
-                "answer_text": state.answer_text,
-                "conflict_prompt": conflict_prompt,
-            },
-        )
-    except Exception as exc:
-        log_llm_error(
-            "CONFLICT_ASSESSMENT",
-            exc,
-            metadata={
-                "question_id": state.question.question_id,
-                "topic": state.question.topic,
-                "question_kind": state.question.kind.value,
-                "evidence_ids": [chunk.chunk_id for chunk in state.evidence_chunks],
-                "same_topic_history_count": len(state.same_topic_history),
-            },
-            input_data={
-                "answer_text": state.answer_text,
-                "conflict_prompt": conflict_prompt,
-            },
-        )
-        raise
-
-    if conflict_result.conflict_suspected:
-        state.judge_result = conflict_result.model_copy(
+    if result.conflict_type == ConflictType.EVIDENCE_CONFLICT:
+        state.judge_result = result.model_copy(
             update={
-                "delivery_note": state.judge_result.delivery_note,
+                "quality": AnswerQuality.CONFIRM_NEGATIVE,
+                "conflict_suspected": False,
             }
         )
-    else:
-        state.judge_result = state.judge_result.model_copy(
-            update={"conflict_suspected": False}
-        )
 
     return state
+
 
 # 최종 JudgeResult를 Interviewer가 사용할 AnswerQualitySignal로 변환한다.
 def finalize_signal(state: AssessmentState) -> AssessmentState:
@@ -245,40 +190,73 @@ def finalize_signal(state: AssessmentState) -> AssessmentState:
 
     return state
 
-# 1차 평가 결과에 따라 충돌 검사 노드를 실행할지 결정한다.
-def route_after_judge(state: AssessmentState) -> str:
-
+def route_after_judge(
+    state: AssessmentState,
+) -> str:
     if (
-        state.judge_result is not None
-        and state.judge_result.conflict_suspected
+        state.question is not None
+        and state.question.category == QuestionCategory.PROJECT
     ):
-        return "conflict_check"
+        return "normalize_conflict"
 
     return "finalize_signal"
 
+def route_by_category(
+    state: AssessmentState,
+) -> str:
+    if (
+        state.question is not None
+        and state.question.category == QuestionCategory.PROJECT
+    ):
+        return "load_question_evidence"
+
+    return "judge"
 # 답변 평가 노드와 조건부 경로를 연결한 Assessment 그래프를 구성한다.
 def build_assessment_graph():
-
     from langgraph.graph import END, START, StateGraph
 
     graph = StateGraph(AssessmentState)
-    graph.add_node("retrieve_evidence", retrieve_evidence)
+
+    graph.add_node(
+        "load_question_evidence",
+        load_question_evidence,
+    )
     graph.add_node("judge", judge)
-    graph.add_node("conflict_check", conflict_check)
     graph.add_node("finalize_signal", finalize_signal)
 
-    graph.add_edge(START, "retrieve_evidence")
-    graph.add_edge("retrieve_evidence", "judge")
+    graph.add_conditional_edges(
+        START,
+        route_by_category,
+        {
+            "load_question_evidence": "load_question_evidence",
+            "judge": "judge",
+        },
+    )
+
+    graph.add_edge(
+        "load_question_evidence",
+        "judge",
+    )
+    graph.add_node(
+        "normalize_conflict",
+        normalize_conflict,
+    )
     graph.add_conditional_edges(
         "judge",
         route_after_judge,
         {
-            "conflict_check": "conflict_check",
+            "normalize_conflict": "normalize_conflict",
             "finalize_signal": "finalize_signal",
         },
     )
-    graph.add_edge("conflict_check", "finalize_signal")
-    graph.add_edge("finalize_signal", END)
+    graph.add_edge(
+        "normalize_conflict",
+        "finalize_signal",
+    )
+    graph.add_edge(
+        "finalize_signal",
+        END,
+    )
 
     return graph
 
@@ -288,33 +266,4 @@ def get_compiled_graph():
 
     return build_assessment_graph().compile()
 
-# 충돌 검사 LLM에 전달할 질문·답변·이력·Evidence 프롬프트를 생성한다.
-def _build_conflict_check_prompt(state: AssessmentState) -> str:
-    return f"""
-[현재 질문]
-question_id: {state.question.question_id}
-topic: {state.question.topic}
-category: {state.question.category}
-kind: {state.question.kind}
-difficulty: {state.question.difficulty}
 
-질문:
-{state.question.text}
-
-[현재 답변]
-{state.answer_text}
-
-[같은 topic의 이전 답변 이력]
-{state.same_topic_history_summary or "(없음)"}
-
-[Evidence]
-{evaluator._build_evidence_context(state.question, state.evidence_chunks)}
-
-[1차 judge 결과]
-quality: {state.judge_result.quality}
-next_probe_target: {state.judge_result.next_probe_target}
-rationale: {state.judge_result.rationale}
-accuracy: {state.judge_result.accuracy}
-sufficiency: {state.judge_result.sufficiency}
-
-"""

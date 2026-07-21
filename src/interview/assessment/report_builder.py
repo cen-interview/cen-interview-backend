@@ -20,12 +20,18 @@ from pydantic import BaseModel, Field
 
 from interview.schemas.report import (
     AnswerEvaluation,
+    CodeAnalysis,
     CompetencyModel,
     FinalReport,
 )
 from interview.assessment.prompts import REPORT_SYSTEM_PROMPT
 from interview.llm.client import get_llm
 from interview.llm.logging import log_llm_error, log_llm_output
+from interview.schemas.evidence import EvidenceChunk
+from interview.schemas.question import QuestionCategory
+
+EVIDENCE_MAX_CHUNKS = 3
+EVIDENCE_MAX_CHARS_PER_CHUNK = 2000
 
 class ReportContent(BaseModel):
     """LLM 또는 임시 로직이 생성하는 최종 리포트 본문 내용.
@@ -51,12 +57,22 @@ class ReportContent(BaseModel):
     learning_recommendations: list[str] = Field(default_factory=list)
     
     evaluation_summaries: list[str] = Field(default_factory=list)
+    # evaluations와 같은 순서의 문항별 코드 분석
+    # 바깥 list는 문항, 안쪽 list는 해당 문항의 코드 분석 목록
+    code_analysis: list[list[CodeAnalysis]] = Field(
+        default_factory=list
+    )
+    
+    # evaluations와 같은 순서의 문항별 키워드
+    evaluation_keywords: list[list[str]] = Field(default_factory=list)
 
 # 누적 역량과 문항별 평가를 이용해 최종 면접 리포트를 생성한다.
 def build_report(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
+    evidence_chunks: dict[str, EvidenceChunk] | None = None,
 ) -> FinalReport:
+    evidence_chunks = evidence_chunks or {}
 
 
     overall_score = _calculate_overall_score(evaluations)
@@ -65,17 +81,36 @@ def build_report(
         competency=competency,
         evaluations=evaluations,
         overall_score=overall_score,
+        evidence_chunks = evidence_chunks,
     )
     
-    summarized_evaluations = [
-        evaluation.model_copy(
-            update={"answer_summary": summary}
+    summarized_evaluations: list[AnswerEvaluation] = []
+
+    for index, evaluation in enumerate(evaluations):
+        if index < len(report_content.evaluation_summaries):
+            summary = report_content.evaluation_summaries[index]
+        else:
+            summary = evaluation.answer_summary
+
+        if index < len(report_content.code_analysis):
+            analyses = report_content.code_analysis[index]
+        else:
+            analyses = []
+            
+        if index < len(report_content.evaluation_keywords):
+            feedback_keywords = report_content.evaluation_keywords[index]
+        else:
+            feedback_keywords = []
+
+        summarized_evaluations.append(
+            evaluation.model_copy(
+                update={
+                    "answer_summary": summary,
+                    "code_analysis": analyses,
+                    "feedback_keywords": feedback_keywords,
+                }
+            )
         )
-        for evaluation, summary in zip(
-            evaluations,
-            report_content.evaluation_summaries,
-        )
-    ]
 
     return FinalReport(
         summary=report_content.summary,
@@ -101,12 +136,61 @@ def _calculate_overall_score(
     )
 
     return round(score_sum / len(evaluations), 0)
+def _normalize_code_analysis_output(
+    content: ReportContent,
+    evaluations: list[AnswerEvaluation],
+    evidence_chunks: dict[str, EvidenceChunk],
+) -> ReportContent:
+    """Evidence가 있는 PROJECT 문항의 코드 분석만 유지한다."""
 
+    normalized_rows: list[list[CodeAnalysis]] = []
+
+    for index, evaluation in enumerate(evaluations):
+        has_project_evidence = (
+            evaluation.question_category
+            == QuestionCategory.PROJECT
+            and bool(
+                _matched_evidence_chunks(
+                    evaluation,
+                    evidence_chunks,
+                )
+            )
+        )
+
+        if not has_project_evidence:
+            normalized_rows.append([])
+            continue
+
+        analyses = (
+            content.code_analysis[index]
+            if index < len(content.code_analysis)
+            else []
+        )
+
+        normalized_rows.append([
+            analysis.model_copy(
+                update={
+                    "current_code": analysis.current_code[
+                        :EVIDENCE_MAX_CHARS_PER_CHUNK
+                    ],
+                    "compatibility_status": "not_evaluated",
+                    "references": [],
+                }
+            )
+            for analysis in analyses
+        ])
+
+    return content.model_copy(
+        update={
+            "code_analysis": normalized_rows,
+        }
+    )
 # LLM으로 리포트 본문을 생성하고 실패하면 폴백 내용을 반환한다.
 def _build_content_with_llm(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
     overall_score: float,
+    evidence_chunks: dict[str, EvidenceChunk],
 ) -> ReportContent:
 
 
@@ -120,6 +204,7 @@ def _build_content_with_llm(
             competency=competency,
             evaluations=evaluations,
             overall_score=overall_score,
+            evidence_chunks=evidence_chunks,
         )
 
         result = structured_llm.invoke(
@@ -128,6 +213,11 @@ def _build_content_with_llm(
                 {"role": "user", "content": user_prompt},
             ]
         )
+        result = _normalize_code_analysis_output(
+            content=result,
+            evaluations=evaluations,
+            evidence_chunks=evidence_chunks,
+            )
         log_llm_output(
             "FINAL_REPORT_GENERATION",
             result,
@@ -180,12 +270,67 @@ def _select_topics_to_improve(
         misconception_topics + low_score_topics
     )
 
+def _matched_evidence_chunks(
+    evaluation: AnswerEvaluation,
+    evidence_chunks: dict[str, EvidenceChunk],
+) -> list[EvidenceChunk]:
+    """문항 생성 또는 답변 평가에 실제 사용된 Evidence를 반환한다."""
+
+    evidence_ids = list(
+        dict.fromkeys(
+            evaluation.assessment_evidence_ids
+            + evaluation.question_evidence_ids
+        )
+    )
+
+    return [
+        evidence_chunks[evidence_id]
+        for evidence_id in evidence_ids
+        if evidence_id in evidence_chunks
+    ]
+    
+def _build_evidence_context(
+    evaluation: AnswerEvaluation,
+    evidence_chunks: dict[str, EvidenceChunk],
+) -> str:
+    """PROJECT 문항에 연결된 Evidence 원문을 프롬프트로 만든다."""
+
+    if evaluation.question_category != QuestionCategory.PROJECT:
+        return "(기술 질문 — 코드 Evidence 분석 대상 아님)"
+
+    matched_chunks = _matched_evidence_chunks(
+        evaluation,
+        evidence_chunks,
+    )[:EVIDENCE_MAX_CHUNKS]
+
+    if not matched_chunks:
+        return "(PROJECT 질문이지만 확보된 Evidence 원문 없음)"
+
+    rendered_chunks: list[str] = []
+
+    for chunk in matched_chunks:
+        code = chunk.text[:EVIDENCE_MAX_CHARS_PER_CHUNK]
+
+        rendered_chunks.append(
+            (
+                f"- chunk_id: {chunk.chunk_id}\n"
+                f"  source_file: {chunk.file_path or '(없음)'}\n"
+                f"  language: {chunk.language or '(없음)'}\n"
+                f"  topic: {chunk.topic}\n"
+                f"  code:\n{code}"
+            )
+        )
+
+    return "\n".join(rendered_chunks)
+
 # 역량 상태와 문항별 평가를 최종 리포트 생성 프롬프트로 변환한다.
 def _build_report_user_prompt(
     competency: CompetencyModel,
     evaluations: list[AnswerEvaluation],
     overall_score: float,
+    evidence_chunks: dict[str, EvidenceChunk] | None = None,
 ) -> str:
+    evidence_chunks = evidence_chunks or {}
     topics_to_improve = _select_topics_to_improve(
         competency=competency,
         evaluations=evaluations,
@@ -198,18 +343,32 @@ def _build_report_user_prompt(
             trace.model_dump(mode="json")
             for trace in evaluation.quality_trace
         ]
+        category = (
+            evaluation.question_category.value
+            if evaluation.question_category is not None
+            else "unknown"
+            )
+
+        evidence_context = _build_evidence_context(
+            evaluation,
+            evidence_chunks,
+        )
 
         evaluation_lines.append(
             (
                 f"[문항 {index}]\n"
                 f"question_id: {evaluation.question_id}\n"
                 f"topic: {evaluation.topic}\n"
+                f"question_category: {category}\n"
                 f"question: {evaluation.question}\n"
+                f"question_evidence_ids: {evaluation.question_evidence_ids}\n"
+                f"assessment_evidence_ids: {evaluation.assessment_evidence_ids}\n"
                 f"answer_summary: {evaluation.answer_summary}\n"
                 f"score: {evaluation.score}\n"
                 f"comment: {evaluation.comment}\n"
                 f"delivery_note: {evaluation.delivery_note or '(없음)'}\n"
-                f"quality_trace: {quality_trace}"
+                f"quality_trace: {quality_trace}\n"
+                f"evidence:\n{evidence_context}"
             )
         )
 

@@ -25,13 +25,45 @@ from __future__ import annotations
 
 
 from pydantic import BaseModel, Field
-
+from interview.schemas.question import QuestionCategory
 
 class QualityTrace(BaseModel):
     question_kind: str
     quality: str
     target: str | None = None
     rationale: list[str] = Field(default_factory=list)
+    
+class CodeAnalysis(BaseModel):
+    """PROJECT 질문의 Evidence를 기반으로 생성한 코드 분석."""
+
+    # 분석 대상 기술 또는 코드 주제
+    topic: str
+
+    # Evidence가 추출된 실제 파일 경로
+    source_file: str | None = None
+
+    # Evidence에 포함된 현재 프로젝트 코드
+    current_code: str
+
+    # 현재 코드의 역할과 상태에 대한 설명
+    code_assessment: str
+
+    # 사용자의 답변 상태
+    # 예: answered, partially_answered, unknown, misconception
+    answer_status: str
+
+    # 질문에 답할 때 포함했어야 하는 핵심 내용
+    expected_answer: str
+
+    # 외부 최신 문서를 사용하지 않으므로 기본값 고정
+    compatibility_status: str = "not_evaluated"
+
+
+    # 현재 코드 또는 답변에서 개선할 부분
+    improvement_reason: str
+
+    # 외부 레퍼런스를 사용하지 않으므로 빈 목록
+    references: list[str] = Field(default_factory=list)
     
 class AnswerEvaluation(BaseModel):
     # 질문 정보
@@ -46,6 +78,14 @@ class AnswerEvaluation(BaseModel):
     delivery_note: str | None = None
     
     quality_trace: list[QualityTrace] = Field(default_factory=list)
+    # 프론트에 전달할 코드 분석
+    question_category: QuestionCategory | None = None
+    question_evidence_ids: list[str] = Field(default_factory=list)
+    assessment_evidence_ids: list[str] = Field(default_factory=list)
+    code_analysis: list[CodeAnalysis] = Field(default_factory=list)
+    
+    # 프론트 평가 배지에 표시할 짧은 핵심어
+    feedback_keywords: list[str] = Field(default_factory=list)
 
 
 

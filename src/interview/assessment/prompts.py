@@ -26,6 +26,9 @@ JUDGE_SYSTEM = """\
 - 관련 내용이 맞지만 부족하면 bonus_available을 사용한다.
 - 틀린 설명은 misconception, 모른다는 답변은 unknown으로 구분한다.
 - project 답변이 Evidence와 충돌할 때만 evidence conflict를 판단한다.
+- 답변의 충분성은 질문에 명시적으로 요구된 내용만 기준으로 판단한다.
+- Evidence에 추가 필드나 개념이 등장하더라도 질문에서 요구하지 않았다면 답변 누락으로 판단하지 않는다.
+- Evidence는 답변의 사실 확인에만 사용하고, 질문에 없는 평가 요구사항을 새로 만들지 않는다.
 
 [출력]
 - 지정된 JSON 스키마만 반환한다.
@@ -126,10 +129,16 @@ REPORT_SYSTEM_PROMPT = """\
 - 오개념, 보완 과정, 충분한 답변으로의 전환을 반영한다.
 
 [코드 분석]
-- PROJECT 질문이며 Evidence가 있을 때만 code_analysis를 작성한다.
+- code_analysis 바깥 배열은 evaluations와 같은 순서와 길이로 작성한다.
+- 각 바깥 배열 항목은 해당 문항의 코드 분석 목록이다.
+- TECHNICAL 질문이거나 Evidence가 없는 문항은 해당 위치에 빈 배열을 작성한다.
+- PROJECT 질문이며 Evidence가 있는 문항만 code_analysis를 작성한다.
 - Evidence의 실제 코드만 사용하고 서로 다른 파일을 합치지 않는다.
+- current_code는 제공된 Evidence 코드에서만 가져온다.
+- source_file은 Evidence의 file_path가 있을 때만 작성한다.
+- Evidence에 없는 파일 경로나 코드를 추측하지 않는다.
 - 외부 문서, 최신 구현, Evidence에 없는 코드를 만들지 않는다.
-- compatibility_status="not_evaluated", modern_code=null, references=[]로 둔다.
+- compatibility_status="not_evaluated", references=[]로 둔다.
 - 비밀정보는 출력하지 않는다.
 
 [Rubric]
@@ -144,4 +153,21 @@ REPORT_SYSTEM_PROMPT = """\
 - 답변 문장 수가 아니라 핵심 개념 포함 여부를 기준으로 작성한다.
 - 허용된 질문이 없으면 빈 배열을 반환한다.
 - 모든 사용자 노출 문장은 Markdown 없이 간결하게 작성한다.
+
+
+[문항별 평가 키워드]
+- evaluation_keywords는 evaluations와 같은 순서와 길이로 작성한다.
+- 각 문항마다 평가 핵심을 나타내는 키워드를 1~3개 작성한다.
+- 각 키워드는 15자 이내의 짧은 명사형 문구로 작성한다.
+- 완전한 문장이나 마침표를 사용하지 않는다.
+- 입력의 quality_trace와 comment에 없는 평가를 새로 만들지 않는다.
+
+좋은 예:
+["최근 대화 정렬", "조회 성능 개선", "확장성 고려"]
+
+나쁜 예:
+["최근 메시지 시간을 별도로 저장한 이유를 정확하게 설명했습니다."]
+
 """
+
+
